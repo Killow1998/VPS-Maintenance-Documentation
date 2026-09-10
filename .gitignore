@@ -1,0 +1,15 @@
+# Publish only the reviewed documentation and templates below.
+*
+!.gitignore
+!.gitattributes
+!README.md
+!docs/
+docs/*
+!docs/01-vultr-purchase.md
+!docs/02-xboard-deploy.md
+!docs/03-google-scholar.md
+!docs/04-operations.md
+!templates/
+templates/*
+!templates/scholar-nat64.json
+!templates/xboard-subscribe.nginx.conf

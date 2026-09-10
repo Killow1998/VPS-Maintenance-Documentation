@@ -1,0 +1,28 @@
+{
+  "dns": {
+    "servers": [
+      {"type": "local", "tag": "system-dns"},
+      {
+        "type": "udp",
+        "tag": "scholar-dns64",
+        "server": "2a00:1098:2b::1",
+        "server_port": 53
+      }
+    ],
+    "final": "system-dns",
+    "independent_cache": true
+  },
+  "route": {
+    "default_domain_resolver": "system-dns"
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "nat64-scholar",
+      "domain_resolver": {
+        "server": "scholar-dns64",
+        "strategy": "ipv6_only"
+      }
+    }
+  ]
+}
