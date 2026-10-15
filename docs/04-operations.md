@@ -61,7 +61,7 @@ PY
 | 订阅更新失败 | 直连订阅端点、HTTP 状态、nginx、token、返回格式 | 一定是节点内核问题 |
 | 更新后 `proxies: []` | 用户权限、额度、过滤参数、User-Agent、模板 | 随意增加格式参数一定有效 |
 | 代理组循环报错 | 各组实际引用列表，组是否包含自身 | 重装客户端会修好错误 YAML |
-| 所有用户同时 timeout | 同一时段端口、节点日志、OOM、出口、控制通道 | 一定是晚高峰或某一种内核有 bug |
+| 所有用户同时 timeout | 同一时段端口、节点日志、OOM、出口、控制通道；透明反代还需查回包策略路由 | 一定是晚高峰或某一种内核有 bug |
 | 只有一个设备出错 | 本机代理端口、覆盖配置、TUN、浏览器扩展、有效规则 | 一定要换服务器 |
 | TUN 开启后失联 | 节点/订阅地址直连、路由回环、DNS bootstrap | 加更多 DoH 就一定不会泄漏 |
 | DIRECT 测速红色，代理正常 | 测速 URL 是否直连可达，再测普通国内站点 | 直连网络整体不可用 |
@@ -81,6 +81,83 @@ df -h /
 ```
 
 日志可能包含 IP、域名、用户标识或 token。公开提问时只提供脱敏后的相关错误，不整段上传 `.env`、订阅 YAML、数据库或连接日志。
+
+### 3.1 透明反代：服务正常但外部全部 Timeout
+
+**适用范围**：已有 nginx stream 入口使用 `proxy_bind $remote_addr transparent`，将外部连接转发给本机回环后端，并通过策略路由接回后端响应。本节不是新的 443 共用安装教程；节点直接监听公网 443、普通 HTTP 反代或非 networkd 管理的系统，不要照搬。
+
+典型故障表现是 SSH 可达、443 能建立 TCP 连接、本机节点健康检查成功，但真实客户端仍超时。nginx 透明源地址绑定需要配套内核回包路由，监听正常不等于完整转发路径正常，参见 [nginx 官方 proxy_bind 说明](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_bind)。
+
+一次维护案例中，两条回包规则缺失，而专用表中的 local 路由仍存在；仅恢复原规则后，两个外部代理探测恢复。故障前发生过自动更新及网络服务重启，但没有历史规则删除审计，不能把具体删除进程说成已直接取证。未发现资源或配额耗尽，也不能据此将其他 Timeout 一律归入此原因。
+
+先核对以下只读信息；`MAIN_INTERFACE` 是实际网卡名，表号 `1443` 仅对应下方示例，其他部署需替换：
+
+```bash
+systemd --version
+systemctl is-active systemd-networkd
+networkctl status MAIN_INTERFACE --no-pager
+ip -4 rule show
+ip -4 route show table 1443
+systemctl show ROUTE_SETUP_UNIT -p ActiveState -p SubState -p ActiveEnterTimestamp
+journalctl -u systemd-networkd --since '30 minutes ago' --no-pager
+```
+
+`ROUTE_SETUP_UNIT` 是该机器已有的路由初始化 unit。查看其定义以及 nginx 的依赖，并与 apt 历史、故障时间对照。若初始化是 `Type=oneshot`、`RemainAfterExit=yes`，其 active/exited 只说明以前执行过；内核规则后来丢失时，nginx 的 `Requires=` / `After=` 不会自动重新执行已完成的初始化。
+
+systemd 255 的 `ManageForeignRoutingPolicyRules=yes` 是默认值，会清理未声明于 `.network` 配置的非 kernel 协议规则。因此仅用一次 `ip rule add` 加规则，再保证开机先运行，不足以覆盖运行期间的网络服务重启。版本与行为以目标机为准，参见 [systemd v255 官方 networkd.conf 文档源](https://github.com/systemd/systemd/blob/v255/man/networkd.conf.xml)。
+
+### 3.2 将必要规则纳入网络管理器配置
+
+先恢复访问，再单独验收持久化。恢复时优先使用该机器已审阅、可重复执行的路由恢复脚本，只补缺失项，不清空规则或路由表，不同时更换 DNS、SNI、密钥和内核。
+
+对于上述 networkd 场景，先从 `networkctl status` 的 `Network File` 确定实际生效文件，例如 `/run/systemd/network/10-example.network`。在 `/etc/systemd/network/10-example.network.d/90-transparent-return.conf` 添加 drop-in；`10-example.network` 必须换成实际文件的同名 basename。不要直接修改 `/run` 下的生成文件，也不要用新的宽泛匹配配置接管所有接口。
+
+下面是**示例拓扑**的完整规则段：后端源地址为 `127.0.0.1`，两个 TCP 源端口分别为 `1443` / `9443`，专用表号 `1443`、优先级 `1441` 已确认无冲突。部署时逐项核对，不把示例数字当作所有服务器的固定值：
+
+```ini
+[RoutingPolicyRule]
+From=127.0.0.1/32
+IPProtocol=tcp
+SourcePort=1443
+Table=1443
+Priority=1441
+
+[RoutingPolicyRule]
+From=127.0.0.1/32
+IPProtocol=tcp
+SourcePort=9443
+Table=1443
+Priority=1441
+```
+
+drop-in 合并规则和字段含义见 [systemd v255 官方 systemd.network 文档源](https://github.com/systemd/systemd/blob/v255/man/systemd.network.xml)。这段仅声明 policy rules，不会自动创建表中的 `local 0.0.0.0/0 dev lo` 路由，也不负责防火墙。保留并独立验证已有的开机路由初始化和内部端口保护；若本机路由也会被网络管理器清理，需为其另行设计持久化，不能只验收两条规则。
+
+不要为了局部规则丢失而直接全局关闭 foreign rule/route 清理或关闭自动安全更新。也不要随意改动 DHCP、公网地址、默认网关或原本未受管理的 loopback。此例仅验证 IPv4；不能据此新增 AAAA 记录或宣称 IPv6 已可用。
+
+### 3.3 备份、失联回滚和真实验收
+
+网络服务重启可能导致当前 SSH / 代理连接中断，必须先取得授权，并准备服务商控制台等独立救援入口。
+
+1. 在仓库外、权限为 0700 的私有目录备份已有 drop-in、主网络文件、恢复脚本和规则/路由/接口地址快照；不存在的旧文件要明确记录为“不存在”。记录新配置哈希，不覆盖其他应用配置。
+2. 准备并审阅本机回滚脚本：只恢复本次修改的文件，原来不存在则只移除本次新增文件；校验哈希，防止覆盖变更后他人又做的修改。随后有界等待 networkd reload，即使 reload 失败也应尝试已知可用的临时规则恢复。
+3. 安装配置前启动独立于 SSH 会话的本机延时回滚任务，并确认 timer 正在等待。五分钟是示例窗口，部署前按预计验收时长设置；不得为了省事在测试前取消。回滚不能保证救回所有网络故障，控制台入口仍需保留。
+4. 安装 drop-in 后运行 `networkctl reload`，检查日志是否有未知字段或配置错误；核对每条规则的源地址、协议、源端口、表号和优先级，确保没有重复或遗漏。
+5. 在授权窗口执行一次真实 `systemctl restart systemd-networkd`，重新连入后检查规则、local 路由、网络服务及 SSH。对比公网地址和默认网关未变，不把只 reload 或语法通过当作 restart 验收。
+6. 从外部设备明确使用目标节点访问两个独立的小型 HTTPS 测试端点；避免测试不知当前选中哪个节点的策略组。再检查 HTTPS 订阅入口。根路径返回预设 404 可证明相应 TLS/入口可达，但不是带 token 的订阅下载成功；真实订阅需在私有环境另测返回格式、节点和规则。
+7. 所有验收通过后才停止本次 rollback timer，确认它没有执行，保留私有备份与手动回滚方法。若失败，按预案回滚并重新测外部请求；不要顺手修改用户配额或重置数据库。
+
+下面仅展示延时回滚的命令形态，**不是现成回滚脚本**。先实现并审阅脚本，再将大写占位符替换为本次私有备份路径和唯一 unit 名；实际凭据与路径不回填到本仓库：
+
+```bash
+systemd-run --unit=ROUTE_ROLLBACK_UNIT --on-active=5m \
+  /bin/sh /PRIVATE_BACKUP_DIR/rollback.sh /PRIVATE_BACKUP_DIR
+systemctl list-timers --all ROUTE_ROLLBACK_UNIT.timer
+# Only after external acceptance:
+systemctl stop ROUTE_ROLLBACK_UNIT.timer
+systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimestamp
+```
+
+**已验证的边界**：2026-10-14 维护案例在 Ubuntu 24.04 / systemd 255 上实际重启 networkd 后，两条规则仍在，外部两个节点探测成功；接口地址、默认网关不变，未重启节点或 nginx。该案例没有执行整机重启、全新 VPS 重装或长时间可靠性测试，不能将这些状态写为“已通过”。
 
 ## 4. 计量与每月重置
 
