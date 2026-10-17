@@ -292,6 +292,26 @@ Codex 和 ChatGPT 相关请求不能只靠一个 `codex` 关键词覆盖；应�
 
 DNS 设置按实际 Mihomo / 客户端版本验证。加密 DoH 并不自动等于经代理；节点域名的 bootstrap 解析也不能依赖尚未建立的节点本身。保持国内资源直连所需的解析路径，分开测试国内网页、AI 服务和 DNS 出口，不一口气替换全部解析器再归因于服务器。
 
+### 通用 DNS 分流
+
+对于 Mihomo，推荐将直连解析与代理解析分开。在已有 `dns` 中合并以下字段，并保留独立的节点启动解析：
+
+```yaml
+dns:
+  respect-rules: true
+  direct-nameserver:
+    - https://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
+  direct-nameserver-follow-policy: false
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
+```
+
+这些是要合并的字段，不能替换完整 DNS 配置。`direct-nameserver` 服务于已匹配 DIRECT 的域名；其他初始解析仍需可用的 `nameserver` / `fallback` / policy。`respect-rules` 让 DNS 连接遵循路由规则，因此必须确认境外 DNS 的域名或 IP 实际匹配代理，而节点启动解析可直连；不要把“开启开关”等同于所有 DNS 自动出境。两个示例 DoH 需从实际客户端网络验证，见 [Mihomo 官方字段说明](https://wiki.metacubex.one/config/dns/)。
+
+这可处理国内网站采用海外 CDN、被地理筛选送往不可达备用 DNS 的一类问题，优先于不断追加单站例外。修改 XBoard 持久订阅模板时使用该版本的模型/API并失效缓存；更新订阅后检查客户端有效配置及 DNS 覆写。用冷启动旧/新配置对照，分别测试国内 DIRECT 网站、海外代理站点和节点启动，不接受仅一次缓存恢复作为验收。
+
 ## 11. 发布完整订阅链接
 
 无域名的基线地址形态：
