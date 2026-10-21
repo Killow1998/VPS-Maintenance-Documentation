@@ -12,9 +12,20 @@
 
 发布入口：[GitHub Releases](https://github.com/Killow1998/VPS-Maintenance-Documentation/releases)。只有出现该 tag 且校验、烟测报告均通过后才算已发布。构建中的 Actions 或仓库里有 Dockerfile，不等于已经有可用镜像。
 
+**2026-10-21 已发布并完成匿名取回验证**：[此版本 Release](https://github.com/Killow1998/VPS-Maintenance-Documentation/releases/tag/xboard-clean-20261021-81dd561-php8.2.35-amd64)，[成功的构建与门禁](https://github.com/Killow1998/VPS-Maintenance-Documentation/actions/runs/39653120625)。全新安装、管理员页面与三个静态资源、登录、空节点订阅、Horizon 和 SQLite 完整性检查均通过；逐层检查 23 层、13847 个文件前缀，无剩余门禁命中。新安装启动在 CI 上约 5.8 秒，不是生产负载或所有主机的启动保证。
+
 ## 2. 新 VPS 使用已构建镜像
 
-优先使用 Release 的公开归档，不要求 VPS 自行编译。选择与 `inputs.json` 对应的明确版本，不盲目使用 `/latest`。
+此版本已用空 Docker 认证目录验证实际匿名拉取，优先使用下列固定 digest，不要求 VPS 自行编译或提供 GitHub PAT：
+
+```bash
+docker pull ghcr.io/killow1998/xboard-clean@sha256:b0e5ecbaeb1cf15a95ed9aa348b66794308287a09ed9ff7bde5e1f20e9fa03fd
+export XBOARD_IMAGE='ghcr.io/killow1998/xboard-clean@sha256:b0e5ecbaeb1cf15a95ed9aa348b66794308287a09ed9ff7bde5e1f20e9fa03fd'
+```
+
+可读 tag 为 `ghcr.io/killow1998/xboard-clean:20261021-81dd561-php8.2.35-amd64`；部署固定 digest 更明确。镜像未初始化，拉取并不创建用户、节点或开放端口，之后仍须按主教程配置私有数据和本机面板。
+
+注册表不可达时，使用该 Release 的公开归档作为备用。选择与 `inputs.json` 对应的明确版本，不盲目使用 `/latest`。
 
 下载该 Release 中的：
 
@@ -31,11 +42,20 @@ sha256sum --check --ignore-missing SHA256SUMS
 docker load --input xboard-clean-linux-amd64.tar.gz
 ```
 
-确认实际镜像的 image ID 与该 Release 的 `manifest.json` 一致，并检查 PHP，而不是只相信文件名。校验和不能替代可信发布来源或签名；本流程没有宣称完成签名/第三方认证。
+继续核对镜像身份与实际 PHP，而不是只相信文件名。Docker 的不同镜像存储实现可能分别以 config digest 或 OCI manifest digest 显示 image ID，不能只比较一个字符串，也不能因此跳过检查。可使用仓库的[跨存储验证脚本](../scripts/verify-clean-image.py)，传入已校验的镜像归档和 `manifest.json`：它会加载镜像，检查归档中的 config/manifest 摘要、RootFS diff IDs、入口/环境等运行配置，并离线启动 PHP 确认版本及未初始化状态。路径按本机仓库位置填写：
+
+```bash
+python3 /PATH/TO/REPOSITORY/scripts/verify-clean-image.py \
+  xboard-clean-linux-amd64.tar.gz manifest.json
+```
+
+校验和不能替代可信发布来源或签名；本流程没有宣称完成签名/第三方认证。
 
 Release 中的镜像保留其具体 GHCR tag，加载后该 tag 可在本机使用，无需注册表登录。将它设为 `XBOARD_IMAGE`，按 [Compose 参考条件](05-xboard-solution.md#compose-参考的使用条件)和首次安装流程初始化新的 SQLite、Redis 与管理员。不要使用别人初始化后的 `.env` 或数据库。
 
 GHCR 推送状态见 Release 的 `registry-status.json`。推送成功不等于允许匿名拉取；GitHub 新包可能默认私有，见[官方说明](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。匿名访问验证通过前，不把 `docker pull` 当作唯一安装途径。公开 Release 归档不依赖包的可见性。
+
+本次独立取回的镜像归档为 **145069685 bytes**，SHA-256 为 `14bfec1a8e0caa8b1b6f7ca23cfe2f609d3e9f7a2fdd8cb9a86167b93e1a1b44`。CI config digest 为 `sha256:f991acc62d6b8200d0b1fe9539710c86ddefefd43d6dc9fe355c7dfba8cbbb5c`；Docker 29 加载归档后显示的 OCI manifest digest 为 `sha256:2064b827996874e25c03442f97cb8f7567ef7f5bc228e9c1f4ca01911e6de61f`。两者已通过归档关联、RootFS 和运行配置验证，注册表的压缩 manifest digest 则为上面的 `b0e5...`；三种摘要不能混为同一个字段。独立运行确认 PHP 8.2.35、Swoole 6.2.3，镜像中没有真实 `.env` 或应用数据库。
 
 ## 3. 构建、测试和发布机制
 
@@ -77,10 +97,12 @@ python3 build/xboard/package.py "$work"
 
 ```text
 先读取本仓库 docs/06-clean-xboard-image.md 和 inputs.json。
-新 VPS 优先下载明确版本 Release 中已构建的 Linux/amd64 镜像，
-验证 SHA256SUMS 与 manifest 的 image ID，再 Docker load；不要重新编译。
+新 VPS 优先匿名拉取本页给出的固定 GHCR digest（Linux/amd64），不要重新编译。
+注册表不可达时下载对应 Release，验证 SHA256SUMS，使用跨存储验证脚本
+核对归档/加载身份和运行版本，再继续初始化；不要只比较 image ID 字符串。
 只有镜像过时、不兼容或明确要求重建时，才在资源充足机器限额构建。
-不要假设 GHCR 可匿名拉取，失败时使用公开 Release，不索取用户 PAT。
+此版本的匿名 Docker 拉取已实测；其他版本重新验证，失败时用公开 Release，
+不要索取用户 PAT。
 镜像没有管理员、节点或用户；按部署教程独立初始化和生成私有凭据。
 订阅规则由 XBoard 发布，客户端得到链接，不导入公开片段文件。
 已有服务器不得直接套用新应用镜像；先备份并检查迁移及兼容性。

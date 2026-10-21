@@ -36,3 +36,6 @@ build/xboard/*
 !.github/workflows/
 .github/workflows/*
 !.github/workflows/clean-xboard.yml
+!scripts/
+scripts/*
+!scripts/verify-clean-image.py

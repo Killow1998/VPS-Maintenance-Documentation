@@ -87,3 +87,5 @@ Scholar 原生配置有明确版本边界，见专项文档。升级前先核对
 2026-10-21 方案整理：[XBoard 参考包](docs/05-xboard-solution.md)补齐四条链路、完整单服务 Compose、DNS/AI 规则片段、可选共用 443 的边界及 Agent 交接请求。模板经结构检查；它们不是已在新 VPS 上重跑完的自动安装器。
 
 2026-10-21 镜像构建：[固定源码的干净构建与公开发布](docs/06-clean-xboard-image.md)，新增限额构建配方、新安装烟测、逐层秘密/数据检查和发布工作流。不使用生产快照；以实际 Release 资产及其 manifest 为完成证据，不把运行中的 CI 当作发布成功。
+
+2026-10-21 镜像交付：干净的 PHP 8.2.35 / Linux amd64 镜像已通过 CI 与独立匿名下载、加载和拉取验证。[固定 GHCR digest、Release 下载及 Agent 使用要求](docs/06-clean-xboard-image.md#2-新-vps-使用已构建镜像)已补齐；现有生产服务器没有因此被替换。
