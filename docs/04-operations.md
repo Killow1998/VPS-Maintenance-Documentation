@@ -183,6 +183,34 @@ systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimest
 
 更换实例时先让新节点通过订阅、转发和计量测试，再迁移用户并验证，最后由用户明确确认销毁旧机。停止机器不等于停止服务商收费。
 
+### 5.1 容器内 PHP 安全更新
+
+2026-10-21 更新：PHP 官方针对 [CVE-2026-109618](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w) 和 [CVE-2026-109619](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp) 发布修复。对应分支的修复版本为 8.2.35、8.3.36、8.4.27、8.5.12；实施时重新查阅[官方安全公告](https://www.php.net/)和[8.2.35 发布说明](https://www.php.net/releases/8_2_35.php)，不要将旧教程的版本号当作永远最新。
+
+**执行位置**：生产 VPS 做备份、隔离验收和切换；编译放在另一台有 Docker、相同目标架构且资源充足的机器。1 GB VPS 不适合一边服务用户一边编译 PHP。限制构建的 CPU、内存、swap、并发任务和磁盘预算；不用全局 Docker prune 释放无关项目的数据。
+
+1. **识别实际运行环境**。记录运行容器的 image ID/digest、PHP 版本、API/ABI、扩展、Swoole、架构、入口脚本、Compose 和持久卷。`latest` 既不会自动更新运行容器，也不保证拉取的新镜像已含修复。更新宿主机 PHP 包不能替换容器中的 `/usr/local/bin/php`。Octane/Swoole 处理 Web 请求时，不能因 SAPI 显示 CLI 就判断没有风险。
+2. **先准备恢复材料**。完成 SQLite 在线备份及完整性校验，保存 `.env`、Compose、节点/入口配置、模板摘要和用户身份/配额摘要。按实际配置备份 Redis：它可能使用 Unix socket，而非 TCP 6379。保留旧镜像及其明确的恢复 tag/digest，并验证镜像归档 SHA-256；不能依赖随后可能指向其他版本的 `latest` 回退。
+3. **优先兼容性最小的修复**。先验证官方或上游应用镜像是否真正包含修复；没有时才制作应用版本不变的 PHP 修复派生镜像。从官方固定 digest 获得源码并校验官方 SHA-256，保留编译选项，更新核心及随 PHP 捆绑的扩展。不能只拷一个 PHP 二进制而遗漏 opcache 等模块。第三方 Swoole/Redis 扩展需核对 API/ABI、加载和真实功能；跨 PHP 大/小版本时另作迁移，不照搬旧模块。
+4. **在构建机验证后传输**。核对 PHP 版本、扩展集合、启动告警和 `composer check-platform-reqs --no-dev`；保留可重现的脚本、基础镜像/源码 digest 和构建日志。不要将生产数据库、`.env`、订阅或密钥发到构建机；还要确认镜像历史层没有包含这些信息。传回镜像归档时检查大小、SHA-256 和目标机架构，再加载。给生产 Compose 使用明确的修复镜像标识，避免无意拉取新应用版本。
+5. **隔离验收，而非复制生产后台任务**。在 VPS 上使用数据库副本、独立 Redis/日志目录和仅 loopback 发布的临时端口；限制 CPU/内存，关闭候选容器的队列/定时任务，避免重复计量、重置或通知。比较应用代码/依赖摘要、数据库 schema，以及同一自测账号的真实订阅节点、DNS、策略组和规则。测试结束确认候选已停止，释放小 VPS 内存。测试副本与日志仍是敏感资料。
+6. **只切换面板应用镜像**。核对规范化 Compose 除 image 外没有变化；保留原持久卷、端口绑定、用户与规则。提前审阅并启动独立的延时回滚任务，核对其截止时间，再重建单个面板服务。不要 `compose down` 整套服务，也不要顺手重启独立的节点内核或 nginx。面板/订阅可能短暂不可用；不能保证现有代理完全无感。
+7. **分别验证三条路径**。检查正式容器实际 PHP、Octane/队列健康；直接通过 HTTPS 下载带规则的真实订阅，验证客户端格式和账户计量头；从外部用订阅中的节点发起小型 HTTPS 请求，再确认节点控制上报正常、计数可增长且用户配额/模板未改。HTTP 首页 200、节点 PID 未变或 YAML 语法正确，单独都不足以证明全部成功。记录面板失败采样窗口、耗时和未测试项。
+8. **最后取消回滚并留记录**。全部通过才停用本次 timer，确认它未执行。回滚应切回已保留的旧镜像并继续使用当前持久数据库；普通镜像回退不得覆盖正在更新的用量。若涉及 schema 迁移，先设计兼容性与数据回退，不能假定旧代码可直接读取新库。旧镜像若含漏洞，只是临时可用性恢复手段，不代表修复完成。
+
+下例只用于只读识别，将 `XBOARD_CONTAINER` 替换为实际容器名；完整 inspect 可能含敏感环境变量，不公开上传：
+
+```bash
+docker inspect XBOARD_CONTAINER --format '{{.Image}}'
+docker exec XBOARD_CONTAINER php -v
+docker exec XBOARD_CONTAINER php -m
+docker exec -w /www XBOARD_CONTAINER composer check-platform-reqs --no-dev
+```
+
+**验收边界**：安全版本及可信来源、兼容性和业务探测是非破坏性验收证据，不等于已证明该部署可被利用，也不等于确认没有历史入侵。不要在服务用户的容器上运行 OOM 或远程执行 PoC。
+
+**本次维护发现的两个陷阱**：从正在运行的容器 commit 的恢复镜像可能继承 `com.docker.compose.*` 标签。由它启动临时构建/测试容器时，覆盖为独立的 project/service 标签；切换前检查包含已停止容器在内的生产 Compose 成员，避免被误识别为同一个服务并产生名称冲突。另一个是 Redis socket：独立数据目录除了 socket 本身权限，还必须允许 PHP 用户遍历父目录；在私有宿主目录下匹配正式卷权限，不对整个生产目录宽泛 chmod。用户摘要也要排除 `t`、在线时间/数量、上下行等动态字段，避免将正常上报误判为身份或配额变化。
+
 ## 6. 发布前检查
 
 公开内容仅包括通用步骤、占位符、标准服务地址和无凭据模板。检查时不要把“公钥可以公开”理解成可以公开一套可用的订阅配置。
