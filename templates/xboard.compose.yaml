@@ -1,0 +1,48 @@
+# Reference only: review against the selected XBoard release before deployment.
+# Resolve these paths against the private application directory, not this repo.
+services:
+  xboard:
+    image: "${XBOARD_IMAGE:?Set XBOARD_IMAGE to a verified image tag or digest}"
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7001:7001"
+    environment:
+      RESOURCE_PROFILE: "${XBOARD_RESOURCE_PROFILE:-balanced}"
+      ENABLE_HORIZON: "true"
+      docker: "true"
+    volumes:
+      - type: bind
+        source: ./.env
+        target: /www/.env
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.docker/.data
+        target: /www/.docker/.data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./storage/logs
+        target: /www/storage/logs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./storage/theme
+        target: /www/storage/theme
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./plugins
+        target: /www/plugins
+        bind:
+          create_host_path: false
+      - redis-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:

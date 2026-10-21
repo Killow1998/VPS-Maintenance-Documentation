@@ -9,7 +9,11 @@ docs/*
 !docs/02-xboard-deploy.md
 !docs/03-google-scholar.md
 !docs/04-operations.md
+!docs/05-xboard-solution.md
 !templates/
 templates/*
 !templates/scholar-nat64.json
 !templates/xboard-subscribe.nginx.conf
+!templates/xboard.compose.yaml
+!templates/clash-dns-policy.yaml
+!templates/clash-ai-rules.yaml

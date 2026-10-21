@@ -1,0 +1,30 @@
+# Merge before broad DIRECT/CN/MATCH rules. This is not a complete profile.
+# Replace the group name if the generated subscription uses a different name.
+rules:
+  - DOMAIN-SUFFIX,openai.com,节点选择
+  - DOMAIN-SUFFIX,chatgpt.com,节点选择
+  - DOMAIN-SUFFIX,oaistatic.com,节点选择
+  - DOMAIN-SUFFIX,oaiusercontent.com,节点选择
+  - DOMAIN-SUFFIX,chat.com,节点选择
+  - DOMAIN-SUFFIX,anthropic.com,节点选择
+  - DOMAIN-SUFFIX,claude.ai,节点选择
+  - DOMAIN-SUFFIX,google.com,节点选择
+  - DOMAIN-SUFFIX,googleapis.com,节点选择
+  - DOMAIN-SUFFIX,gstatic.com,节点选择
+  - DOMAIN-SUFFIX,googleusercontent.com,节点选择
+  - DOMAIN-SUFFIX,ai.google.dev,节点选择
+  - DOMAIN-SUFFIX,deepmind.google,节点选择
+  - DOMAIN-SUFFIX,grok.com,节点选择
+  - DOMAIN-SUFFIX,x.ai,节点选择
+  - DOMAIN-SUFFIX,githubcopilot.com,节点选择
+  - DOMAIN-SUFFIX,cursor.com,节点选择
+  - DOMAIN-SUFFIX,perplexity.ai,节点选择
+  - DOMAIN-SUFFIX,poe.com,节点选择
+  - DOMAIN-SUFFIX,openrouter.ai,节点选择
+  - DOMAIN-SUFFIX,huggingface.co,节点选择
+  - DOMAIN-SUFFIX,huggingface.com,节点选择
+  - DOMAIN-SUFFIX,mistral.ai,节点选择
+  - DOMAIN-SUFFIX,cohere.com,节点选择
+  - DOMAIN-SUFFIX,replicate.com,节点选择
+  - DOMAIN,copilot.microsoft.com,节点选择
+  - DOMAIN,copilot.cloud.microsoft,节点选择
