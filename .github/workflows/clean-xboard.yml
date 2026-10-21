@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: clean-xboard-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build-test-release:
