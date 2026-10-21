@@ -42,7 +42,7 @@ mkdir -p /tmp/swoole-src
 tar -xzf /tmp/swoole.tgz -C /tmp/swoole-src
 mv /tmp/swoole-src/package.xml "/tmp/swoole-src/$package/package.xml"
 IPE_PROCESSOR_COUNT=2 IPE_SWOOLE_WITHOUT_IOURING=1 install-php-extensions "/tmp/swoole-src/$package"
-rm -rf /tmp/swoole-src /tmp/swoole.tgz /usr/local/lib/php/test
+rm -rf /tmp/swoole-src /tmp/swoole.tgz /usr/local/lib/php/test /usr/local/lib/php/doc/swoole/examples
 SH
 RUN apk add --no-cache shadow sqlite mysql-client mariadb-connector-c git supervisor redis caddy && \
     addgroup -S -g 1000 www && adduser -S -G www -u 1000 www && \
@@ -57,6 +57,8 @@ COPY source/.docker/caddy/Caddyfile /etc/caddy/Caddyfile
 COPY source/.docker/php/zz-xboard.ini /usr/local/etc/php/conf.d/zz-xboard.ini
 RUN test ! -e /www/.env && \
     composer install --no-dev --no-interaction --prefer-dist --no-progress --no-scripts && \
+    test -f /www/vendor/firebase/php-jwt/LICENSE && \
+    rm -f /www/vendor/firebase/php-jwt/README.md && \
     php artisan package:discover --ansi && \
     php artisan storage:link && \
     find /www/storage/logs -type f ! -name .gitignore -delete && \
