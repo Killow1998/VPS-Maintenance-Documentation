@@ -1,0 +1,11 @@
+{
+  "upstream_url": "https://github.com/cedar2025/Xboard.git",
+  "upstream_commit": "81dd561c1ed7a591443c4c20e990b795211d3661",
+  "admin_commit": "ef5f43da335092cbff8fdf0ad7ff9b4d92d7d0d7",
+  "php_image": "php:8.2.35-cli-alpine3.23@sha256:f93c9de6536b6e758a9f5c68ad23ed59fc95b0be42dd0286826efca81834d902",
+  "composer_image": "composer:2.10.3@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac",
+  "extension_installer_image": "mlocati/php-extension-installer:2.12.3@sha256:ac4b252c153a9f6de5578ff2c417790aba836bb49855543144606033eceda253",
+  "php_version": "8.2.35",
+  "platform": "linux/amd64",
+  "image_tag": "20261021-81dd561-php8.2.35-amd64"
+}

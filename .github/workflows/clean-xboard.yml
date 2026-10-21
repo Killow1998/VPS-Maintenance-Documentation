@@ -1,0 +1,76 @@
+name: Clean XBoard image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - build/xboard/**
+      - .github/workflows/clean-xboard.yml
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: clean-xboard-release
+  cancel-in-progress: false
+
+jobs:
+  build-test-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(python3 -c 'import json; print(json.load(open("build/xboard/inputs.json"))["image_tag"])')
+          RELEASE_TAG="xboard-clean-$TAG"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release already exists. Bump inputs.json image_tag; do not overwrite.' >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/xboard-clean:$TAG" >> "$GITHUB_ENV"
+          WORK=$(mktemp -d)
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+      - name: Build within CPU and memory limits
+        run: python3 -u build/xboard/build.py "$WORK" "$IMAGE"
+      - name: Disposable installation and HTTP tests
+        run: python3 -u build/xboard/smoke.py "$IMAGE" "$WORK/smoke.json"
+      - name: Inspect every image layer for accidental secrets and data
+        run: python3 -u build/xboard/scan.py "$IMAGE" "$WORK"
+      - name: Package image, matching source and evidence
+        run: python3 -u build/xboard/package.py "$WORK"
+      - name: Publish verified public download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'Clean, uninitialized Linux/amd64 XBoard image built from locked public source.' \
+            'No production snapshot, database, accounts, subscriptions or keys.' \
+            'Verify SHA256SUMS, then docker load the image archive; initialize new private data.' \
+            'Read docs/06-clean-xboard-image.md. This is not a tested upgrade of an existing server.' \
+            > "$WORK/release-notes.txt"
+          gh release create "$RELEASE_TAG" "$WORK"/release/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" --notes-file "$WORK/release-notes.txt"
+      - name: Also publish to GHCR when permitted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PUSHED=false
+          if printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin && docker push "$IMAGE"; then
+            PUSHED=true
+          fi
+          docker logout ghcr.io || true
+          printf '{"push_succeeded":%s,"anonymous_pull_verified":false}\n' "$PUSHED" > "$WORK/registry-status.json"
+          gh release upload "$RELEASE_TAG" "$WORK/registry-status.json" --repo "$GITHUB_REPOSITORY"
+          echo 'GHCR visibility must be checked separately. The Release archive is the public fallback.'
