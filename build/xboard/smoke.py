@@ -6,7 +6,6 @@ import pathlib
 import re
 import secrets
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -47,10 +46,11 @@ try:
         '-e', 'ADMIN_ACCOUNT=smoke@example.invalid', image, 'php', 'artisan', 'xboard:install', '--no-interaction'],
         capture_output=True, timeout=180)
     assert initialized.returncode == 0, 'Fresh installation exited with error'
-    database = sqlite3.connect(root / 'database/database.sqlite')
-    assert database.execute('PRAGMA quick_check').fetchall() == [('ok',)]
-    assert database.execute('SELECT count(*) FROM v2_user').fetchone()[0] == 1
-    database.close()
+    # Check the disposable DB inside Docker: hosted runners need not share the app's UID 1000.
+    checked = subprocess.check_output(base + ['--rm', '--network=none', '--entrypoint', 'php'] + mounts + [image, '-r',
+        '$p=new PDO("sqlite:/www/.docker/.data/database.sqlite");echo json_encode(["integrity"=>$p->query("PRAGMA quick_check")->fetchAll(PDO::FETCH_COLUMN),"users"=>$p->query("SELECT count(*) FROM v2_user")->fetchColumn()]);'])
+    checked = json.loads(checked)
+    assert checked['integrity'] == ['ok'] and int(checked['users']) == 1
     subprocess.run(base + ['-d', '--name', name, '-p', '127.0.0.1::7001'] + mounts + [
         '-e', 'RESOURCE_PROFILE=minimal', image], check=True, stdout=subprocess.DEVNULL)
     info = json.loads(subprocess.check_output(['docker', 'inspect', name]))[0]
