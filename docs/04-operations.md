@@ -211,6 +211,92 @@ docker exec -w /www XBOARD_CONTAINER composer check-platform-reqs --no-dev
 
 **本次维护发现的两个陷阱**：从正在运行的容器 commit 的恢复镜像可能继承 `com.docker.compose.*` 标签。由它启动临时构建/测试容器时，覆盖为独立的 project/service 标签；切换前检查包含已停止容器在内的生产 Compose 成员，避免被误识别为同一个服务并产生名称冲突。另一个是 Redis socket：独立数据目录除了 socket 本身权限，还必须允许 PHP 用户遍历父目录；在私有宿主目录下匹配正式卷权限，不对整个生产目录宽泛 chmod。用户摘要也要排除 `t`、在线时间/数量、上下行等动态字段，避免将正常上报误判为身份或配额变化。
 
+### 5.2 关闭不用的 PHP 原生上传进度
+
+已经按旧版教程部署、需要交给另一个 Agent 修复时，先看[既有 VPS 分支判断、完成标准与 Prompt](07-existing-vps-security-repair.md)。不能把新机初始化步骤当作在用服务器的修复步骤。
+
+**适用范围**：已升级到官方修复版本、确认应用不需要 PHP 原生会话上传进度的 XBoard 部署。这是补丁后的纵深防御，不替代 5.1 的安全更新。[PHP 官方建议](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)不需要该功能时可继续关闭它，并重启相关 worker。不要因为 SAPI 是 CLI、面板仅本机开放，或应用没有显式 `session_start()`，就判断原漏洞不适用。
+
+**配置与边界**：仓库提供[无凭据 INI 模板](../templates/php-upload-progress-hardening.ini)：
+
+```ini
+session.upload_progress.enabled = Off
+session.upload_progress.cleanup = On
+```
+
+这里只关闭原生会话的上传进度记录，不设置 `file_uploads=Off`，不更改 Laravel 会话驱动、原生序列化格式或用户登录凭据。若业务确实依赖原生上传进度，先评估替代方案，不盲目应用。不要把 `cleanup=On` 理解成上传期间从不写入会话数据，或所有反序列化问题都已被防住。
+
+公开的“键名藏对象”分析还需核对读写格式是否混用、存储是否共享、后续解码入口及危险应用代码。不同格式混读的对象注入，不能直接当作两个内存安全 CVE 的补丁绕过；同样，官方版本号也不是对所有应用代码的安全担保。本节不提供利用脚本，不在生产运行 PoC。
+
+#### 新机先准备持久文件
+
+**执行位置：VPS 的私有应用目录**。已有容器时用 `docker exec XBOARD_CONTAINER php --ini` 确认实际扫描目录；新机尚未启动时，用固定镜像的一次性离线容器、覆盖 entrypoint 为 `php` 执行 `--ini`，不要为了检查而提前启动正式应用。本参考镜像使用 `/usr/local/etc/php/conf.d`；其他发行版或 FPM 部署要按实际路径调整，不能只修改宿主机 PHP。
+
+以下命令在以 root 管理该示例目录的 Linux 主机执行。将 `REPO_DIR` 换成公开仓库克隆位置，`APP_DIR` 换成实际应用目录；已有目标文件时停止，先备份和比较，不能直接覆盖：
+
+```bash
+set -eu
+REPO_DIR=/PATH/TO/VPS-Maintenance-Documentation
+APP_DIR=/opt/Xboard
+test -d "$APP_DIR"
+test -f "$REPO_DIR/templates/php-upload-progress-hardening.ini"
+test ! -e "$APP_DIR/.docker/php/zzzz-upload-progress-security.ini"
+install -d -m 0755 "$APP_DIR/.docker/php"
+install -m 0644 "$REPO_DIR/templates/php-upload-progress-hardening.ini" \
+  "$APP_DIR/.docker/php/zzzz-upload-progress-security.ini"
+```
+
+[完整 Compose 参考](../templates/xboard.compose.yaml)已包含下面的单文件只读挂载。使用上游 Compose 的机器只合并这一项，保留已有 volumes、project name、端口、镜像和环境变量：
+
+```yaml
+services:
+  xboard:
+    volumes:
+      - type: bind
+        source: ./.docker/php/zzzz-upload-progress-security.ini
+        target: /usr/local/etc/php/conf.d/zzzz-upload-progress-security.ini
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+这是局部片段。不要把整个 INI 目录挂载过去遮住镜像的扩展配置。源文件必须先存在，`create_host_path: false` 用于拒绝缺失源路径，参见 [Docker Compose volumes](https://docs.docker.com/reference/compose-file/services/#volumes)。新机完成必要应用初始化后正常启动；初始化容器也应使用同一个加固后的 Compose。
+
+#### 已有服务的变更流程
+
+1. **备份并记录基线**：按第 2 节完成数据库在线备份，另存原 Compose、已有 INI、实际 Redis 数据备份、当前 image ID、容器启动时间、节点/nginx 状态、用户身份/配额和订阅模板摘要。备份放在仓库外，目录 0700、敏感文件 0600。
+2. **先离线预检**：用当前精确 image ID 启动一次性容器，只挂载新 INI，覆盖 entrypoint 为 `php`，关闭网络并限制资源，运行下方检查。不要附带生产数据或队列。若镜像继承 Compose 标签，覆盖为独立的 project/service，不能让它成为生产服务成员。普通 CLI 检查不取代正式 Web 栈和业务验收。
+3. **确认最小差异**：比较规范化 Compose，新旧差异只应是这一项只读挂载，不更换镜像、端口、密钥或数据卷。审阅配置级回滚脚本并设置有界延时任务；脚本校验本次变更哈希，拒绝覆盖之后的独立修改。服务名、Compose 文件名和私有备份路径以目标机为准。
+4. **仅重建面板**：获得中断窗口授权后，保留当前镜像，使用 `docker compose --project-directory "$APP_DIR" -f "$APP_DIR/compose.yaml" up -d --no-deps --pull never xboard` 应用挂载。新增挂载不能只靠 `docker compose restart` 应用；不要 `compose down`，不重启独立的节点、nginx 或网络服务。记录面板/订阅短暂中断，不承诺现有代理完全无感。
+5. **验收后取消回滚**：确认新容器启动、INI 实际加载、现有扩展仍在、挂载只读且镜像不变；通过 HTTPS 下载真实订阅并解析节点/DNS/组/规则；从外部明确经该节点访问小型测试端点，再查控制上报和计数，比较用户配额、模板未变。全部通过后才取消本次 timer，确认它未执行，留下时间点、采样窗口和未测项目。
+
+下面将 `XBOARD_CONTAINER` 替换为实际容器名。`false` 布尔 INI 常返回空字符串，不要只接受文本 `Off`；脚本成功返回才算启动配置检查通过：
+
+```bash
+docker exec XBOARD_CONTAINER php --ini
+docker exec XBOARD_CONTAINER php -r '
+$enabled = ini_get("session.upload_progress.enabled");
+$cleanup = ini_get("session.upload_progress.cleanup");
+$off = $enabled === "" || $enabled === "0";
+$on = $cleanup === "1";
+echo json_encode(["php" => PHP_VERSION, "upload_progress_disabled" => $off,
+    "cleanup_enabled" => $on]), PHP_EOL;
+exit($off && $on ? 0 : 1);
+'
+```
+
+还应核对 worker 进程确实被替换，没有命令行或应用代码重新覆盖设置；不能把新建 CLI 进程的值当作旧 worker 已更新的证据。不要为验证而临时公开 `phpinfo()` 或诊断接口。
+
+#### 回滚与已验证边界
+
+普通回滚只恢复本次 Compose/INI，再仅重建面板，**继续使用当前已修复 PHP 镜像和当前数据库/Redis**；不恢复旧用量、不降级 PHP。先检查是否有后续改动；若早先的镜像回滚脚本因 Compose 哈希变化而拒绝执行，应审阅配置回滚的先后顺序，不能删除哈希保护强行运行。
+
+2026-10-21 的既有部署验收：相同 PHP 8.2.35 镜像加载上述配置，用户配额/模板不变，真实订阅成功，两个外部静态测试端点通过且控制上报继续；独立节点与 nginx 未重启，回滚计时器未执行。面板失败采样首尾相距约 24 秒，不是精确总中断时长或所有连接无损的证明。没有全量漏洞、历史入侵或长时间负载测试，也未在新 VPS 上重跑整套安装。
+
+**已发布镜像不变**：这是外置启动 INI 和部署模板加固，没有重建、替换已发布 Release 或修改其 digest。只拉取旧镜像不会自动获得这份宿主机配置；新部署和已有服务器必须分别安装、加载并验收。实际备份位置、用户、密钥和日志仅留在私有记录中。
+
+本次文档/模板检查已通过 INI 值、YAML 结构、真实 Compose 配置展开、缺少镜像时拒绝展开、两段 shell 示例语法、文件/锚点链接和已知隐私模式检查；未因此启动容器或更改生产服务。这些检查不等于在新机重跑部署，也不是完整秘密扫描或漏洞审计。
+
 ## 6. 发布前检查
 
 公开内容仅包括通用步骤、占位符、标准服务地址和无凭据模板。检查时不要把“公钥可以公开”理解成可以公开一套可用的订阅配置。

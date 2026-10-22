@@ -11,11 +11,13 @@ docs/*
 !docs/04-operations.md
 !docs/05-xboard-solution.md
 !docs/06-clean-xboard-image.md
+!docs/07-existing-vps-security-repair.md
 !templates/
 templates/*
 !templates/scholar-nat64.json
 !templates/xboard-subscribe.nginx.conf
 !templates/xboard.compose.yaml
+!templates/php-upload-progress-hardening.ini
 !templates/clash-dns-policy.yaml
 !templates/clash-ai-rules.yaml
 !build/

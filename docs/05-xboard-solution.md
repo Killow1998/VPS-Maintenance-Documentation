@@ -56,6 +56,7 @@ Administration:
 | 文件 | 执行位置及用途 | 不能做什么 |
 | --- | --- | --- |
 | [xboard.compose.yaml](../templates/xboard.compose.yaml) | VPS 应用目录；完整的单服务 Compose 参考 | 未核对上游版本前覆盖已有 Compose 或数据 |
+| [php-upload-progress-hardening.ini](../templates/php-upload-progress-hardening.ini) | 复制到私有应用目录，通过只读单文件挂载关闭不用的 PHP 原生上传进度 | 替代 PHP 修复版本，或覆盖整个扩展 INI 目录 |
 | [clash-dns-policy.yaml](../templates/clash-dns-policy.yaml) | XBoard 的完整 Clash/Mihomo 订阅模板中合并 DNS 字段 | 当完整客户端配置导入，或清空其他 DNS 配置 |
 | [clash-ai-rules.yaml](../templates/clash-ai-rules.yaml) | 同一订阅模板；插入到宽泛直连/国内/兜底规则之前 | 替代用户节点、策略组或完整规则集 |
 | [xboard-subscribe.nginx.conf](../templates/xboard-subscribe.nginx.conf) | nginx `http` 配置；仅订阅路径的基线反代 | 当作 HTTPS 或 stream 共用 443 配置直接使用 |
@@ -69,6 +70,7 @@ Administration:
 
 - 相对路径必须解析到实际私有应用目录，不要在本仓库 `templates` 目录直接启动。
 - `.env` 必须是有效的应用配置文件，数据库、日志、主题和插件目录应已正确创建并设置属主。模板禁止自动创建缺失的 bind 源，避免把缺失 `.env` 变成目录。
+- 按[上传进度加固流程](04-operations.md#52-关闭不用的-php-原生上传进度)先创建 `.docker/php/zzzz-upload-progress-security.ini`；模板将它只读挂载到已核对的 PHP 扫描目录。源文件缺失时拒绝启动；不要把公开仓库路径当作实际应用路径。该配置不依赖重新构建已发布镜像。
 - `XBOARD_IMAGE` 必填。先取得并检查镜像，再设置已验证的 tag/digest；模板设置 `pull_policy: never`，不会因为维护时启动服务就自动换成未检查的新镜像。验证 image ID、PHP 和平台要求，不只看标签。
 - 模板沿用单服务内置 Redis 布局、独立持久卷及本机面板绑定。镜像若改成外置数据库、改变目录、入口或用户，则不适用，应以该版本为准。
 - `balanced` 是参考资源档，不保证适合每个小内存实例；先检查余量和该镜像支持的档位，保留计量、队列和调度。新增 Docker 日志轮转只覆盖容器 stdout/stderr，应用文件日志另行管理。
@@ -107,6 +109,8 @@ XBoard 不同版本的模板存储和缓存机制可能不同。通过该版本�
 每台机器独立生成用户、密钥、token，不复制参考部署的真实账户。
 普通用户最终拿到一条带节点和规则的订阅链接，不需要 SSH 或文件导入。
 PHP 更新按 docs/04 执行；小 VPS 不编译，兼容候选先隔离验收。
+按 docs/04 的 5.2 节关闭不用的原生上传进度，持久 INI 单文件只读挂载；
+核对实际 PHP 扫描目录、worker 重建、订阅/转发/计量和配置级回滚。
 可能失联的网络变更先获授权、保留救援入口并启用延时回滚。
 分别验证订阅、外部转发和计量；不修改无关用户、规则或应用。
 询问是否需要 Google Scholar，不需要则不增加第三方出口。

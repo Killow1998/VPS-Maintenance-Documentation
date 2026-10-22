@@ -13,6 +13,12 @@ services:
       docker: "true"
     volumes:
       - type: bind
+        source: ./.docker/php/zzzz-upload-progress-security.ini
+        target: /usr/local/etc/php/conf.d/zzzz-upload-progress-security.ini
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
         source: ./.env
         target: /www/.env
         bind:

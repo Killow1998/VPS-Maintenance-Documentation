@@ -14,8 +14,11 @@
 | 日常维护 | [备份、排障与隐私](docs/04-operations.md) | 能定位问题、恢复配置且不丢用户数据 |
 | 方案交接 | [已完成方案与复现入口](docs/05-xboard-solution.md) | 架构、模板、版本边界和验收清单可供他人复用 |
 | 镜像交付 | [干净构建的 XBoard 镜像](docs/06-clean-xboard-image.md) | 获取已通过安装/扫描的公开 Release，不在小 VPS 编译 |
+| 已部署修复 | [旧部署 PHP 修复、加固与 Agent Prompt](docs/07-existing-vps-security-repair.md) | 按实际状态选择修复路径，保留现有用户、订阅和用量 |
 
 已经购买 VPS、想直接复用完整方案时，从[方案交接](docs/05-xboard-solution.md)开始。仓库提供部署维护资料和无凭据参考模板，不是运行中的面板导出，也不分发生产容器镜像。
+
+**已按旧版教程部署过的用户**：先看[已有 VPS 修复指南及可转发 Prompt](docs/07-existing-vps-security-repair.md#4-给维护-agent-的-prompt)，不要重新运行新机安装器或覆盖正在使用的 Compose/数据库。
 
 ## 参考方案
 
@@ -89,3 +92,5 @@ Scholar 原生配置有明确版本边界，见专项文档。升级前先核对
 2026-10-21 镜像构建：[固定源码的干净构建与公开发布](docs/06-clean-xboard-image.md)，新增限额构建配方、新安装烟测、逐层秘密/数据检查和发布工作流。不使用生产快照；以实际 Release 资产及其 manifest 为完成证据，不把运行中的 CI 当作发布成功。
 
 2026-10-21 镜像交付：干净的 PHP 8.2.35 / Linux amd64 镜像已通过 CI 与独立匿名下载、加载和拉取验证。[固定 GHCR digest、Release 下载及 Agent 使用要求](docs/06-clean-xboard-image.md#2-新-vps-使用已构建镜像)已补齐；现有生产服务器没有因此被替换。
+
+2026-10-21 加固补充：[关闭不用的 PHP 原生上传进度](docs/04-operations.md#52-关闭不用的-php-原生上传进度)，补齐持久 INI、单文件只读 Compose 挂载、既有服务备份与面板重建、真实订阅/转发/计量验收和配置级回滚。新机流程及部署 Agent 要求已关联；不替代安全版本，也不更改已发布镜像 digest。

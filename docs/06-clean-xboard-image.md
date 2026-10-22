@@ -10,6 +10,8 @@
 
 本次新增的是干净源码构建，不是当前服务器旧应用版本的无差异 PHP 替换。现有服务器升级前必须审阅应用差异、数据库迁移和回滚，不能因为 PHP 相同就直接覆盖。
 
+已按早期教程搭建且已有用户时，直接使用[既有 VPS 修复指南及 Agent Prompt](07-existing-vps-security-repair.md)，先判断需要更新 PHP 还是只补外置 INI；不要重新安装或替换用户数据。
+
 发布入口：[GitHub Releases](https://github.com/Killow1998/VPS-Maintenance-Documentation/releases)。只有出现该 tag 且校验、烟测报告均通过后才算已发布。构建中的 Actions 或仓库里有 Dockerfile，不等于已经有可用镜像。
 
 **2026-10-21 已发布并完成匿名取回验证**：[此版本 Release](https://github.com/Killow1998/VPS-Maintenance-Documentation/releases/tag/xboard-clean-20261021-81dd561-php8.2.35-amd64)，[成功的构建与门禁](https://github.com/Killow1998/VPS-Maintenance-Documentation/actions/runs/39653120625)。全新安装、管理员页面与三个静态资源、登录、空节点订阅、Horizon 和 SQLite 完整性检查均通过；逐层检查 23 层、13847 个文件前缀，无剩余门禁命中。新安装启动在 CI 上约 5.8 秒，不是生产负载或所有主机的启动保证。
@@ -24,6 +26,8 @@ export XBOARD_IMAGE='ghcr.io/killow1998/xboard-clean@sha256:b0e5ecbaeb1cf15a95ed
 ```
 
 可读 tag 为 `ghcr.io/killow1998/xboard-clean:20261021-81dd561-php8.2.35-amd64`；部署固定 digest 更明确。镜像未初始化，拉取并不创建用户、节点或开放端口，之后仍须按主教程配置私有数据和本机面板。
+
+该 Release/digest 没有因后续上传进度加固而重建。拉取后、首次初始化前，按[维护手册 5.2 节](04-operations.md#52-关闭不用的-php-原生上传进度)准备宿主机 INI，并使用含只读挂载的 Compose；单独拉取镜像不能自动得到外置加固配置。已有服务器也不会因仓库模板更新而自动生效，必须另外备份、重建面板并验收。
 
 注册表不可达时，使用该 Release 的公开归档作为备用。选择与 `inputs.json` 对应的明确版本，不盲目使用 `/latest`。
 
@@ -104,6 +108,8 @@ python3 build/xboard/package.py "$work"
 此版本的匿名 Docker 拉取已实测；其他版本重新验证，失败时用公开 Release，
 不要索取用户 PAT。
 镜像没有管理员、节点或用户；按部署教程独立初始化和生成私有凭据。
+首次初始化前按 docs/04 的 5.2 节安装外置上传进度加固 INI 并核对挂载；
+不改已发布镜像 digest，不把只拉取镜像当作配置已生效。
 订阅规则由 XBoard 发布，客户端得到链接，不导入公开片段文件。
 已有服务器不得直接套用新应用镜像；先备份并检查迁移及兼容性。
 ```
