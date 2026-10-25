@@ -12,6 +12,7 @@ docs/*
 !docs/05-xboard-solution.md
 !docs/06-clean-xboard-image.md
 !docs/07-existing-vps-security-repair.md
+!docs/08-terminal-tool.md
 !templates/
 templates/*
 !templates/scholar-nat64.json
@@ -41,3 +42,5 @@ build/xboard/*
 !scripts/
 scripts/*
 !scripts/verify-clean-image.py
+!scripts/vpsctl.py
+!scripts/test_vpsctl.py

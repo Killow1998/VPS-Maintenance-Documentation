@@ -164,6 +164,8 @@ systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimest
 
 ## 4. 计量与每月重置
 
+日常查询与人工操作可使用[免安装 Python 终端](08-terminal-tool.md)：本地启动，复用 SSH 隧道和现有管理接口，提供用户用量、个人订阅链接、用户与配额管理；不替代下述部署时的月度任务。
+
 先验证用户通过节点产生的一小段已知流量确实进入计数。长期为零时检查节点到 `http://127.0.0.1:7001` 的控制面连接，而不是先修改计费额度。
 
 用户计数与节点总池是两个对象。每月重置方案应逐项记录：
