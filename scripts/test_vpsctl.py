@@ -3,14 +3,17 @@
 import ast
 import contextlib
 import copy
-import hashlib
 import http.server
 import io
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
+import shlex
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -31,8 +34,12 @@ class FakeAPI:
         self.auth = "already logged in"
         self.rows = rows if rows is not None else [account()]
         self.calls = []
+        self.users_updated_at = time.time()
 
-    def users(self):
+    def ensure_auth(self):
+        pass
+
+    def users(self, force=False):
         return copy.deepcopy(self.rows)
 
     def admin(self, path, payload=None):
@@ -161,6 +168,18 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(self.console.api.calls, [("/plan/fetch", None)])
         self.ssh.backup.assert_not_called()
 
+    def test_single_plan_is_automatically_selected(self):
+        with patch.object(self.console, "approve", return_value=True):
+            self.console.action("create", {"email":"new@example.com","plan":None,"quota":"50GiB","days":365})
+        generated = [p for path,p in self.console.api.calls if path=='/user/generate']
+        self.assertEqual(generated[0]['plan_id'],2)
+
+    def test_restart_revokes_own_access_before_command(self):
+        with patch('vpsctl.confirm',return_value=True):
+            self.console.restart('panel')
+        self.assertEqual([c[0] for c in self.ssh.mock_calls],['revoke_access','run'])
+        self.assertIsNone(self.console.api.auth)
+
     def test_create_uses_new_account_only(self):
         before = copy.deepcopy(self.console.api.rows[0])
         with patch.object(self.console, "approve", return_value=True):
@@ -192,6 +211,23 @@ class SafetyTests(unittest.TestCase):
             ctl.main(["--host", "example", "status"])
         self.ssh.metadata.assert_not_called()
         self.ssh.status.assert_called_once()
+
+    def test_ssh_bootstrap_reuses_short_session_and_revokes_only_its_name(self):
+        with patch('vpsctl.ssh_binary', return_value='ssh'):
+            ssh = ctl.SSH(self.args)
+        ssh.bridge = Mock()
+        access = {'authorization':'Bearer TEST_SECRET','session_id':99,'expires_at':time.time()+900}
+        ssh.php = Mock(side_effect=[access, {'removed':1}])
+        self.assertEqual(ssh.access(), access)
+        self.assertEqual(ssh.access(), access)
+        self.assertEqual(ssh.php.call_count,1)
+        self.assertIn('addMinutes(15)',ssh.php.call_args[0][0])
+        ssh.revoke_access()
+        source = ssh.php.call_args[0][0]
+        self.assertIn('whereKey(99)',source)
+        self.assertIn('where("name"',source)
+        self.assertNotIn('removeAllSessions',source)
+        self.assertIsNone(ssh._access)
 
     def test_reject_ssh_command_injection(self):
         self.args.host = "-oProxyCommand=bad"
@@ -245,11 +281,6 @@ class HTTPTests(unittest.TestCase):
                     self.end_headers()
                     return
                 data = True
-                if self.path.endswith("/login"):
-                    data = {"auth_data": "Bearer TEST_SECRET", "is_admin": True}
-                if self.path.endswith("/getActiveSession"):
-                    data = [{"id": 99, "token": hashlib.sha256(b"TEST_SECRET").hexdigest()},
-                            {"id": 100, "token": "OTHER_SESSION"}]
                 result = {"status": "success", "data": data}
                 if "user/fetch" in self.path:
                     page = 2 if "current=2" in self.path else 1
@@ -269,30 +300,62 @@ class HTTPTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join()
 
-    def test_pagination_and_revoke_only_own_session(self):
+    def test_pagination_cached_until_refresh_and_no_password_login(self):
         self.requests.clear()
         with patch.dict("os.environ", {"http_proxy": "http://127.0.0.1:1"}):
-            resolver = Mock(return_value=99)
-            api = ctl.API(self.base, "private-admin", resolver)
-            api.login("admin@example.com", "test")
+            provider = Mock(return_value={'authorization':'Bearer TEST_SECRET','expires_at':time.time()+900})
+            api = ctl.API(self.base, "private-admin", provider)
             self.assertEqual([r["id"] for r in api.users()], [1, 2])
-            api.close()
-            resolver.assert_called_once_with("Bearer TEST_SECRET")
-        removals = [payload for path, payload in self.requests if path.endswith("removeActiveSession")]
-        self.assertEqual(removals, [{"session_id": 99}])
-        self.assertIsNone(api.auth)
+            self.assertEqual([r["id"] for r in api.users()], [1,2])
+            self.assertEqual(len(self.requests),2)
+            api.users(force=True)
+            self.assertEqual(len(self.requests),4)
+            provider.assert_called_once_with()
+        self.assertTrue(all(payload is None for _,payload in self.requests))
 
-    def test_no_login_without_exact_session_resolver(self):
+    def test_no_api_access_without_ssh_authorization(self):
         self.requests.clear()
         with self.assertRaises(ctl.Error):
-            ctl.API(self.base, "admin").login("admin@example.com", "test")
+            ctl.API(self.base, "admin").users()
         self.assertEqual(self.requests, [])
+
+    def test_writes_invalidate_cached_users(self):
+        self.requests.clear()
+        api = ctl.API(self.base,'admin',lambda:{'authorization':'Bearer TEST_SECRET','expires_at':time.time()+900})
+        api.users()
+        api.admin('/user/update',{'id':1,'banned':True})
+        api.users()
+        self.assertEqual(len(self.requests),5)
 
     def test_redirect_not_followed(self):
         self.requests.clear()
         with self.assertRaises(ctl.Error):
             ctl.API(self.base, "admin").call("/redirect", {"password": "test"})
         self.assertEqual(len(self.requests), 1)
+
+
+class BridgeTests(unittest.TestCase):
+    def test_one_process_runs_multiple_requests_and_does_not_retry_failures(self):
+        process = subprocess.Popen([sys.executable,'-u','-c',ctl.BRIDGE],stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE,text=True,encoding='utf-8')
+        bridge = ctl.Bridge(process)
+        try:
+            self.assertTrue(bridge.receive(5)['ready'])
+            command = shlex.join([sys.executable,'-c','import sys;print(sys.stdin.read())'])
+            self.assertEqual(bridge.run(command,'one').strip(),'one')
+            self.assertEqual(bridge.run(command,'two').strip(),'two')
+            with self.assertRaises(ctl.Error):
+                bridge.run(shlex.join([sys.executable,'-c','raise SystemExit(7)']))
+            self.assertEqual(bridge.sequence,3)
+            self.assertEqual(bridge.run(command,'healthy').strip(),'healthy')
+            with self.assertRaises(ctl.Error):
+                bridge.run(command,'should not run',cleanup={'container':'demo','name':'OTHER_SESSION'})
+            self.assertEqual(bridge.sequence,5)
+        finally:
+            process.stdin.close()
+            process.wait(timeout=5)
+            bridge.reader.join(timeout=1)
+            process.stdout.close()
 
 
 if __name__ == "__main__":

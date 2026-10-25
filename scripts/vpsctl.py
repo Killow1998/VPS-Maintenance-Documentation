@@ -2,8 +2,8 @@
 """XBoard terminal TUI over SSH. Python 3.10+, standard library only.
 
 Run without a subcommand for the menu; use --help for automation-friendly reads.
-No agent, daemon, package, or script is installed on the VPS. Writes require an
-exact typed confirmation. No client credentials are written to local files.
+No agent, daemon, package, or script is installed on the VPS. Writes require
+interactive confirmation. No client credentials are written to local files.
 """
 
 import argparse
@@ -11,18 +11,19 @@ import base64
 import contextlib
 import datetime as dt
 from decimal import Decimal
-import getpass
 import io
 import json
 import os
 from pathlib import Path
 import re
+import queue
 import secrets
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -33,6 +34,57 @@ import webbrowser
 
 class Error(Exception):
     pass
+
+
+BRIDGE = r'''import base64,json,re,shlex,signal,subprocess,sys,threading
+cleanups={}
+lock=threading.Lock()
+def cleanup(container,name):
+ code='require "/www/vendor/autoload.php";$app=require "/www/bootstrap/app.php";'
+ code+='$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();'
+ code+='Laravel\\Sanctum\\PersonalAccessToken::where("name",base64_decode("'
+ code+=base64.b64encode(name.encode()).decode()+'"))->delete();'
+ try:
+  result=subprocess.run(['docker','exec','-w','/www',container,'php','-r',code],
+   capture_output=True,timeout=20)
+  if result.returncode==0:
+   with lock:cleanups.pop((container,name),None)
+ except Exception:pass
+def register(item):
+ container,name=item['container'],item['name']
+ if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',container):raise ValueError('Container')
+ if not re.fullmatch(r'vpsctl:[0-9a-f]{32}',name):raise ValueError('Session name')
+ timer=threading.Timer(max(1,min(900,item.get('delay',900))),cleanup,args=(container,name))
+ timer.daemon=True
+ with lock:
+  if len(cleanups)>=64:raise ValueError('Too many sessions')
+  cleanups[(container,name)]=timer
+ timer.start()
+def stopped(*args):raise SystemExit(0)
+for key in ['SIGTERM','SIGHUP']:
+ if hasattr(signal,key):signal.signal(getattr(signal,key),stopped)
+print(json.dumps({'ready':True}),flush=True)
+try:
+ for line in sys.stdin:
+  request={}
+  try:
+   if len(line)>2*1024*1024:raise ValueError('Request too large')
+   request=json.loads(line)
+   if request.get('cleanup'):register(request['cleanup'])
+   result=subprocess.run(shlex.split(request['command']),input=request.get('data'),
+    capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=min(55,request.get('timeout',55)))
+   code=result.returncode
+   output=result.stdout
+   if len(output)>2*1024*1024:code,output=74,''
+  except Exception:
+   code,output=70,''
+  print(json.dumps({'id':request.get('id'),'code':code,'stdout':output}),flush=True)
+finally:
+ with lock:pending=list(cleanups.items())
+ for (container,name),timer in pending:
+  timer.cancel()
+  cleanup(container,name)
+'''
 
 
 def quota_bytes(text):
@@ -68,6 +120,7 @@ def safe_user(row):
 def select_one(rows, selector, kind="用户"):
     matches = [r for r in rows if str(r["id"]) == str(selector)
                or r.get("email") == selector or r.get("code") == selector
+               or r.get("name") == selector
                or r.get("email", "").split("@")[0] == selector]
     if len(matches) != 1:
         raise Error(f"{kind}需唯一匹配；找到 {len(matches)} 项。请使用列表中的 ID。")
@@ -85,7 +138,8 @@ def confirm(phrase, dry_run=False, reader=None):
         return False
     if not sys.stdin.isatty():
         raise Error("修改操作要求交互终端；不能通过管道或定时任务绕过确认。")
-    if (reader or input)(f"输入 {phrase} 确认，其他输入取消：").strip() != phrase:
+    required = phrase if phrase.startswith("DELETE ") else "y"
+    if (reader or input)(f"{phrase}\n输入 {required} 确认，其他输入取消：").strip() != required:
         print("已取消。")
         return False
     return True
@@ -105,6 +159,9 @@ def ssh_binary():
 class SSH:
     def __init__(self, args):
         self.args = args
+        self.bridge = None
+        self._access = None
+        self.session_name = "vpsctl:" + secrets.token_hex(16)
         if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@:\-]*", args.host):
             raise Error("SSH 地址只能是主机名、SSH 别名或 user@host，不能包含命令或选项。")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.container):
@@ -116,6 +173,8 @@ class SSH:
             self.base += ["-i", str(Path(args.identity).expanduser())]
 
     def run(self, command, data=None, timeout=60):
+        if self.bridge:
+            return self.bridge.run(command, data, timeout)
         try:
             result = subprocess.run(self.base + [self.args.host, command], input=data,
                                     capture_output=True, text=True, encoding="utf-8",
@@ -129,11 +188,11 @@ class SSH:
     def python(self, source):
         return json.loads(self.run("python3 -B -", source))
 
-    def php(self, source):
+    def php(self, source, cleanup=None):
         command = shlex.join(["docker", "exec", "-i", "-w", "/www", self.args.container, "php"])
         bootstrap = '<?php require "/www/vendor/autoload.php"; $app = require "/www/bootstrap/app.php"; '
         bootstrap += '$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap(); '
-        result = self.run(command, bootstrap + source)
+        result = self.bridge.run(command, bootstrap + source, cleanup=cleanup) if cleanup else self.run(command, bootstrap + source)
         # Startup warnings are not JSON and must not accidentally expose app data.
         try:
             return json.loads(result)
@@ -146,13 +205,33 @@ class SSH:
                         '"timezone"=>config("app.timezone"), "db"=>config("database.default"), '
                         '"reset_method"=>(int)admin_setting("reset_traffic_method",1)]);')
 
-    def session_id(self, authorization):
-        secret = authorization.removeprefix("Bearer ")
-        encoded = base64.b64encode(secret.encode()).decode()
-        result = self.php('$t=Laravel\\Sanctum\\PersonalAccessToken::findToken(base64_decode("' + encoded + '"));'
-                          'if(!$t)throw new RuntimeException("Session not found");'
-                          'echo json_encode(["id"=>(int)$t->id]);')
-        return result["id"]
+    def access(self):
+        if self._access and self._access["expires_at"] > time.time() + 60:
+            return self._access
+        self.revoke_access()
+        if not self.bridge:
+            raise Error("短期管理授权必须使用受控 SSH 连接。")
+        self.session_name = "vpsctl:" + secrets.token_hex(16)
+        # SSH Docker access already grants control of this application. Create a
+        # named, expiring native session, without reading or changing passwords.
+        name = base64.b64encode(self.session_name.encode()).decode()
+        self._access = self.php('$u=App\\Models\\User::where("is_admin",1)->where("banned",0)->orderBy("id")->firstOrFail();'
+            '$expiry=now()->addMinutes(15);$t=$u->createToken(base64_decode("' + name + '"),["*"],$expiry);'
+            'echo json_encode(["admin_path"=>admin_setting("secure_path",admin_setting("frontend_admin_path",'
+            'hash("crc32b",config("app.key")))),"timezone"=>config("app.timezone"),'
+            '"db"=>config("database.default"),"reset_method"=>(int)admin_setting("reset_traffic_method",1),'
+            '"authorization"=>"Bearer ".$t->plainTextToken,"session_id"=>(int)$t->accessToken->id,'
+            '"expires_at"=>$expiry->timestamp]);', cleanup={"container":self.args.container,"name":self.session_name,"delay":900})
+        return self._access
+
+    def revoke_access(self):
+        if self._access:
+            identifier = int(self._access["session_id"])
+            name = base64.b64encode(self.session_name.encode()).decode()
+            self.php('$n=Laravel\\Sanctum\\PersonalAccessToken::whereKey(' + str(identifier) + ')'
+                     '->where("name",base64_decode("' + name + '"))->delete();'
+                     'echo json_encode(["removed"=>$n]);')
+            self._access = None
 
     def backup(self):
         if self.args.no_backup:
@@ -214,12 +293,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class API:
-    def __init__(self, base, admin_path, session_resolver=None):
+    def __init__(self, base, admin_path, access_provider=None, access=None):
         self.base = base
         self.prefix = "/api/v2/" + urllib.parse.quote(admin_path.strip("/"), safe="")
-        self.auth = None
-        self.session_id = None
-        self.session_resolver = session_resolver
+        self.auth = access.get("authorization") if access else None
+        self.expires_at = access.get("expires_at", 0) if access else 0
+        self.access_provider = access_provider
+        self._users = None
+        self.users_updated_at = 0
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def call(self, path, payload=None):
@@ -246,42 +327,76 @@ class API:
         return result
 
     def admin(self, path, payload=None):
+        self.ensure_auth()
+        if payload is not None:
+            self._users = None
         return self.call(self.prefix + path, payload)
 
-    def login(self, email, password):
-        if self.session_resolver is None:
-            raise Error("缺少本次登录会话的精确识别器；不会发起登录。")
-        data = self.call("/api/v1/passport/auth/login", {"email": email, "password": password})["data"]
-        self.auth = data["auth_data"]
-        try:
-            # Sanctum intentionally hides token hashes in session-list JSON.
-            # Resolve this exact token over trusted SSH, never guess by timestamp.
-            self.session_id = self.session_resolver(self.auth)
-            if not data.get("is_admin"):
-                raise Error("需要 XBoard 管理员账号，不是普通订阅用户。")
-        except Exception:
-            self.close()
-            raise
+    def ensure_auth(self):
+        if self.auth and self.expires_at > time.time() + 60:
+            return
+        if not self.access_provider:
+            raise Error("没有可用的 SSH 授权；不会退回密码登录。")
+        access = self.access_provider()
+        self.auth, self.expires_at = access["authorization"], access["expires_at"]
 
-    def close(self):
-        if self.auth and self.session_id is not None:
-            try:
-                self.call("/api/v1/user/removeActiveSession", {"session_id": self.session_id})
-            except Error:
-                print("警告：本次登录会话未能撤销，请在后台会话管理中处理。", file=sys.stderr)
-        elif self.auth:
-            print("警告：本次登录会话未能识别，请在后台会话管理中处理。", file=sys.stderr)
-        self.auth = None
-        self.session_id = None
-
-    def users(self):
+    def users(self, force=False):
+        if self._users is not None and not force:
+            return self._users
         rows = []
         for page in range(1, 1001):
             result = self.admin(f"/user/fetch?current={page}&pageSize=100")
             rows.extend(result["data"])
             if page >= result.get("last_page", 1):
+                self._users = rows
+                self.users_updated_at = time.time()
                 return rows
         raise Error("用户页数超过上限，已停止，未返回不完整列表。")
+
+
+class Bridge:
+    def __init__(self, process):
+        self.process = process
+        self.responses = queue.Queue(maxsize=2)
+        self.sequence = 0
+        self.lock = threading.Lock()
+        self.reader = threading.Thread(target=self.read, daemon=True)
+        self.reader.start()
+
+    def read(self):
+        try:
+            while line := self.process.stdout.readline(3 * 1024 * 1024):
+                self.responses.put(json.loads(line), timeout=1)
+        except (ValueError, OSError, queue.Full):
+            pass
+        finally:
+            with contextlib.suppress(queue.Full):
+                self.responses.put_nowait({"disconnected": True})
+
+    def receive(self, timeout):
+        try:
+            response = self.responses.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise Error("SSH 请求超时；修改结果可能不确定，先查询，不自动重试。") from exc
+        if response.get("disconnected"):
+            raise Error("SSH 连接已断开；先核对结果，不自动重复修改。")
+        return response
+
+    def run(self, command, data=None, timeout=60, cleanup=None):
+        with self.lock:
+            self.sequence += 1
+            request = {"id": self.sequence, "command": command, "data": data, "timeout": min(timeout,55)}
+            if cleanup:
+                request["cleanup"] = cleanup
+            try:
+                self.process.stdin.write(json.dumps(request) + "\n")
+                self.process.stdin.flush()
+            except (OSError, ValueError) as exc:
+                raise Error("SSH 连接不可写；修改请求不自动重试。") from exc
+            response = self.receive(timeout)
+            if response.get("id") != self.sequence or response.get("code") != 0:
+                raise Error("远端请求未通过；已隐藏错误正文。请检查状态，不自动重试。")
+            return response["stdout"]
 
 
 @contextlib.contextmanager
@@ -289,53 +404,57 @@ def tunnel(ssh):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    process = subprocess.Popen(ssh.base + ["-o", "ExitOnForwardFailure=yes", "-N", "-L",
-                              f"127.0.0.1:{port}:127.0.0.1:{ssh.args.panel_port}", ssh.args.host],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    code = base64.b64encode(BRIDGE.encode()).decode()
+    command = shlex.join(["python3", "-u", "-c", "exec(__import__('base64').b64decode('" + code + "'))"])
+    process = subprocess.Popen(ssh.base + ["-o", "ExitOnForwardFailure=yes", "-L",
+                              f"127.0.0.1:{port}:127.0.0.1:{ssh.args.panel_port}", ssh.args.host, command],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               text=True, encoding="utf-8", errors="strict")
+    bridge = Bridge(process)
     try:
-        for _ in range(100):
-            if process.poll() is not None:
-                raise Error("SSH 隧道启动失败。核对免密登录、已验证的主机指纹和端口。")
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                    break
-            except OSError:
-                time.sleep(0.15)
-        else:
-            raise Error("SSH 隧道启动超时。")
+        if not bridge.receive(20).get("ready"):
+            raise Error("SSH 连接初始化失败。")
+        ssh.bridge = bridge
         yield f"http://127.0.0.1:{port}"
     finally:
-        if process.poll() is None:
+        try:
+            ssh.revoke_access()
+        except Error:
+            print("警告：本次会话未能撤销；旧版面板可能不校验到期时间，请检查 vpsctl 命名会话。不会删除其他设备会话。", file=sys.stderr)
+        ssh.bridge = None
+        if process.stdin:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+        try:
+            process.wait(timeout=25)
+        except subprocess.TimeoutExpired:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
-        if process.stderr:
-            process.stderr.close()
+                process.wait(timeout=3)
+        bridge.reader.join(timeout=1)
+        if process.stdout:
+            process.stdout.close()
 
 
 class Console:
     def __init__(self, args, ssh, base, meta):
         self.args, self.ssh, self.base, self.meta = args, ssh, base, meta
-        self.api = API(base, args.admin_path or meta.get("admin_path", ""), ssh.session_id)
+        self.api = API(base, args.admin_path or meta.get("admin_path", ""), ssh.access, meta)
         self.ui = None
 
-    def read(self, prompt, password=False):
+    def read(self, prompt):
         if self.ui:
-            return self.ui.read(prompt, password=password)
-        return getpass.getpass(prompt) if password else input(prompt)
+            return self.ui.read(prompt)
+        return input(prompt)
 
     def login(self):
-        if not self.api.auth:
-            if not sys.stdin.isatty():
-                raise Error("管理员登录需要交互终端；密码不从管道、参数或环境变量读取。")
-            email = self.args.admin_email or self.read("XBoard 管理员邮箱：").strip()
-            self.api.login(email, self.read("管理员密码（不显示、不保存）：", password=True))
+        self.api.ensure_auth()
 
-    def user(self, selector):
-        return select_one(self.api.users(), selector)
+    def user(self, selector, fresh=False):
+        return select_one(self.api.users(force=fresh), selector)
 
     def show(self, rows):
         if self.args.json:
@@ -384,6 +503,10 @@ class Console:
             return False
         if self.meta.get("db") != "sqlite" and not self.args.no_backup:
             raise Error("自动备份仅支持 SQLite；此数据库类型需另行安排备份。")
+        if self.ui and self.ui.pending:
+            self.ui.pending.seek(0)
+            self.ui.pending.truncate()
+            print("操作：" + phrase)
         self.ssh.backup()
         return True
 
@@ -432,7 +555,12 @@ class Console:
             if any(r.get("email") == email for r in self.api.users()):
                 raise Error("该邮箱已存在，不会覆盖或重复创建。")
             plans = self.api.admin("/plan/fetch")["data"]
-            plan = select_one(plans, params["plan"], "套餐")
+            if not params.get("plan"):
+                if len(plans) != 1:
+                    raise Error("存在多个套餐，请在 TUI 中选择；不会猜测套餐。")
+                plan = plans[0]
+            else:
+                plan = select_one(plans, params["plan"], "套餐")
             method = plan.get("reset_traffic_method")
             if (self.meta["reset_method"] if method is None else int(method)) != 0:
                 raise Error("新增用户需选择每月一日重置的现有套餐；本工具不修改共享套餐。")
@@ -477,9 +605,9 @@ class Console:
                 print("永久删除账号及其关联订单、统计、工单等；建议优先停用。")
             else:
                 print("仅重置此用户上传/下载计数；不重置共享总池，也不返还服务商流量。")
-            if not self.approve(command.upper() + " " + str(row["id"])):
+            if not self.approve(command.upper() + " " + row["email"]):
                 return
-            current = self.user(str(row["id"]))
+            current = self.user(str(row["id"]), fresh=True)
             protect_user(current)
             if any(current.get(k) != row.get(k) for k in ("email", "plan_id", "transfer_enable", "banned")):
                 raise Error("确认期间用户配置已变化，停止提交，请重新查询。")
@@ -490,11 +618,11 @@ class Console:
             else:
                 self.update(current, fields)
             if command == "delete":
-                if any(r["id"] == row["id"] for r in self.api.users()):
+                if any(r["id"] == row["id"] for r in self.api.users(force=True)):
                     raise Error("删除后检查未通过。")
                 print("已删除。")
             else:
-                after = self.user(str(row["id"]))
+                after = self.user(str(row["id"]), fresh=True)
                 if any(after.get(k) != current.get(k) for k in ("token", "uuid")):
                     raise Error("账号密钥意外变化，请检查；不自动重试。")
                 for key, value in fields.items():
@@ -511,7 +639,12 @@ class Console:
                 if not self.args.json:
                     print("单位为原始 bytes。这是面板计量，不是 Vultr 账单或网络层硬限额。")
                 return
-            row = select_one(nodes, params["node"], "节点")
+            if not params.get("node"):
+                if len(nodes) != 1:
+                    raise Error("存在多个节点，请在 TUI 中选择；不会猜测目标。")
+                row = nodes[0]
+            else:
+                row = select_one(nodes, params["node"], "节点")
             limit = quota_bytes(params["value"])
             print(f"节点 #{row['id']} {row['name']}，新总池额度 {size(limit)}；保留 u/d 用量。")
             if not self.approve("POOL " + str(row["id"])):
@@ -541,6 +674,8 @@ class Console:
         print(f"将重启 {target}。node/vps 会中断代理连接；此操作不更改配置。")
         if not confirm("RESTART " + target, self.args.dry_run, self.read):
             return
+        self.ssh.revoke_access()
+        self.api.auth, self.api.expires_at = None, 0
         if target == "panel":
             command_line = shlex.join(["docker", "restart", "--time", "30", self.args.container])
         elif target == "node":
@@ -562,11 +697,14 @@ def clean_line(text):
 def pad(text, width):
     text = clean_line(text)
     clipped = ""
+    used = 0
     for character in text:
-        if cell_width(clipped + character) > width:
+        step = cell_width(character)
+        if used + step > width:
             break
         clipped += character
-    return clipped + " " * max(0, width - cell_width(clipped))
+        used += step
+    return clipped + " " * max(0, width - used)
 
 
 class TerminalUI:
@@ -579,6 +717,8 @@ class TerminalUI:
         self.width = 90
         self.height = 24
         self.old_mode = None
+        self.last_frame = []
+        self.last_width = 0
 
     def __enter__(self):
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -623,20 +763,66 @@ class TerminalUI:
         rows += ["| " + pad(line, inside) + " |" for line in lines[:body_height]]
         rows += ["| " + " " * inside + " |"] * max(0, body_height - len(lines))
         rows += [edge, "| " + pad(footer, inside) + " |", edge]
-        print("\x1b[2J\x1b[H", end="", file=self.output)
+        full = self.width != self.last_width or len(rows) != len(self.last_frame)
+        chunks = ["\x1b[2J\x1b[H"] if full else []
         for index, row in enumerate(rows):
             color = "\x1b[1;36m" if index == 1 else "\x1b[2m" if index == len(rows)-2 else ""
-            print(color + row + "\x1b[0m", file=self.output)
+            if full or row != self.last_frame[index]:
+                chunks.append(f"\x1b[{index+1};1H" + color + row + "\x1b[0m\x1b[K")
+        chunks.append(f"\x1b[{len(rows)+1};1H\x1b[J")
+        self.output.write("".join(chunks))
         self.output.flush()
+        self.last_frame, self.last_width = rows, self.width
 
-    def read(self, prompt, password=False):
+    def read(self, prompt):
         self.dimensions()
         context = self.pending.getvalue().splitlines() if self.pending else []
-        self.draw("输入", context[-max(1, self.height-11):] + ["", prompt], "输入后按 Enter；确认内容不匹配即取消")
-        if password:
-            return getpass.getpass("> ", stream=self.output)
+        self.draw("输入", context[-max(1, self.height-12):] + [""] + prompt.splitlines(), "输入后按 Enter；修改需确认")
         print("> ", end="", file=self.output, flush=True)
         return input()
+
+    def key(self):
+        if os.name == "nt":
+            import msvcrt
+            key = msvcrt.getwch()
+            if key in ("\x00", "\xe0"):
+                return {"H":"up", "P":"down", "I":"prev", "Q":"next", "G":"home", "O":"end"}.get(msvcrt.getwch(), "")
+        else:
+            import select
+            import termios
+            import tty
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                key = sys.stdin.read(1)
+                if key == "\x1b" and select.select([sys.stdin], [], [], 0.05)[0]:
+                    key += os.read(fd, 8).decode(errors="ignore")
+                    return {"\x1b[A":"up", "\x1b[B":"down", "\x1b[5~":"prev", "\x1b[6~":"next"}.get(key, "back")
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if key == "\x03":
+            raise KeyboardInterrupt
+        return "enter" if key in ("\r", "\n") else "back" if key == "\x1b" else key.lower()
+
+    def pick(self, title, options, automatic=False):
+        if not options:
+            raise Error("没有可选项，请先在后台检查配置。")
+        if automatic and len(options) == 1:
+            return options[0][1]
+        selected = 0
+        while True:
+            self.draw(title, [(" > " if i == selected else "   ") + label for i,(label,_) in enumerate(options)],
+                      "上下选择  Enter 确认  Esc 返回")
+            key = self.key()
+            if key in ("up", "k"):
+                selected = max(0, selected-1)
+            elif key in ("down", "j"):
+                selected = min(len(options)-1, selected+1)
+            elif key == "enter":
+                return options[selected][1]
+            elif key in ("back", "q"):
+                return None
 
     def wrap(self, text):
         width = self.width - 4
@@ -666,10 +852,10 @@ class TerminalUI:
             if copy_text and os.name == "nt":
                 footer += "  c 复制链接"
             self.draw(title, heading + lines[page*capacity:(page+1)*capacity], footer)
-            key = input("> ").strip().lower()
-            if key == "n":
+            key = self.key()
+            if key in ("n", "next", "down"):
                 page = min(page+1, pages-1)
-            elif key == "p":
+            elif key in ("p", "prev", "up"):
                 page = max(0, page-1)
             elif key == "c" and copy_text and os.name == "nt":
                 try:
@@ -702,41 +888,86 @@ class TerminalUI:
 
 
 def menu(console):
-    actions = {"1": "status", "2": "users", "3": "link", "4": "create", "5": "quota",
-               "6": "reset", "7": "disable", "8": "enable", "9": "rename", "10": "delete",
-               "11": "pool", "12": "pool-set", "13": "restart", "14": "web", "15": "plans"}
     with TerminalUI(console) as ui:
+        ui.draw("连接", ["正在读取全部用户流量。"], "SSH 密钥授权；不需要面板密码")
+        rows = []
+        selected = 0
+        refresh = True
         while True:
-            preview = "开启" if console.args.dry_run else "关闭"
-            ui.draw("运维中心", [f"SSH  {console.args.host}    预演 {preview}", "",
-                " 查询                           用户管理", " 1  服务状态                    4  新增用户",
-                " 2  用户流量                    5  修改额度", " 3  HTTPS 订阅链接              6  重置用户用量",
-                "11  节点总池                    7  停用用户", "15  套餐                        8  启用用户",
-                "                                9  修改邮箱", " 运维                          10  永久删除",
-                "12  总池上限   13  重启   14  管理网页"], "输入编号  |  d 切换预演  |  0 退出")
-            choice = input("> ").strip().lower()
+            if refresh:
+                try:
+                    rows = [safe_user(r) for r in console.api.users(force=True)
+                            if not r.get("is_admin") and not r.get("is_staff")]
+                    selected = min(selected, max(0,len(rows)-1))
+                except Error as exc:
+                    ui.view("读取失败", str(exc))
+                refresh = False
+            ui.dimensions()
+            capacity = ui.height-11
+            start = (selected//capacity)*capacity
+            widths = [2, ui.width-55, 8, 8, 8, 8, 8]
+            def table(values):
+                return " ".join(pad(str(v),w) for v,w in zip(values,widths))
+            loaded = stamp(console.api.users_updated_at) if console.api.users_updated_at else None
+            preview = "预演" if console.args.dry_run else "确认后执行"
+            lines = [f"{len(rows)} 位用户  |  读取 {loaded[11:19]+' UTC' if loaded else '未完成'}  |  {preview}",
+                     table(["", "用户", "上传GiB", "下载GiB", "已用GiB", "配额GiB", "剩余GiB"]),
+                     "-"*(ui.width-5)]
+            for i,row in enumerate(rows[start:start+capacity],start):
+                lines.append(table([">" if i==selected else "", row["email"],
+                    f"{int(row['u'] or 0)/2**30:.2f}",f"{int(row['d'] or 0)/2**30:.2f}",
+                    f"{row['used_bytes']/2**30:.2f}",f"{int(row['transfer_enable'] or 0)/2**30:.2f}",
+                    f"{row['remaining_bytes']/2**30:.2f}"]))
+            ui.draw("全部用户流量", lines, "上下选择 Enter操作 r刷新 a新增 s状态 t总池 m维护 d预演 q退出")
+            choice = ui.key()
             if choice in ("0", "q"):
                 return
             if choice == "d":
                 console.args.dry_run = not console.args.dry_run
                 continue
-            if choice not in actions:
+            if choice in ("up", "k", "down", "j", "next", "n", "prev", "p", "home", "end"):
+                delta = -1 if choice in ("up","k") else 1 if choice in ("down","j") else capacity if choice in ("next","n") else -capacity
+                selected = 0 if choice == "home" else len(rows)-1 if choice == "end" else max(0,min(len(rows)-1,selected+delta))
+                selected = max(0,selected)
                 continue
-            action, params = actions[choice], {}
-            if action in ("link", "quota", "reset", "disable", "enable", "rename", "delete"):
-                params["user"] = ui.read("用户 ID 或唯一用户名：").strip()
+            if choice == "r":
+                refresh = True
+                continue
+            action, params = None, {}
+            if choice == "enter" and rows:
+                row = rows[selected]
+                action = ui.pick(row["email"], [("复制 / 查看订阅链接", "link"),("调整流量额度", "quota"),
+                    ("重置已用流量", "reset"),("启用用户" if row["banned"] else "停用用户", "enable" if row["banned"] else "disable"),
+                    ("修改邮箱", "rename"),("永久删除用户", "delete")])
+                params["user"] = str(row["id"])
+            elif choice in ("s", "t", "a"):
+                action = {"s":"status", "t":"pool", "a":"create"}[choice]
+            elif choice == "m":
+                action = ui.pick("维护", [("调整总池上限","pool-set"),("重启服务","restart"),
+                    ("打开已有后台网页","web"),("查看套餐","plans")])
+            if not action:
+                continue
             if action in ("quota", "rename", "pool-set"):
                 params["value"] = ui.read("新邮箱：" if action == "rename" else "新额度（如 50GiB 或 50GB）：").strip()
             if action == "pool-set":
-                params["node"] = ui.read("节点 ID 或 code：").strip()
-            if action == "restart":
-                params["target"] = ui.read("重启对象 panel / node / vps：").strip()
-            if action == "create":
-                if not ui.run("plans", {}):
+                nodes = console.api.admin("/server/manage/getNodes")["data"]
+                params["node"] = ui.pick("选择节点",[(n["name"], str(n["id"])) for n in nodes],automatic=True)
+                if params["node"] is None:
                     continue
-                params = {"email": ui.read("新用户完整邮箱：").strip(), "plan": ui.read("现有套餐 ID：").strip(),
+            if action == "restart":
+                params["target"] = ui.pick("重启对象", [("仅重启面板","panel"),("重启节点（中断代理）","node"),
+                    ("重启整台 VPS（中断所有服务）","vps")])
+                if params["target"] is None:
+                    continue
+            if action == "create":
+                plans = console.api.admin("/plan/fetch")["data"]
+                plan = ui.pick("选择套餐",[(p["name"], str(p["id"])) for p in plans],automatic=True)
+                if plan is None:
+                    continue
+                params = {"email": ui.read("新用户完整邮箱：").strip(), "plan": plan,
                           "quota": ui.read("额度（如 50GiB）：").strip(), "days": ui.read("有效天数（不能留空）：").strip()}
-            ui.run(action, params)
+            success = ui.run(action, params)
+            refresh = success and action in ("create","quota","reset","enable","disable","rename","delete") and not console.args.dry_run
 
 
 def parser():
@@ -750,8 +981,7 @@ def parser():
     p.add_argument("--app-dir", default="/opt/Xboard", help="宿主机 XBoard 目录，仅用于备份路径")
     p.add_argument("--database", help="宿主机 SQLite 数据库路径，可覆盖默认路径")
     p.add_argument("--admin-path", help="覆盖自动识别的管理路径，不含斜杠")
-    p.add_argument("--admin-email", help="管理员邮箱；密码仅通过隐藏输入读取")
-    p.add_argument("--dry-run", action="store_true", help="只展示修改计划；登录和正常审计仍会发生")
+    p.add_argument("--dry-run", action="store_true", help="只展示修改计划；短期会话和正常审计仍会发生")
     p.add_argument("--no-backup", action="store_true", help="明确跳过本次业务修改备份，不影响确认")
     p.add_argument("--json", action="store_true", help="查询结果以 JSON 输出；默认列表不输出订阅凭据")
     sub = p.add_subparsers(dest="command")
@@ -765,11 +995,11 @@ def parser():
         s.add_argument("value")
     s = sub.add_parser("create")
     s.add_argument("email")
-    s.add_argument("--plan", required=True)
+    s.add_argument("--plan", help="套餐名称或 ID；仅有一个套餐时自动选择")
     s.add_argument("--quota", required=True)
     s.add_argument("--days", required=True, type=int)
     s = sub.add_parser("pool-set")
-    s.add_argument("node")
+    s.add_argument("node", nargs="?", help="节点名称、code 或 ID；仅有一个节点时可省略")
     s.add_argument("value")
     sub.add_parser("restart").add_argument("target", choices=("panel", "node", "vps"))
     return p
@@ -787,16 +1017,15 @@ def main(argv=None):
     if args.command == "status":
         Console(args, ssh, "", {}).show(ssh.status())
         return
-    meta = ssh.metadata()
+    if not args.command:
+        print("正在通过 SSH 密钥连接…", file=sys.stderr)
     with tunnel(ssh) as base:
+        meta = ssh.access()
         console = Console(args, ssh, base, meta)
-        try:
-            if args.command:
-                console.action(args.command, vars(args))
-            else:
-                menu(console)
-        finally:
-            console.api.close()
+        if args.command:
+            console.action(args.command, vars(args))
+        else:
+            menu(console)
 
 
 if __name__ == "__main__":
