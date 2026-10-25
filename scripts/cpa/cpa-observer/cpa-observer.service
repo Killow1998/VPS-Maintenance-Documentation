@@ -1,0 +1,22 @@
+[Unit]
+Description=CPA per-key usage and shared quota observer
+After=network-online.target cliproxyapi.service
+Wants=network-online.target cliproxyapi.service
+
+[Service]
+User=cpa-observer
+Group=cpa-observer
+ExecStart=/usr/bin/python3 /opt/cpa-observer/observer.py --config /etc/cpa-observer/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cpa-observer
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,4 @@
-# Vultr 与 XBoard 部署维护手册
+# Vultr、XBoard 与 CPA/Claude 部署维护手册
 
 从注册 Vultr、选择低价 VPS，到 SSH 密钥登录、XBoard 节点配置和订阅交付的中文流程。既可由用户逐步操作，也可交给具有本地终端和 SSH 能力的部署助手执行。
 
@@ -16,8 +16,11 @@
 | 镜像交付 | [干净构建的 XBoard 镜像](docs/06-clean-xboard-image.md) | 获取已通过安装/扫描的公开 Release，不在小 VPS 编译 |
 | 已部署修复 | [旧部署 PHP 修复、加固与 Agent Prompt](docs/07-existing-vps-security-repair.md) | 按实际状态选择修复路径，保留现有用户、订阅和用量 |
 | 运维工具 | [免安装 Python 终端](docs/08-terminal-tool.md) | 通过 SSH 隧道查询、管理用户和配额，不再临时编写脚本 |
+| Claude 网关 | [VPS + CPA + Claude Code](docs/09-cpa-claude.md) | 原生 CPA、HTTPS、双授权、独立 Key、用量与剩余额度 |
 
 已经购买 VPS、想直接复用完整方案时，从[方案交接](docs/05-xboard-solution.md)开始。仓库提供部署维护资料和无凭据参考模板，不是运行中的面板导出，也不分发生产容器镜像。
+
+只需要 Claude 模型网关时，从 [CPA 十二节部署指南](docs/09-cpa-claude.md)开始，无需安装 XBoard 或 Docker。[CPA 工具包](scripts/cpa/README.md)提供双授权、黑底 TUI、Key 管理和剩余额度进度条。普通用户用 Base URL + Key 查询匿名号池；管理员通过 SSH 查看账号邮箱与对应剩余额度。
 
 **已按旧版教程部署过的用户**：先看[已有 VPS 修复指南及可转发 Prompt](docs/07-existing-vps-security-repair.md#4-给维护-agent-的-prompt)，不要重新运行新机安装器或覆盖正在使用的 Compose/数据库。
 
@@ -99,3 +102,5 @@ Scholar 原生配置有明确版本边界，见专项文档。升级前先核对
 2026-10-21 加固补充：[关闭不用的 PHP 原生上传进度](docs/04-operations.md#52-关闭不用的-php-原生上传进度)，补齐持久 INI、单文件只读 Compose 挂载、既有服务备份与面板重建、真实订阅/转发/计量验收和配置级回滚。新机流程及部署 Agent 要求已关联；不替代安全版本，也不更改已发布镜像 digest。
 
 2026-10-25 运维工具：[单文件 Python TUI 与使用说明](docs/08-terminal-tool.md)，提供分页用户用量、按需订阅链接、用户管理、配额与总池、指定服务重启。经离线契约测试、Windows PTY 和已有部署只读接口验收；未对生产用户执行写入测试，不增加 VPS 常驻组件。
+
+2026-10-26（Asia/Shanghai）Claude 扩展：[原生 CPA 部署与自助工具包](docs/09-cpa-claude.md)，按十二节模板整理 HTTPS、setup-token 与资料双授权、按 Key 用量和剩余额度。主屏与额度页共用黑底，额度预取后直接显示，后台更新保留当前画面。已检查源码、帮助、链接、隐私，并完成离线界面预览和既有部署只读查询；新机部署、凭据换发及写入按指南逐项验收。
