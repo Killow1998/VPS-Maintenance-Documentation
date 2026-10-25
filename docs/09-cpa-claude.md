@@ -504,11 +504,31 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 **位置：使用者本机。无需 SSH、管理员配置或 OAuth token。**
 
+临时查询使用独立 [quota.sh](../scripts/cpa/quota.sh) 或 [quota.ps1](../scripts/cpa/quota.ps1)，无需克隆仓库或下载 TUI。以下命令从固定 GitHub 提交读取脚本并在内存中执行，不保存脚本文件；将示例入口换成自己的 HTTPS Base URL。
+
+**macOS / Linux：Bash、curl 和 Python 3.9+，无需 pip 包。**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cnsunfishegg/VPS-Maintenance-Documentation/315278c52fb2dca8fa2117b820e6bddb825b5865/scripts/cpa/quota.sh | bash -s -- https://api.example.com
+```
+
+**Windows：PowerShell 5.1+，无需 Python。**
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri 'https://raw.githubusercontent.com/cnsunfishegg/VPS-Maintenance-Documentation/315278c52fb2dca8fa2117b820e6bddb825b5865/scripts/cpa/quota.ps1').TrimStart([char]0xFEFF))) -BaseUrl 'https://api.example.com'
+```
+
+随后隐藏输入自己的客户端 Key。脚本只请求一次 `/v1/quota`，显示匿名账号、剩余额度条、北京时间重置时间和 `(2d3h left)` 短倒计时。它读取 observer 快照，不触发上游刷新或模型调用。颜色只作用于条形，终端背景保持当前设置。
+
+已有环境变量时，Bash 命令末尾追加 `--key-env CPA_API_KEY_CLIENT_A`；PowerShell 追加 `-KeyEnv CPA_API_KEY_CLIENT_A`。参数只填写变量名，不填写 Key 值。省略入口时读取 `CPA_BASEURL`。自动化环境没有交互终端时，使用 Key 环境变量。脚本拒绝 HTTPS 接口重定向，不转发鉴权头到新地址。
+
+已安装完整工具包的用户也可运行：
+
 ```bash
 python3 scripts/cpa/cpa-tools/api_keys.py quota --base-url https://api.example.com
 ```
 
-随后隐藏输入自己的 Key。已有环境变量时加 `--key-env CPA_API_KEY_CLIENT_A`。完整结构加 `--json`。
+该 Python 入口支持 `--key-env CPA_API_KEY_CLIENT_A` 和 `--json`，用于读取已有环境变量及输出完整匿名结构。
 
 | 接口 | 数据 |
 | --- | --- |
@@ -644,3 +664,5 @@ next_action: null
 2026-10-26（Asia/Shanghai）：按“准备—部署—授权—使用—维护—Agent 交付”整理；加入原生 observer、双授权、Key TUI、用户匿名/管理员邮箱额度视图。工具包不包含真实主机、Key、OAuth、账号名单或数据库。
 
 界面经离线预览，额度读取经已有部署只读计时；新机安装、生产 Key 写入、双授权组合和故障回滚没有在本次发布中执行。部署到新服务器时按第 11 节独立验收。
+
+2026-10-26（Asia/Shanghai）：增加独立 Bash / PowerShell 匿名额度查询脚本和固定提交的一条命令入口。Bash 与内嵌 Python 语法、帮助入口、管道执行、隐藏输入和已有服务的只读查询已检查，输出不含 Key 或邮箱。当前验证电脑未安装 PowerShell，`ps1` 尚未执行；Windows 运行结果仍需验证。
