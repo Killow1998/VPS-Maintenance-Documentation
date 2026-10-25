@@ -37,6 +37,25 @@ def beijing(value):
         return "未知"
 
 
+def reset_label(value):
+    try:
+        target = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if target.tzinfo is None:
+            return "未知"
+        seconds = max(0, int((target - dt.datetime.now(dt.timezone.utc)).total_seconds()))
+    except (ValueError, TypeError, AttributeError):
+        return "未知"
+    if seconds >= 86400:
+        left = f"{seconds // 86400}d{seconds % 86400 // 3600}h"
+    elif seconds >= 3600:
+        left = f"{seconds // 3600}h{seconds % 3600 // 60}m"
+    elif seconds >= 60:
+        left = f"{seconds // 60}m{seconds % 60}s"
+    else:
+        left = f"{seconds}s"
+    return beijing(value) + " (" + left + " left)"
+
+
 def quota_label(name):
     for prefix, label in (("five_hour", "5 小时"), ("seven_day", "7 天")):
         if name == prefix:
@@ -58,7 +77,7 @@ def quota_bar(value, size=24):
     return "[" + "█" * filled + "░" * (size - filled) + "]"
 
 
-def quota_lines(data):
+def quota_lines(data, size=100):
     fresh = data.get("accounts_with_fresh_quota", 0)
     result = [f"号池 {data.get('accounts_total', 0)} 个账号 · {data.get('accounts_enabled', 0)} 启用 · {fresh} 有新鲜额度",
               "更新 " + beijing(data.get("checked_at")) + (" · 部分数据过时/未知" if data.get("stale", True) else " · 数据新鲜"), ""]
@@ -81,7 +100,8 @@ def quota_lines(data):
             suffix = " 旧值" if account.get("stale", True) else ""
             remaining = remaining_value(window.get("remaining_percent"))
             value = "未知" if remaining is None else f"{remaining:.1f}%"
-            result.append(f"  {label} {quota_bar(remaining)} {cell(value, 7)} 重置 {beijing(window.get('resets_at'))}{suffix}")
+            bar_size = max(8, min(24, size - 66))
+            result.append(f"  {label} {quota_bar(remaining, bar_size)} {cell(value, 7)} 重置 {reset_label(window.get('resets_at'))}{suffix}")
         result.append("")
     result.append("█ 剩余  ░ 已用 · 时间为北京时间 · 各账号百分比不可相加")
     return result
@@ -140,7 +160,7 @@ def detail_lines(row, usage):
 def render_cli(result):
     size = max(80, min(120, shutil.get_terminal_size((110, 24)).columns))
     if "quota" in result:
-        print("\n".join(quota_lines(result["quota"])))
+        print("\n".join(quota_lines(result["quota"], size)))
     elif "keys" in result:
         print(cell("调用者", 27) + cell("状态", 10) + "ID（短）")
         for row in result["keys"]:

@@ -2,8 +2,9 @@
 import curses
 import queue
 import threading
+import time
 
-from key_view import beijing, cell, clip, quota_label, remaining_value
+from key_view import beijing, cell, clip, quota_label, remaining_value, reset_label
 from tui_theme import apply_theme, style
 
 
@@ -52,12 +53,12 @@ class QuotaView:
         self.put(1, 2, f"{self.data.get('accounts_total', 0)} 个账号  ·  {self.data.get('accounts_enabled', 0)} 启用  ·  "
                  f"{self.data.get('accounts_with_fresh_quota', 0)} 新鲜  ·  更新 {beijing(self.data.get('checked_at'))}", curses.A_DIM)
         bar_x = 22
-        bar_size = max(10, min(36, width - 54))
+        bar_size = max(8, min(36, width - 65))
         percent_x = bar_x + bar_size + 3
         reset_x = percent_x + 9
         self.put(3, 2, "账号 / 窗口", curses.A_DIM)
         self.put(3, bar_x, "剩余额度", curses.A_DIM)
-        self.put(3, reset_x, "重置（北京）", curses.A_DIM)
+        self.put(3, reset_x, "重置（北京） / 倒计时", curses.A_DIM)
         rows = self.rows()
         visible = height - 9
         self.offset = max(0, min(self.offset, len(rows) - visible))
@@ -81,7 +82,7 @@ class QuotaView:
                     filled = int(bar_size * value / 100 + .5)
                     self.put(y, bar_x, "█" * filled, self.tone(value, stale))
                 self.put(y, percent_x, "未知" if value is None else f"{value:5.1f}%", self.tone(value, stale))
-                self.put(y, reset_x, beijing(window.get("resets_at")), curses.A_DIM)
+                self.put(y, reset_x, reset_label(window.get("resets_at")), curses.A_DIM)
             elif kind == "empty":
                 text = "已禁用，暂无窗口" if item and not item.get("enabled") else "暂无额度数据"
                 if item.get("reason"):
@@ -96,7 +97,16 @@ class QuotaView:
 
     def show(self):
         self.draw()
+        last_clock = 0
+        last_labels = None
         while True:
+            if time.monotonic() - last_clock >= 1:
+                labels = tuple(reset_label(window.get("resets_at")) for account in self.data.get("accounts", [])
+                               for window in account.get("windows", {}).values())
+                if labels != last_labels:
+                    self.draw()
+                    last_labels = labels
+                last_clock = time.monotonic()
             try:
                 data, error = self.events.get_nowait()
             except queue.Empty:
