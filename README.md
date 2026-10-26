@@ -42,7 +42,7 @@
 | CPA 聚合计量和匿名额度接口 | [observer.py](scripts/cpa/cpa-observer/observer.py) | [采集器部署说明](scripts/cpa/cpa-observer/README.md)；可选 VPS 原生服务，不属于 XBoard 免安装工具 |
 | CPA 鉴权与真实生成验收 | [cpa_verify.py](scripts/cpa/cpa_verify.py) | [部署验收步骤](docs/09-cpa-claude.md#8-验证鉴权模型与真实生成)；仅显式运行，真实生成消耗上游用量 |
 
-CPA 自助 TUI 使用 Python 3.9+ 和 macOS/Linux；Windows 通过 WSL 使用，独立 `quota.ps1` 无需 Python/WSL。私密配置与 env 放在仓库外。两套方案共用 VPS 时，先核对 80/443 和现有 SNI 分流，不能覆盖已有站点或节点。
+两套运维工具统一使用 **Python 3.10+**，不需要分别安装两个 Python 版本；运行入口先检查版本，不符合时在读取凭据、连接或修改配置前退出。用 `python3 --version` 检查脚本实际使用的解释器。CPA 自助 TUI 使用 macOS/Linux，Windows 通过 WSL 使用；独立 `quota.ps1` 仍无需 Python/WSL。私密配置与 env 放在仓库外。两套方案共用 VPS 时，先核对 80/443 和现有 SNI 分流，不能覆盖已有站点或节点。
 
 ## 参考方案
 

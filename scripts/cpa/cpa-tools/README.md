@@ -13,7 +13,7 @@
 
 ## 1. 前置条件与一次性配置
 
-- 本机：macOS/Linux、Python 3.9+、SSH；新增 Claude 账号还需安装官方 Claude Code CLI。Windows 请在 WSL 中运行，并在运行脚本的同一电脑浏览器完成授权。
+- 本机：macOS/Linux、Python 3.10+、SSH，与 XBoard 运维工具使用相同最低 Python 版本；新增 Claude 账号还需安装官方 Claude Code CLI。Windows 请在 WSL 中运行，并在运行脚本的同一电脑浏览器完成授权。运行入口会在连接和读取凭据前拒绝低版本；远端 Python 工具也需 Python 3.10+，升级工具前分别检查本机与 VPS 的实际解释器。
 - VPS：已部署 CPA v8、observer、SQLite、systemd；SSH 管理员可读 observer 配置、写 CPA 凭据并重启 observer。默认 CPA unit 为 `cliproxyapi.service`。本工具不安装服务或升级 CPA。
 - 已核实 SSH 主机指纹，并配置密钥登录。工具拒绝自动接受新指纹。
 - observer 配置保持原有 HMAC secret、数据库路径和标签。不要重建，否则历史标识会变化。

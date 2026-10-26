@@ -6,7 +6,7 @@ Daily administrator operations are available through `python3 cpa-tools/api_keys
 
 The TUI's `g` view and `api_keys.py quota --admin` join anonymized account IDs with private account emails over administrator SSH. This mapping is not added to this service's public responses. Ordinary users can run `api_keys.py quota --base-url https://CPA_HOST --key-env CPA_API_KEY_CLIENT_A` with only their Base URL and Key; no deployment configuration or SSH access is required.
 
-Native Python 3 service for CPA v8. No Docker or external database is required. It polls the local CPA usage queue into SQLite and serves two read interfaces behind the existing HTTPS reverse proxy.
+Native Python 3.10+ service for CPA v8, using the same minimum version as the XBoard/CPA operation tools. Check the interpreter in `ExecStart` before replacing an existing observer; the new entry point rejects older versions before reading configuration. Do not upgrade the OS Python or restart production just to update this documentation. No Docker or external database is required. It polls the local CPA usage queue into SQLite and serves two read interfaces behind the existing HTTPS reverse proxy.
 
 For the complete VPS deployment procedure, restricted configuration template, Nginx routes and rollback steps, see section 9.1 of the accompanying [CPA + Claude Code + VPS agent guide](../CPA_CLAUDE_GENERAL_GUIDE.md). Share this source folder together with that guide; neither contains production credentials.
 

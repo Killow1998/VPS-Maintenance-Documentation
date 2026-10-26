@@ -4,7 +4,7 @@
 
 ## 1. 本地启动
 
-需要 Python 3.10+、系统 OpenSSH，以及已经验证主机指纹的 SSH 密钥登录。默认容器 `xboard-xboard-1`、宿主机目录 `/opt/Xboard`、节点服务 `xboard-node.service`，容器内应用在 `/www`。先核对实际部署；不符合时用 `--help` 中的选项覆盖。
+需要 Python 3.10+、系统 OpenSSH，以及已经验证主机指纹的 SSH 密钥登录。最低 Python 版本与 CPA 运维工具统一；启动时先检查版本，低版本不会连接服务器。默认容器 `xboard-xboard-1`、宿主机目录 `/opt/Xboard`、节点服务 `xboard-node.service`，容器内应用在 `/www`。先核对实际部署；不符合时用 `--help` 中的选项覆盖。
 
 克隆或下载仓库后，在仓库目录的本地终端运行：
 

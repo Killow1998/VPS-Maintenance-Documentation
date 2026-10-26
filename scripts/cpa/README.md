@@ -11,9 +11,9 @@
 | `cpa-observer/` | VPS 原生采集器、SQLite、客户端接口 |
 | `cpa_verify.py` | 显式运行的鉴权和真实生成验证 |
 
-本机使用 Python 3.9+，macOS/Linux 或 Windows WSL。普通用户额度查询无需 SSH；管理员需现有 SSH 和对应权限。运行命令示例见 [自助 SOP](cpa-tools/README.md)。
+Python 运维工具统一要求 Python 3.10+，与 XBoard 的 `vpsctl.py` 一致。本机使用 macOS/Linux 或 Windows WSL；CPA 的远端 Python 工具及 observer 也按同一版本要求预检，不能只检查本机。普通用户额度查询无需 SSH；管理员需现有 SSH 和对应权限。运行命令示例见 [自助 SOP](cpa-tools/README.md)。
 
-临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。必须指定本机 HTTP/mixed 代理，缺少代理或连接失败不回退直连。默认同屏显示当前 Key 的近 1h/7d/30d/总历史与号池余量，TUI 模式支持 R/Enter 刷新、Q 退出；每次仅两次只读请求。指定具体期间可查询匿名账号汇总、近期明细和计价。新总览需要新版 observer，历史仅限实际保留记录；号池百分比与 token 用量不可混算。固定版本下载、强制代理边界及选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
+临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。在仓库根目录直接执行 `bash scripts/cpa/quota.sh`，依次输入本机 HTTP/mixed 代理端口、HTTPS Base URL 和隐藏的 API Key，即进入看板；不将连接信息或 Key 写入文件。缺少交互终端时必须通过参数或环境变量提供连接信息，缺少代理或连接失败不回退直连。默认同屏显示当前 Key 的近 1h/7d/30d/总历史与号池余量，R/Enter 刷新、Q 退出；每次仅两次只读请求。Bash 使用 `--once` 可单次查询，原有完整参数调用保持单次模式。指定具体期间可查询匿名账号汇总、近期明细和计价。新总览需要新版 observer，历史仅限实际保留记录；号池百分比与 token 用量不可混算。固定版本下载、强制代理边界及选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
 
 离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p test_quota_clients.py -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。
 
