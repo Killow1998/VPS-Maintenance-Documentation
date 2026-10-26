@@ -26,7 +26,7 @@ Both interfaces use the same root Base URL and `Authorization: Bearer <client CP
 
 Missing/invalid keys return 401, unsupported account/client selectors return 400, and request limits return 429. These endpoints are extensions supplied by this service, not native CPA endpoints. All valid downstream Keys in this deployment use the same shared Claude pool. If per-Key upstream routing restrictions are introduced, pool selection must be updated to match them before exposing restricted pools.
 
-The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients require an explicit local HTTP/mixed proxy as well as a Base URL and downstream Key. Missing or failed proxies cannot fall back to DIRECT; the local proxy must also route the gateway through a real proxy node. Their default overview shows all four periods and the cached pool quota. `--tui` / `-Tui` enables a refreshable terminal screen, with two requests per manual refresh and no automatic polling. Pinned download commands also use the proxy; see [guide section 9.3](../../../docs/09-cpa-claude.md).
+The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients require an explicit local HTTP/mixed proxy as well as a Base URL and downstream Key. Missing or failed proxies cannot fall back to DIRECT; the local proxy must also route the gateway through a real proxy node. Interactive setup enables the four-window overview and cached pool view by default; each manual refresh uses two requests, with no automatic polling. The [short launchers](../../../README.md#cpa-一键查询) initially fetch public, credential-free bootstrap code over the current network; only after prompting for the port do they require the proxy for the pinned, hash-verified client download and all API calls. Fully proxied download commands remain in [guide section 9.3](../../../docs/09-cpa-claude.md).
 
 ### Own-Key usage response
 
@@ -106,6 +106,51 @@ The local `--report` command is for administrators and can summarize all client 
 For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart only the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. Account/recent and rolling-overview additions reuse existing columns and require no schema migration. Do not reinstall CPA, restart the forwarding node, reset usage or recreate client Keys. Never run a second usage-queue consumer for testing.
 
 After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, atomically restore the prior source and restart only observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
+
+<a id="repair-prompt"></a>
+
+## 已有部署修复 Prompt
+
+适用于号池可读，但客户端提示 `HTTP 400`、总览/滚动时间段需要更新 observer 的情况。提示证明当前请求被拒绝，不足以单独确认实际运行版本；先核对入口路由、运行进程和源码，不要根据磁盘文件或 Git HEAD 推断服务已经更新。
+
+```text
+请修复我已部署的 CPA 用量查询，不要重新安装或替换 XBoard/CPA。
+仓库：https://github.com/Killow1998/VPS-Maintenance-Documentation
+先阅读 scripts/cpa/cpa-observer/README.md 的 Operation 与本 Prompt，
+以及 docs/09-cpa-claude.md 第 9.3 节。拉取后记录本次采用的完整 commit。
+
+现象：客户端能显示共享号池，但个人用量提示参数不受支持，
+总览/滚动时间段需要更新 observer。目标是恢复当前 Key 的近 1h、7d、30d、总历史。
+
+先只读核对：实际主机、Base URL 的 /v1/usage 和 /v1/quota 路由、
+systemd ExecStart/运行进程、observer 源码版本、解释器、配置路径、数据库和采集状态。
+路径以现场为准，不假定仓库示例目录。用已有 Key 安全验证 overview 返回码和结构。
+密钥只从既有私密配置读取或隐藏输入，不放命令行、日志、报告或 Git。
+
+确认是旧 observer 后，在改动前备份源码、配置、unit、路由及一致的 SQLite 快照。
+活动 WAL 数据库用 SQLite backup API，不只复制主 .sqlite 文件。
+保持数据库、HMAC secret、Key/标签、历史用量、OAuth 授权及号池绑定不变。
+检查实际 ExecStart 的 Python >=3.10、语法、配置与数据库兼容性，
+运行仓库的 test_observer.py；不支持时先报告，不擅自升级系统 Python。
+不得启动第二个采集器消费 usage queue，也不得直接拿生产数据库做写入测试。
+
+预检通过并准备原源码回滚后，原子替换必要的 observer.py，
+只重启现有 observer 服务。默认不改 prices.json、配置、Nginx、unit 或其他服务；
+若发现路由等另有故障，先说明最小修复及影响，再取得对应授权。
+不重启 CPA/XBoard/代理节点，不开公网端口，不重建 Key，不清零或重建数据库。
+
+验收：本机 /healthz；经客户端代理及 HTTPS 查询 overview、1h/7d/30d、
+旧 day/month/all 与 /v1/quota。overview 必须有按 1h、7d、30d、all 排列的四个窗口，
+scope=own_key，各窗口共用截止时间；只含当前 Key，号池仍为独立缓存。
+验证既有记录保留、匿名账号映射不变、采集恢复；若没有新的真实调用，
+明确“未验证新事件入库”，不要编造增量，也不要为验收调用付费模型。
+没有已采集记录时应返回零记录并说明历史覆盖；零记录不证明实际没有调用。
+不得补造采集前的数据，也不得用共享号池或其他 Key 的数据代替。
+
+失败时恢复原源码，只重启 observer；保留当前数据库，不用旧快照覆盖新增用量。
+数据库恢复须另行说明并获得批准。最后报告实际版本、变更文件、测试证据、
+备份位置、回滚命令和历史覆盖缺口。报告与备份留在私有位置，不上传凭据。
+```
 
 ## Reliability limits
 

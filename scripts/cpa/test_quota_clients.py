@@ -187,6 +187,25 @@ class PythonClientTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             CLIENT["render_overview"]({"scope": "own_key", "period": "day", "totals": {}})
 
+    def test_old_usage_api_failure_does_not_hide_successful_pool(self):
+        output, errors = io.StringIO(), io.StringIO()
+
+        def fetch(base, key, path, scope, opener):
+            if scope == "own_key":
+                raise RuntimeError("HTTP 400: overview requires an observer update")
+            return {"scope": "shared_pool", "accounts": []}
+
+        with patch("sys.argv", ["quota", "https://cpa.example.invalid", "--proxy", "http://127.0.0.1:7890"]), \
+                patch.dict(CLIENT, {"read_key": lambda _: "synthetic-key", "fetch": fetch}), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors), \
+                self.assertRaises(SystemExit) as failed:
+            CLIENT["main"]()
+        self.assertEqual(failed.exception.code, 1)
+        self.assertIn("CPA usage", errors.getvalue())
+        self.assertIn("observer update", errors.getvalue())
+        self.assertIn("匿名号池", output.getvalue())
+        self.assertNotIn("近 1 小时", output.getvalue())
+
     def test_redirect_handler_never_follows(self):
         self.assertIsNone(CLIENT["NoRedirect"]().redirect_request(None, None, 302, "", {}, "https://other.invalid"))
 

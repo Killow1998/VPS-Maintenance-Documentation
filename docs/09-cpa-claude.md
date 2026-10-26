@@ -502,9 +502,11 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 ### 9.3 使用者只用 Base URL + Key 查询
 
-**位置：使用者本机。无需 SSH、管理员配置或 OAuth token。必须指定本机 HTTP/mixed 代理，不能直连。**
+**位置：使用者本机。无需 SSH、管理员配置或 OAuth token。API 查询必须指定本机 HTTP/mixed 代理，不能直连。**
 
 临时查询使用独立 [quota.sh](../scripts/cpa/quota.sh) 或 [quota.ps1](../scripts/cpa/quota.ps1)，无需安装 pip 包。先在 Clash/FlClash 中确认 HTTP/mixed 监听端口；`7890` 只是示例。纯 SOCKS 端口不能用作这里的 HTTP 代理。
+
+无需克隆、运行后再输入三项信息的最短入口见[首页 CPA 一键查询](../README.md#cpa-一键查询)。首次公开启动器下载使用当前网络，之后强制代理下载固定客户端、验证 SHA256，再查询 API。下面保留已取得文件的运行方法，以及连首次下载也强制指定代理的完整命令；两种入口不需要同时运行。
 
 **macOS / Linux：Bash 和 Python 3.10+。已取得新版仓库时，在仓库根目录执行：**
 
@@ -736,3 +738,5 @@ next_action: null
 2026-10-26（Asia/Shanghai）：Bash 查询改为无参数交互启动，按端口、HTTPS 入口、隐藏 Key 的顺序收集信息，默认进入总览；增加 `--once`，保留原有参数自动化方式。统一 XBoard/CPA Python 运维工具最低版本为 3.10，并在主要运行入口先检查版本。16 项客户端及版本检查、27 项 XBoard 和 20 项 observer 离线测试通过；实际测试解释器为 Windows Python 3.11.14，另检查 3.10 语法及低版本拒绝路径，不冒充在 3.10 上实跑。Bash 语法和帮助入口通过；本机无已安装 WSL，Linux/macOS 真实交互仍待使用者验收。没有升级生产 Python、部署 observer 或修改业务数据。
 
 2026-10-26（Asia/Shanghai）：按多端一致要求，PowerShell 5.1/7 也支持无参数启动，按端口、HTTPS 入口、隐藏 Key 交互填写后默认进入总览；增加 `-Once`，端口和 URL 格式错误可重输。18 项客户端及版本检查通过，覆盖两版 PowerShell 的模拟交互、单次模式、无终端拒绝和真实回环 CONNECT；PowerShell 7 实际伪终端完成无参数启动、遮掩 Key、R 刷新、Q 退出，接口使用合成返回，无生产查询。Windows 临时验收脚本已删除。
+
+2026-10-25（America/Los_Angeles）：首页新增 Linux/macOS 与 Windows 各一行启动入口；最初公开启动器下载允许使用当前网络，后续固定版本客户端下载和 API 查询强制代理，执行前核对 SHA256。25 项客户端/启动器测试及 20 项 observer 测试通过；PowerShell 实际终端经代理下载并通过校验后到达 Base URL 提示，未输入真实 Key。Bash 在本机 Git Bash 完成语法、模拟执行、真实下载及校验；串接 Windows Python 时其终端检测拒绝继续，未将此当作 Linux/macOS 实机交互验收。另补齐旧 observer 总览 400 的说明和[可转发修复 Prompt](../scripts/cpa/cpa-observer/README.md#repair-prompt)。没有更新生产 observer 或修改任何 VPS。

@@ -44,6 +44,28 @@
 
 两套运维工具统一使用 **Python 3.10+**，不需要分别安装两个 Python 版本；运行入口先检查版本，不符合时在读取凭据、连接或修改配置前退出。用 `python3 --version` 检查脚本实际使用的解释器。CPA 自助 TUI 使用 macOS/Linux，Windows 通过 WSL 使用；独立 `quota.ps1` 仍无需 Python/WSL。私密配置与 env 放在仓库外。两套方案共用 VPS 时，先核对 80/443 和现有 SNI 分流，不能覆盖已有站点或节点。
 
+## CPA 一键查询
+
+不用克隆仓库，不用预填参数。先打开本机 Clash/FlClash，然后在普通交互终端运行对应的一行。依次输入 **HTTP/mixed 代理端口 → HTTPS Base URL → API Key（隐藏输入）**。这是 CPA 模型用量/号池查询，不是 XBoard 的 GB 流量查询。
+
+**Linux / macOS**（Bash、curl、Python 3.10+）：
+
+```bash
+c=$(curl -qfsS --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/main/cpa.sh) && bash -c "$c"
+```
+
+**Windows PowerShell 5.1+ / 7+**（无需 Python、WSL 或管理员权限）：
+
+```powershell
+irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/main/cpa.ps1 -TimeoutSec 60 -ErrorAction Stop | iex
+```
+
+启动后同屏查看当前 Key 的近 1h、7d、30d、总历史，以及共享号池余量。`R` / 回车刷新，`Q` 退出。不自动轮询、不调用模型，不保存 Base URL 或 Key，不修改 VPS。
+
+**两阶段网络边界：** 首次下载不含密钥的公开启动器使用当前网络，可能直连；尚未输入的端口不可能用于这次下载。启动器询问端口后，查询脚本下载和所有 API 请求强制走该本机 HTTP 代理，失败不回退直连。还需在 Clash 中确认 CPA 域名最终走真实代理节点，而不是 DIRECT。公开启动器随 `main` 更新；它将查询脚本固定到已测试的 commit，并验证 SHA256 后才执行。可先阅读 [Linux 启动器](cpa.sh) / [Windows 启动器](cpa.ps1)；要求首次下载也强制指定代理时，使用[固定版本完整命令](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)。
+
+**只显示号池，提示“查询参数不受支持／总览、滚动时间段需要更新 observer”？** 这说明用量接口拒绝了新查询，不是因为 Key 没调用过。通常是 VPS 仍运行旧 observer；仓库更新或重新下载客户端不会更新服务器。由管理员使用[现有 observer 修复 Prompt](scripts/cpa/cpa-observer/README.md#repair-prompt)核对并升级，仅重启 observer，保留数据库、HMAC、Key 和转发服务。无调用且已正常采集时，个人用量区也应显示零；号池是共享缓存，不能替代本 Key 消耗。
+
 ## 参考方案
 
 日常操作可直接运行[单文件 TUI](scripts/vpsctl.py)。只需本地 Python 和现有 SSH 免密登录；首页直接显示全部用户流量，选中用户即可操作，不再输入面板账号、密码或用户 ID。不安装 VPS 服务，不公开管理端口。见[启动、功能和测试边界](docs/08-terminal-tool.md)。

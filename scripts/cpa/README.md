@@ -2,6 +2,8 @@
 
 从仓库根目录阅读 [VPS + CPA + Claude 部署指南](../../docs/09-cpa-claude.md)。本目录只提供源码和示例，不包含任何部署数据。
 
+只想查个人用量和号池时，使用[首页的一行启动命令](../../README.md#cpa-一键查询)，无需克隆仓库。Linux/macOS 与 Windows 均在启动后询问端口、Base URL 和隐藏 Key；首次公开启动器下载使用当前网络，其余下载和 API 强制代理。若提示 observer 不支持总览，转交[现有服务修复 Prompt](cpa-observer/README.md#repair-prompt)，不要反复换 Key。
+
 | 位置 | 用途 |
 | --- | --- |
 | `cpa-tools/claude_auth.py` | setup-token + profile/quota 双授权 |
@@ -15,6 +17,6 @@ Python 运维工具统一要求 Python 3.10+，与 XBoard 的 `vpsctl.py` 一致
 
 临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。在仓库根目录，Linux/macOS 执行 `bash scripts/cpa/quota.sh`，Windows 执行 `.\scripts\cpa\quota.ps1`，均无需参数。依次输入本机 HTTP/mixed 代理端口、HTTPS Base URL 和隐藏的 API Key，即进入看板；不将连接信息或 Key 写入文件。缺少交互终端时必须通过参数或环境变量提供连接信息，缺少代理或连接失败不回退直连。默认同屏显示当前 Key 的近 1h/7d/30d/总历史与号池余量，R/Enter 刷新、Q 退出；每次仅两次只读请求。`--once` / `-Once` 可单次查询，原有完整参数调用保持单次模式。指定具体期间可查询匿名账号汇总、近期明细和计价。新总览需要新版 observer，历史仅限实际保留记录；号池百分比与 token 用量不可混算。固定版本下载、强制代理边界及选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
 
-离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p test_quota_clients.py -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。
+离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p 'test_quota_*.py' -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。启动器测试核对固定源码哈希，并覆盖失败/篡改不执行、无终端拒绝、交互输入及代理传递。
 
 私密配置用 `--config /PRIVATE/deployment.json` 或 `CPA_TOOLS_CONFIG` 指定，放在克隆目录之外。默认配置路径是便利入口，不是公开模板。不要把私密 env、state、密钥、OAuth 文件、数据库和 VPS 备份复制到本目录。

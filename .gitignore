@@ -3,6 +3,8 @@
 !.gitignore
 !.gitattributes
 !README.md
+!cpa.sh
+!cpa.ps1
 !docs/
 docs/*
 !docs/01-vultr-purchase.md
@@ -60,6 +62,7 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/quota.sh
 !scripts/cpa/quota.ps1
 !scripts/cpa/test_quota_clients.py
+!scripts/cpa/test_quota_launchers.py
 !scripts/cpa/cpa-auth/README.md
 !scripts/cpa/cpa-auth/USER_WORKFLOW.md
 !scripts/cpa/cpa-auth/managed_quota.py
