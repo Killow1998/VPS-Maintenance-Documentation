@@ -7,7 +7,7 @@
 | 读者 | 阅读路径 |
 | --- | --- |
 | 部署者 | 按 1—8 节完成部署和真实请求验证。使用双授权工具时，先完成 9.1 的 observer 准备。 |
-| 仅使用服务的人 | 取得入口、自己的客户端 Key 和模型 ID，阅读 7—8 节；9.3 可查匿名剩余额度。 |
+| 仅使用服务的人 | 取得入口、自己的客户端 Key 和模型 ID，阅读 7—8 节；9.3 可查自身用量、近期调用和匿名剩余额度。 |
 | 管理员 | 9.2 管理 Key、查看用量和账号剩余额度；10—11 节用于维护。 |
 | 执行任务的 Agent | 先读第 12 节，再执行对应部署步骤；第 11 节定义交付标准。 |
 
@@ -509,18 +509,29 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 **macOS / Linux：Bash、curl 和 Python 3.9+，无需 pip 包。**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/315278c52fb2dca8fa2117b820e6bddb825b5865/scripts/cpa/quota.sh | bash -s -- https://api.example.com
+curl -fsSL https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/13d0dc2254d082b86e8cf71d259dbfb27eb32ede/scripts/cpa/quota.sh | bash -s -- https://api.example.com
 ```
 
 **Windows：PowerShell 5.1+，无需 Python。**
 
 ```powershell
-& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/315278c52fb2dca8fa2117b820e6bddb825b5865/scripts/cpa/quota.ps1').TrimStart([char]0xFEFF))) -BaseUrl 'https://api.example.com'
+& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/13d0dc2254d082b86e8cf71d259dbfb27eb32ede/scripts/cpa/quota.ps1').TrimStart([char]0xFEFF))) -BaseUrl 'https://api.example.com'
 ```
 
-随后隐藏输入自己的客户端 Key。脚本只请求一次 `/v1/quota`，显示匿名账号、剩余额度条、北京时间重置时间和 `(2d3h left)` 短倒计时。它读取 observer 快照，不触发上游刷新或模型调用。颜色只作用于条形，终端背景保持当前设置。
+随后隐藏输入自己的客户端 Key。脚本默认各请求一次 `/v1/usage` 和 `/v1/quota`，依次显示：本 Key 今日请求/失败数、输入/输出/缓存/总 token、API 标价估算和计价覆盖率；按匿名调用账号汇总的消耗；最近 10 条调用的时间、匿名账号、模型、token 和状态；号池剩余额度条、北京时间重置时间和 `(2d3h left)` 短倒计时。脚本读取 observer 数据，不触发上游刷新或模型调用。颜色只作用于条形，终端背景保持当前设置。
 
 已有环境变量时，Bash 命令末尾追加 `--key-env CPA_API_KEY_CLIENT_A`；PowerShell 追加 `-KeyEnv CPA_API_KEY_CLIENT_A`。参数只填写变量名，不填写 Key 值。省略入口时读取 `CPA_BASEURL`。自动化环境没有交互终端时，使用 Key 环境变量。脚本拒绝 HTTPS 接口重定向，不转发鉴权头到新地址。
+
+| 查询内容 | Bash 命令末尾追加 | PowerShell 命令末尾追加 |
+| --- | --- | --- |
+| 仅自己的用量与调用记录 | `--view usage` | `-View usage` |
+| 仅号池剩余额度 | `--view quota` | `-View quota` |
+| 本月用量 | `--period month` | `-Period month` |
+| 全部已采集用量 | `--period all` | `-Period all` |
+| 指定某日 | `--period day --date 2026-10-26` | `-Period day -Date 2026-10-26` |
+| 最近 20 条调用 | `--recent 20` | `-Recent 20` |
+
+近期明细限定在同一统计期间，条数支持 0–50；`0` 只返回汇总。调用中的 `account-…` 与额度页的匿名账号编号一致，表示实际承接该次上游执行的账号。每个匿名账号的汇总只包含当前 Key 的调用。缺失归属显示“未归属”；旧账号的历史记录会继续保留。共享窗口的额度百分比与个人 token 消耗分别展示。
 
 已安装完整工具包的用户也可运行：
 
@@ -533,10 +544,13 @@ python3 scripts/cpa/cpa-tools/api_keys.py quota --base-url https://api.example.c
 | 接口 | 数据 |
 | --- | --- |
 | `GET /v1/quota` | 匿名号池和匿名账号的剩余额度窗口 |
-| `GET /v1/usage?period=day` | 当前 Key 今日已采集用量 |
+| `GET /v1/usage?period=day&recent=10` | 当前 Key 今日已采集用量、按匿名账号汇总、最近 10 条调用 |
 | `GET /v1/usage?period=month&date=2026-10` | 当前 Key 指定月用量 |
+| `GET /v1/usage?period=all&recent=50` | 当前 Key 全部汇总及最近 50 条调用 |
 
 公网请求使用 `Authorization: Bearer <自己的客户端Key>`。无效/无 Key 返回 401。普通用户不获得邮箱或其他 Key 的私有用量。
+
+`/v1/usage` 新增 `accounts`（各匿名账号的请求、失败、token、估算费用、最近调用时间）和 `recent`（逐次执行记录），保留原 `totals`、`models`。身份由请求 Key 决定，不接受 `client` 或 `account` 选择参数；非法条数返回 400。升级已有 observer 时，先备份代码和 SQLite 一致快照，复用原数据库、HMAC secret 与路由，替换 `observer.py` 后重启现有 unit，再验证接口。
 
 管理员用 `quota --admin` 或 TUI `g` 通过 SSH 将匿名 ID 匹配邮箱；公网响应不增加邮箱。管理员直接读取 observer 已保存的快照，不临时调用上游。TUI 初次加载预取快照，之后打开面板直接显示；面板 `r` 后台更新，旧画面保留。
 
@@ -666,3 +680,5 @@ next_action: null
 界面经离线预览，额度读取经已有部署只读计时；新机安装、生产 Key 写入、双授权组合和故障回滚没有在本次发布中执行。部署到新服务器时按第 11 节独立验收。
 
 2026-10-26（Asia/Shanghai）：增加独立 Bash / PowerShell 匿名额度查询脚本和固定提交的一条命令入口。初次提交完成 Bash 与内嵌 Python 语法、帮助入口、管道执行、隐藏输入和已有服务只读查询；输出不含 Key 或邮箱。PR #1 合并时补充 PowerShell 7.6 离线接口测试，覆盖单次查询、不跟随重定向、无效 HTTP 入口拒绝和错误正文隐藏；测试不连接生产服务。Windows PowerShell 5.1 的文件语法和内存入口离线查询通过；本机文件执行策略不允许直接运行未签名脚本，不修改该策略，使用上方内存命令入口。
+
+2026-10-26（Asia/Shanghai）：补齐按 Key 隔离的匿名调用账号汇总与近期明细，独立脚本默认合并个人用量和号池余量。17 项 observer 检查通过，覆盖鉴权、跨 Key 隔离、账号编号匹配、北京时间边界、未知值和条数限制；已有服务更新后历史数量保持，真实管道隐藏输入与只读组合查询通过。本次新增 PowerShell 用量视图尚未执行。
