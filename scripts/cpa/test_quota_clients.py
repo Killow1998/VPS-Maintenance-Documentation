@@ -23,11 +23,17 @@ exec(compile(SOURCE.rsplit("\ntry:\n    main()", 1)[0], str(ROOT / "quota.sh"), 
 
 
 def overview():
-    return {"scope": "own_key", "period": "overview", "as_of": "2026-10-25T12:00:00Z",
+    result = {"scope": "own_key", "period": "overview", "as_of": "2026-10-25T12:00:00Z",
             "collector_status": "ok", "rejected_events": 0,
             "windows": [{"period": period, "totals": {"requests": index, "failed_requests": 0,
-                         "input_tokens": index*100, "output_tokens": index*30, "total_tokens": index*130}}
+                         "input_tokens": index*100, "output_tokens": index*30, "total_tokens": index*130,
+                         "cache_read_tokens": index*30, "cache_write_tokens": index*10,
+                         "priced_requests": index, "estimated_cost_usd_low": index*.000448,
+                         "estimated_cost_usd_high": index*.000463}}
                         for index, period in enumerate(("1h", "7d", "30d", "all"), 1)]}
+    for window in result["windows"]:
+        window["models"] = [{"model": "claude-sonnet-5-5", **window["totals"]}]
+    return result
 
 
 class RejectTunnel(socketserver.BaseRequestHandler):
@@ -57,6 +63,14 @@ def proxy_server():
 
 
 class PythonClientTests(unittest.TestCase):
+    def test_cache_rate_is_token_weighted_and_unknown_not_zero(self):
+        self.assertEqual(CLIENT["cache_percent"]({"input_tokens": 1000, "cache_read_tokens": 930}), 93.0)
+        self.assertEqual(CLIENT["cache_percent"]({"input_tokens": 1000, "cache_read_tokens": 0}), 0)
+        for total, read in ((0, 0), (None, 30), (100, None), (100, 101), (100, -1),
+                            (100, True), (float("inf"), 10), (100, "30")):
+            with self.subTest(total=total, read=read):
+                self.assertIsNone(CLIENT["cache_percent"]({"input_tokens": total, "cache_read_tokens": read}))
+
     def test_required_proxy_validation(self):
         for bad in ("", "socks5://127.0.0.1:7890", "http://proxy.invalid:7890", "http://127.0.0.1",
                     "http://127.0.0.1:0", "http://u:p@127.0.0.1:7890", "http://127.0.0.1:7890/path"):
@@ -108,8 +122,8 @@ class PythonClientTests(unittest.TestCase):
     def test_no_args_interactive_setup_refresh_and_quit(self):
         streams = iter((io.StringIO("0\n7897\n"),
                         io.StringIO("http://cpa.example.invalid\nhttps://cpa.example.invalid/v1/\n"),
-                        io.StringIO("r\nq\n")))
-        calls, events = [], []
+                        io.StringIO("2\nn\np\n4\nr\nq\n")))
+        calls, events, selections = [], [], []
         output = io.StringIO()
         output.isatty = lambda: True
 
@@ -131,12 +145,20 @@ class PythonClientTests(unittest.TestCase):
             calls.append(path)
             return overview() if scope == "own_key" else {"scope": "shared_pool", "accounts": []}
 
+        render = CLIENT["render_overview"]
+
+        def observed_render(data, selected, page, paged):
+            selections.append((selected, page))
+            render(data, selected, page, paged)
+
         with patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), patch("sys.argv", ["quota"]), \
-                patch("getpass.getpass", hidden_key), patch.dict(CLIENT, {"open": terminal, "fetch": fetch}), \
+                patch("getpass.getpass", hidden_key), patch.dict(CLIENT, {"open": terminal, "fetch": fetch,
+                                                                        "render_overview": observed_render}), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             CLIENT["main"]()
         self.assertEqual(events, ["terminal", "terminal", "terminal", "key"] + ["request"] * 4)
         self.assertEqual(calls, ["/v1/usage?period=overview", "/v1/quota"] * 2)
+        self.assertEqual(selections, [("1h", 0), ("7d", 0), ("7d", 1), ("7d", 0), ("all", 0), ("all", 0)])
         self.assertNotIn("synthetic-key", output.getvalue())
 
     def test_once_can_prompt_without_opening_refresh_terminal(self):
@@ -275,6 +297,21 @@ if ($script:calls -ne 2) { throw 'wrong request count' }
             with self.subTest(shell=shell):
                 self.run_ps(shell, code)
 
+    def test_cache_rate_business_semantics(self):
+        code = r'''
+. ([scriptblock]::Create($scriptSource.Substring(0, $scriptSource.LastIndexOf('Invoke-CpaReport'))))
+if ((Get-CachePercent ([pscustomobject]@{input_tokens=1000;cache_read_tokens=930})) -ne 93) { throw 'not token weighted' }
+if ((Get-CachePercent ([pscustomobject]@{input_tokens=1000;cache_read_tokens=0})) -ne 0) { throw 'zero hits lost' }
+foreach ($pair in @(@(0,0), @($null,30), @(100,$null), @(100,101), @(100,-1), @(100,$true), @([double]::PositiveInfinity,10), @(100,'30'))) {
+    if ($null -ne (Get-CachePercent ([pscustomobject]@{input_tokens=$pair[0];cache_read_tokens=$pair[1]}))) {
+        throw 'invalid or unknown counts accepted'
+    }
+}
+'''
+        for shell in self.shells:
+            with self.subTest(shell=shell):
+                self.run_ps(shell, code)
+
     def test_missing_proxy_rejected_before_network(self):
         code = r"""
 $script:calls=0
@@ -306,8 +343,12 @@ function Read-Host {
         2 { return '7897' }
         3 { return 'http://cpa.example.invalid' }
         4 { return 'https://cpa.example.invalid/v1/' }
-        6 { return 'r' }
-        7 { return 'q' }
+        6 { return '2' }
+        7 { return 'n' }
+        8 { return 'p' }
+        9 { return '4' }
+        10 { return 'r' }
+        11 { return 'q' }
         default { throw 'unexpected input' }
     }
 }
@@ -328,7 +369,7 @@ $scriptSource = $scriptSource.Insert($scriptSource.LastIndexOf('Invoke-CpaReport
 if ($script:calls -ne CALLS -or $script:reads -ne READS -or $script:clears -ne CLEARS) { throw 'wrong interaction count' }
 """.replace("DATA", json.dumps(overview()))
         for shell in self.shells:
-            for args, calls, reads, clears in (("", 4, 7, 2), ("-Once", 2, 5, 0)):
+            for args, calls, reads, clears in (("", 4, 11, 6), ("-Once", 2, 5, 0)):
                 with self.subTest(shell=shell, args=args):
                     self.run_ps(shell, code.replace("ARGUMENTS", args).replace("CALLS", str(calls))
                                 .replace("READS", str(reads)).replace("CLEARS", str(clears)))

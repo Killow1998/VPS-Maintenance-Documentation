@@ -60,7 +60,9 @@ c=$(curl -qfsS --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Ma
 irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/main/cpa.ps1 -TimeoutSec 60 -ErrorAction Stop | iex
 ```
 
-启动后同屏查看当前 Key 的近 1h、7d、30d、总历史，以及共享号池余量。`R` / 回车刷新，`Q` 退出。不自动轮询、不调用模型，不保存 Base URL 或 Key，不修改 VPS。
+启动后同屏查看当前 Key 的近 1h、7d、30d、总历史：请求/失败、token、缓存命中率、USD 标价估算及计价覆盖数；共享号池余量单独显示。下面按模型列出用量与估算费用，默认展示近 1h；输入 `1` / `2` / `3` / `4` 切换明细窗口，`N` / `P` 翻页，`R` / 回车刷新，`Q` 退出。窗口切换和翻页不联网，每次刷新仍只有两次只读请求。不自动轮询、不调用模型、不保存连接信息、不修改 VPS。
+
+缓存命中率是 **缓存读取 token ÷ 全部输入 token**，不是平均每次请求的百分比。USD 使用入库时的价格快照，不是订阅实际扣款；缓存写入时长未知时显示费用区间，`*` 表示只为部分请求计价。未收录模型价格、计量缺失或没有输入时，相关指标显示未知，不补成零。旧 observer 即使已支持四段总览，也可能还缺 `windows[].models`；按下方 Prompt 更新服务后，重新运行一行命令获取新版客户端。
 
 **两阶段网络边界：** 首次下载不含密钥的公开启动器使用当前网络，可能直连；尚未输入的端口不可能用于这次下载。启动器询问端口后，查询脚本下载和所有 API 请求强制走该本机 HTTP 代理，失败不回退直连。还需在 Clash 中确认 CPA 域名最终走真实代理节点，而不是 DIRECT。公开启动器随 `main` 更新；它将查询脚本固定到已测试的 commit，并验证 SHA256 后才执行。可先阅读 [Linux 启动器](cpa.sh) / [Windows 启动器](cpa.ps1)；要求首次下载也强制指定代理时，使用[固定版本完整命令](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)。
 

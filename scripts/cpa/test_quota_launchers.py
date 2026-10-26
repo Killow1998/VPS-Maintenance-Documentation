@@ -110,7 +110,9 @@ $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
 finally { $sha.Dispose() }
-$launcher = $launcher.Replace('57af2dd8600e468770666aef485e96cbaf7ec7e2bf606f35cc596b786cf7490b', $digest)
+$pinnedDigest = [regex]::Match($launcher, "'([0-9a-f]{64})'").Groups[1].Value
+if (-not $pinnedDigest) { throw 'missing pinned hash' }
+$launcher = $launcher.Replace($pinnedDigest, $digest)
 # Only the console condition is simulated; the prompt loop and hash check are real.
 $launcher = $launcher.Replace("`$Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected", '$false')
 $script:reads=0; $script:downloads=0; $script:started=$false

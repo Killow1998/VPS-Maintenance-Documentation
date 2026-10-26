@@ -383,8 +383,14 @@ class Store:
                 if start:
                     where += " AND timestamp>=?"
                     args.append(start)
+                models = self.aggregate(con, where, args, "model")
+                totals = self.total_rows(models)
+                for model in models:
+                    for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
+                        if model[name] is not None:
+                            model[name] = round(model[name], 8)
                 windows.append({"period": period, "start_utc": start, "end_utc": end,
-                                "totals": self.total_rows(self.aggregate(con, where, args, "model"))})
+                                "totals": totals, "models": models})
         return {"scope": "own_key", "period": "overview", "timezone": "Asia/Shanghai",
                 "as_of": cutoff.isoformat(), "windows": windows,
                 "collection_started_at": metadata.get("collection_started_at"),
@@ -392,6 +398,8 @@ class Store:
                 "collector_status": metadata.get("collector_status", "starting"),
                 "rejected_events": int(metadata.get("rejected_events", 0)),
                 "history_before_collection": "not_available",
+                "cost_basis": "Stored API list-price estimates, not subscription charges; check priced_requests coverage",
+                "cache_hit_rate_basis": "sum(cache_read_tokens) / sum(input_tokens); unknown if incomplete or input is zero",
                 "accounting_limitations": "retained observations only; collector outages can leave gaps"}
 
 

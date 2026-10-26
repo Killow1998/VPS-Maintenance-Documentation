@@ -36,7 +36,9 @@ Account IDs use the same `account-` HMAC prefix as `/v1/quota`, so a caller can 
 
 `recent` is an optional integer query parameter from 0 to 50, default 10. Records are sorted newest first and filtered to the same Beijing day/month/all period as the aggregates. `recent=0` omits execution details while retaining totals. Invalid or duplicate parameters return 400. Client identity is derived exclusively from the validated Bearer Key; callers cannot select another client or account. All three usage queries share the same client/date filter and one SQLite read transaction.
 
-`period=overview` is a separate compact response with `windows`, each containing `period`, `start_utc`, `end_utc`, and `totals`. All four use the same `as_of` cutoff and database read transaction. The rolling windows are `[as_of-duration, as_of)`; retained history has no lower time bound but excludes future records. No account identifiers or individual execution records are returned in this overview. It accepts no `date` or `recent` parameters. Ordinary detail queries also support `1h`, `7d` and `30d`; `date` remains limited to calendar day/month. These additions do not change existing day/month/all callers.
+`period=overview` is a separate compact response with `windows`, each containing `period`, `start_utc`, `end_utc`, `totals`, and `models`. Each model row has the same request/token/cost/coverage fields as a detail query; an empty window has `models: []`, not a missing field. All four use the same `as_of` cutoff and database read transaction. The rolling windows are `[as_of-duration, as_of)`; retained history has no lower time bound but excludes future records. No account identifiers or individual execution records are returned in this overview. It accepts no `date` or `recent` parameters. Ordinary detail queries also support `1h`, `7d` and `30d`; `date` remains limited to calendar day/month. These additions do not change existing day/month/all callers.
+
+Clients calculate the token-weighted cache hit percentage as `100 * cache_read_tokens / input_tokens`, for both totals and each model. Any unknown component or zero denominator means unknown, not zero. Cache writes do not count as hits. USD estimates sum the stored per-record price snapshots; changing the current price file does not reprice history. `priced_requests / requests` is coverage: partial cost sums are marked `*`, and all-unpriced estimates remain null. Cache-write TTL uncertainty yields the existing 5m/1h cost bounds. This is API list pricing, not subscription charges or a complete invoice. Model/window selection and pagination reuse one response without additional requests; refresh still makes only the two existing calls. Older overview responses without `models` remain readable but show an explicit upgrade notice instead of claiming no calls.
 
 Windows overlap and must not be added together. Thirty rolling days are not a calendar month. `collection_started_at`, `last_collected_at`, `collector_status`, `rejected_events` and the historical-coverage warning accompany the overview. They do not prove continuous collection: outages and earlier deletions may leave gaps. `/v1/quota` is a separate cached snapshot, not part of the usage transaction and not a per-client token allowance.
 
@@ -111,7 +113,7 @@ After the restart, verify `/healthz` locally, then authenticate as an existing c
 
 ## 已有部署修复 Prompt
 
-适用于号池可读，但客户端提示 `HTTP 400`、总览/滚动时间段需要更新 observer 的情况。提示证明当前请求被拒绝，不足以单独确认实际运行版本；先核对入口路由、运行进程和源码，不要根据磁盘文件或 Git HEAD 推断服务已经更新。
+适用于号池可读，但客户端提示 `HTTP 400`、总览/滚动时间段需要更新 observer，或四段总览已有但缺少按模型明细的情况。先核对入口路由、运行进程和源码，不要根据磁盘文件或 Git HEAD 推断服务已经更新。补充模型分项只复用现有列，不改 schema、不重算历史费用。
 
 ```text
 请修复我已部署的 CPA 用量查询，不要重新安装或替换 XBoard/CPA。
@@ -120,7 +122,8 @@ After the restart, verify `/healthz` locally, then authenticate as an existing c
 以及 docs/09-cpa-claude.md 第 9.3 节。拉取后记录本次采用的完整 commit。
 
 现象：客户端能显示共享号池，但个人用量提示参数不受支持，
-总览/滚动时间段需要更新 observer。目标是恢复当前 Key 的近 1h、7d、30d、总历史。
+或已有四段总览却缺少模型分项。目标是当前 Key 的近 1h、7d、30d、总历史，
+每段包含 models，以及已有的 token、缓存读写、USD 估算和计价覆盖数。
 
 先只读核对：实际主机、Base URL 的 /v1/usage 和 /v1/quota 路由、
 systemd ExecStart/运行进程、observer 源码版本、解释器、配置路径、数据库和采集状态。
@@ -142,6 +145,12 @@ systemd ExecStart/运行进程、observer 源码版本、解释器、配置路�
 验收：本机 /healthz；经客户端代理及 HTTPS 查询 overview、1h/7d/30d、
 旧 day/month/all 与 /v1/quota。overview 必须有按 1h、7d、30d、all 排列的四个窗口，
 scope=own_key，各窗口共用截止时间；只含当前 Key，号池仍为独立缓存。
+各窗口 models 的请求和已知 token/费用应与 totals 相符（费用允许输出舍入误差）；
+缓存命中率用合计缓存读取除以合计输入，不平均请求比例，不把缓存写入算作命中。
+任一计量缺失或零输入时比例未知；缺价格不当零，部分费用标明计价覆盖。
+历史费用使用原入库快照，不覆盖现存价格文件或重新计价历史。
+重新运行首页一行命令获取新版客户端，验证 1/2/3/4 切换模型窗口、N/P 翻页不联网，
+R 刷新只查询两个既有只读接口。不得以客户端更新代替服务端验收。
 验证既有记录保留、匿名账号映射不变、采集恢复；若没有新的真实调用，
 明确“未验证新事件入库”，不要编造增量，也不要为验收调用付费模型。
 没有已采集记录时应返回零记录并说明历史覆盖；零记录不证明实际没有调用。

@@ -19,4 +19,6 @@ Python 运维工具统一要求 Python 3.10+，与 XBoard 的 `vpsctl.py` 一致
 
 离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p 'test_quota_*.py' -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。启动器测试核对固定源码哈希，并覆盖失败/篡改不执行、无终端拒绝、交互输入及代理传递。
 
+独立看板的四段总览包括 token 加权缓存命中率、USD 标价估算及计价覆盖数。输入 1/2/3/4 切换下方模型明细窗口，N/P 翻页，每页最多 5 个模型；这些操作不联网。单次具体期间查询也有模型汇总。费用按记录入库时的价格计算，不重算历史；未知模型价格或缺计量时不估填，部分费用带 `*`。模型分项需要 observer 在每个窗口返回 `models`，更新步骤见既有修复 Prompt，不需要改表或重建用量。
+
 私密配置用 `--config /PRIVATE/deployment.json` 或 `CPA_TOOLS_CONFIG` 指定，放在克隆目录之外。默认配置路径是便利入口，不是公开模板。不要把私密 env、state、密钥、OAuth 文件、数据库和 VPS 备份复制到本目录。

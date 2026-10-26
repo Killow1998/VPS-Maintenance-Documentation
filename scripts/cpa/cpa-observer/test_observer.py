@@ -122,11 +122,48 @@ class StorageTests(unittest.TestCase):
         result = self.store.overview(self.store.client("test-key-a"))
         self.assertEqual([w["totals"]["requests"] for w in result["windows"]], [0]*4)
         self.assertTrue(all(w["totals"]["estimated_cost_usd_low"] is None for w in result["windows"]))
+        self.assertEqual([w["models"] for w in result["windows"]], [[]]*4)
         for period, seconds in (("1h", 3600), ("7d", 604800), ("30d", 2592000)):
             start, end = period_bounds(period)
             self.assertEqual((dt.datetime.fromisoformat(end)-dt.datetime.fromisoformat(start)).total_seconds(), seconds)
             with self.assertRaises(ValueError):
                 period_bounds(period, "2026-10-25")
+
+    def test_overview_model_costs_unknowns_and_frozen_prices(self):
+        large = event(execution="large")
+        large["token_breakdown"]["input"] = {
+            "total_tokens": 900, "uncached_tokens": 0, "cache_read_tokens": 900, "cache_write_tokens": 0}
+        large["token_breakdown"]["total_tokens"] = 930
+        unknown = event(execution="unpriced")
+        unknown["model"] = "unlisted-model"
+        other = event("test-key-b", "other")
+        other["model"] = "other-key-only-model"
+        self.store.ingest([event(), large, unknown, other])
+        client = self.store.client("test-key-a")
+        result = self.store.overview(client)
+        self.assertNotIn("other-key-only-model", json.dumps(result))
+        for window in result["windows"]:
+            rows = {row["model"]: row for row in window["models"]}
+            self.assertEqual(set(rows), {"claude-sonnet-5-5", "unlisted-model"})
+            known = rows["claude-sonnet-5-5"]
+            self.assertEqual((known["input_tokens"], known["cache_read_tokens"]), (1000, 930))
+            self.assertEqual(window["totals"]["requests"], sum(r["requests"] for r in rows.values()))
+            self.assertEqual(window["totals"]["priced_requests"], 2)
+            self.assertIsNone(rows["unlisted-model"]["estimated_cost_usd_low"])
+            self.assertAlmostEqual(window["totals"]["estimated_cost_usd_low"], (448 + 390)/1e6)
+            self.assertAlmostEqual(known["estimated_cost_usd_high"], (463 + 390)/1e6)
+        self.store.prices["models"]["claude-sonnet-5-5"]["input"] = 9999
+        frozen = self.store.overview(client)
+        self.assertEqual(result["windows"][-1]["totals"], frozen["windows"][-1]["totals"])
+        legacy = event(execution="legacy")
+        legacy.pop("token_breakdown")
+        self.store.ingest([legacy])
+        window = self.store.overview(client)["windows"][-1]
+        known = next(r for r in window["models"] if r["model"] == "claude-sonnet-5-5")
+        self.assertIsNone(known["cache_read_tokens"])
+        self.assertIsNone(window["totals"]["cache_read_tokens"])
+        self.assertEqual((known["priced_requests"], known["requests"]), (2, 3))
+        self.assertEqual((window["totals"]["priced_requests"], window["totals"]["requests"]), (2, 4))
 
 
 class FakeBackend:
@@ -224,6 +261,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["scope"], "own_key")
         self.assertEqual([w["totals"]["requests"] for w in body["windows"]], [1]*4)
+        self.assertEqual([w["models"][0]["requests"] for w in body["windows"]], [1]*4)
+        self.assertTrue(all(w["models"][0]["model"] == "claude-sonnet-5-5" for w in body["windows"]))
         self.assertNotIn("recent", body)
         for query in ("period=overview&date=2026-10", "period=overview&recent=0",
                       "period=overview&client=other", "period=overview&period=all"):

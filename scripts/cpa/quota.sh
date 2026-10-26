@@ -197,7 +197,63 @@ def cost(row):
     low, high = row.get("estimated_cost_usd_low"), row.get("estimated_cost_usd_high")
     if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in (low, high)):
         return "未知"
-    return f"${low:.4f}" if low == high else f"${low:.4f}–${high:.4f}"
+    if low < 0 or high < low:
+        return "未知"
+    precision = 8 if any(0 < x < .0001 for x in (low, high)) else 4
+    left, right = f"${low:.{precision}f}", f"${high:.{precision}f}"
+    value = left if left == right else left + "–" + right
+    priced, requests = row.get("priced_requests"), row.get("requests")
+    partial = isinstance(priced, int) and isinstance(requests, int) and 0 <= priced < requests
+    return ("*" if partial else "") + value
+
+
+def cache_percent(row):
+    read, total = row.get("cache_read_tokens"), row.get("input_tokens")
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in (read, total)):
+        return None
+    return read / total * 100 if total > 0 and 0 <= read <= total else None
+
+
+def cache_label(row):
+    value = cache_percent(row)
+    return "未知" if value is None else f"{value:.1f}%"
+
+
+def compact(value):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return "未知"
+    for size, suffix in ((10**12, "T"), (10**9, "B"), (10**6, "M"), (10**3, "K")):
+        if value >= size * 10:
+            return f"{value / size:.2f}{suffix}"
+    return number(value)
+
+
+def coverage(row):
+    return compact(row.get("priced_requests")) + "/" + compact(row.get("requests"))
+
+
+def render_models(models, page=0, paged=False):
+    if not isinstance(models, list):
+        print("服务尚未提供模型分项，请更新 VPS observer；不能据此判断 Key 没有调用。")
+        return
+    if not models:
+        print("选定期间暂无已采集调用。")
+        return
+    rows = sorted(models, key=lambda r: (-(r.get("estimated_cost_usd_high") or 0),
+                                        -(r.get("total_tokens") or 0), r.get("model", "")))
+    pages = max(1, (len(rows) + 4) // 5)
+    if paged:
+        page %= pages
+        print(f"模型 {len(rows)} 个 · 第 {page + 1}/{pages} 页")
+        rows = rows[page * 5:(page + 1) * 5]
+    print(f"{cell('模型', 18)} {cell('请求', 7)} {cell('Tokens', 9)} {cell('缓存', 6)} {cell('估算 USD', 23)} 计价覆盖")
+    for row in rows:
+        name = str(row.get("model", "未知"))
+        if len(name) > 18:
+            print(cell(name, 160).strip())
+            name = "  >"
+        print(f"{cell(name, 18)} {cell(compact(row.get('requests')), 7)} {cell(compact(row.get('total_tokens')), 9)} "
+              f"{cell(cache_label(row), 6)} {cell(cost(row), 23)} {coverage(row)}")
 
 
 def account_id(value):
@@ -222,6 +278,8 @@ def render_usage(data):
           f"缓存读 {number(total.get('cache_read_tokens'))} · 缓存写 {number(total.get('cache_write_tokens'))}")
     print(f"计价覆盖 {number(total.get('priced_requests'))}/{number(total.get('requests'))} · "
           f"采集至 {beijing(data.get('last_collected_at'), True)} · 开始 {beijing(data.get('collection_started_at'))}")
+    print(f"Token 缓存命中率 {cache_label(total)} · * 部分计价，不是全部费用")
+    render_models(data.get("models"))
     if "accounts" not in data or "recent" not in data:
         print("服务尚未提供调用账号与明细，请更新 VPS observer。")
         return
@@ -243,19 +301,25 @@ def render_usage(data):
     print("输入已含缓存，输出已含 reasoning；API 标价估算不代表订阅扣款；重试按多次上游执行记录。")
 
 
-def render_overview(data):
+def render_overview(data, selected="1h", page=0, paged=False):
     windows = data.get("windows", [])
     if data.get("period") != "overview" or [w.get("period") for w in windows] != ["1h", "7d", "30d", "all"]:
         raise RuntimeError("服务未提供多时间段总览，请更新 VPS observer。")
     print(f"本 Key · 用量总览 · 截止 {beijing(data.get('as_of'), True)}（北京）")
-    print(f"{cell('时间段', 12)} {cell('请求/失败', 15)} {cell('输入 Tokens', 17)} {cell('输出 Tokens', 17)} 总 Tokens")
+    print(f"{cell('时间段', 10)} {cell('请求/失败', 11)} {cell('Tokens', 9)} {cell('缓存', 7)} {cell('估算 USD', 23)} 计价覆盖")
     labels = {"1h": "近 1 小时", "7d": "近 7 天", "30d": "近 30 天", "all": "总历史"}
     for window in windows:
         row = window["totals"]
-        requests = number(row.get("requests")) + '/' + number(row.get("failed_requests"))
-        print(f"{cell(labels[window['period']], 12)} {cell(requests, 15)} "
-              f"{cell(number(row.get('input_tokens')), 17)} {cell(number(row.get('output_tokens')), 17)} "
-              f"{number(row.get('total_tokens'))}")
+        requests = compact(row.get("requests")) + '/' + compact(row.get("failed_requests"))
+        print(f"{cell(labels[window['period']], 10)} {cell(requests, 11)} {cell(compact(row.get('total_tokens')), 9)} "
+              f"{cell(cache_label(row), 7)} {cell(cost(row), 23)} {coverage(row)}")
+    window = next(w for w in windows if w["period"] == selected)
+    total = window["totals"]
+    print(f"\n模型明细 · {labels[selected]} · 按估算 USD 降序")
+    print(f"输入 {number(total.get('input_tokens'))} · 输出 {number(total.get('output_tokens'))}")
+    print(f"缓存读 {number(total.get('cache_read_tokens'))} · 缓存写 {number(total.get('cache_write_tokens'))}")
+    render_models(window.get("models"), page, paged)
+    print("缓存 = 缓存读 / 全部输入 token；* 部分计价，缺失不计为零；USD 不是订阅扣款。")
     print(f"采集开始 {beijing(data.get('collection_started_at'))} · 采集至 {beijing(data.get('last_collected_at'), True)} · "
           f"状态 {cell(data.get('collector_status'), 24).strip()} · 拒收 {number(data.get('rejected_events'))}")
     print("滚动窗口相互重叠，不可相加；总历史仅含已采集并保留的数据，可能存在采集缺口。")
@@ -341,15 +405,17 @@ def main():
             except OSError:
                 raise RuntimeError("TUI 需要交互终端。") from None
         key = read_key(args.key_env)
+        refresh, selected, page = True, "1h", 0
         while True:
-            results, errors = {}, {}
-            for view in views:
-                path = "/v1/usage?" + urlencode(params) if view == "usage" else "/v1/quota"
-                scope = "own_key" if view == "usage" else "shared_pool"
-                try:
-                    results[view] = fetch(base, key, path, scope, opener)
-                except RuntimeError as error:
-                    errors[view] = str(error)
+            if refresh:
+                results, errors = {}, {}
+                for view in views:
+                    path = "/v1/usage?" + urlencode(params) if view == "usage" else "/v1/quota"
+                    scope = "own_key" if view == "usage" else "shared_pool"
+                    try:
+                        results[view] = fetch(base, key, path, scope, opener)
+                    except RuntimeError as error:
+                        errors[view] = str(error)
             if args.tui:
                 print("\033[2J\033[H", end="", flush=True)
             print("CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点")
@@ -361,7 +427,7 @@ def main():
                     if view == "quota":
                         render_quota(results[view])
                     elif args.period == "overview":
-                        render_overview(results[view])
+                        render_overview(results[view], selected, page, args.tui)
                     else:
                         render_usage(results[view])
                     print()
@@ -371,12 +437,18 @@ def main():
             if not args.tui:
                 break
             while True:
-                print("R/Enter 刷新 · Q 退出: ", end="", flush=True)
+                print("1/2/3/4: 1h/7d/30d/全部 · N/P 模型翻页 · R/Enter 刷新 · Q 退出: ", end="", flush=True)
                 action = terminal.readline()
-                if not action or action.strip().lower() in ("", "r", "q"):
+                if not action or action.strip().lower() in ("", "r", "q", "1", "2", "3", "4", "n", "p"):
                     break
             if not action or action.strip().lower() == "q":
                 break
+            action = action.strip().lower()
+            refresh = action in ("", "r")
+            if action in ("1", "2", "3", "4"):
+                selected, page = ("1h", "7d", "30d", "all")[int(action) - 1], 0
+            elif action in ("n", "p"):
+                page += 1 if action == "n" else -1
     finally:
         key = None
         if terminal:

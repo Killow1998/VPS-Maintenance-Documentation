@@ -118,28 +118,95 @@ function Get-Cost($Row) {
         if ($null -eq $value -or $value -is [bool] -or $value -is [string]) { return '未知' }
         if ([double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return '未知' }
     }
-    $left = '$' + $low.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)
-    if ($low -eq $high) { return $left }
-    return $left + '–$' + $high.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)
+    if ($low -lt 0 -or $high -lt $low) { return '未知' }
+    $format = if (($low -gt 0 -and $low -lt .0001) -or ($high -gt 0 -and $high -lt .0001)) { 'F8' } else { 'F4' }
+    $left = '$' + $low.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
+    $right = '$' + $high.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
+    if ($left -ne $right) { $left += '–' + $right }
+    if ($null -ne $Row.priced_requests -and $null -ne $Row.requests -and
+        $Row.priced_requests -ge 0 -and $Row.priced_requests -lt $Row.requests) { $left = '*' + $left }
+    return $left
 }
 
-function Show-Usage($Data) {
+function Get-CachePercent($Row) {
+    $read = $Row.cache_read_tokens; $total = $Row.input_tokens
+    foreach ($value in @($read, $total)) {
+        if ($null -eq $value -or $value -is [bool] -or $value -is [string]) { return $null }
+        if ([double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return $null }
+    }
+    if ($total -le 0 -or $read -lt 0 -or $read -gt $total) { return $null }
+    return ([double]$read / $total * 100)
+}
+
+function Get-CacheLabel($Row) {
+    $value = Get-CachePercent $Row
+    if ($null -eq $value) { return '未知' }
+    return $value.ToString('F1', [Globalization.CultureInfo]::InvariantCulture) + '%'
+}
+
+function Format-Compact($Value) {
+    if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string] -or $Value -lt 0) { return '未知' }
+    foreach ($scale in @(@(1e12, 'T'), @(1e9, 'B'), @(1e6, 'M'), @(1e3, 'K'))) {
+        if ($Value -ge $scale[0] * 10) {
+            return ($Value / $scale[0]).ToString('F2', [Globalization.CultureInfo]::InvariantCulture) + $scale[1]
+        }
+    }
+    return Format-Number $Value
+}
+
+function Get-Coverage($Row) {
+    return (Format-Compact $Row.priced_requests) + '/' + (Format-Compact $Row.requests)
+}
+
+function Show-Models($Models, [int]$Page = 0, [bool]$Paged = $false) {
+    if ($null -eq $Models) {
+        Write-Host '服务尚未提供模型分项，请更新 VPS observer；不能据此判断 Key 没有调用。'
+        return
+    }
+    $rows = @($Models | Sort-Object @{Expression='estimated_cost_usd_high';Descending=$true},
+        @{Expression='total_tokens';Descending=$true}, model)
+    if (-not $rows.Count) { Write-Host '选定期间暂无已采集调用。'; return }
+    $pages = [int][Math]::Ceiling($rows.Count / 5.0)
+    if ($Paged) {
+        $Page = (($Page % $pages) + $pages) % $pages
+        Write-Host ('模型 {0} 个 · 第 {1}/{2} 页' -f $rows.Count, ($Page + 1), $pages)
+        $rows = @($rows | Select-Object -Skip ($Page * 5) -First 5)
+    }
+    Write-Host ('{0} {1} {2} {3} {4} 计价覆盖' -f (Format-Cell '模型' 18), (Format-Cell '请求' 7),
+        (Format-Cell 'Tokens' 9), (Format-Cell '缓存' 6), (Format-Cell '估算 USD' 23))
+    foreach ($row in $rows) {
+        $name = [string]$row.model
+        if ($name.Length -gt 18) { Write-Host (Format-Cell $name 160).Trim(); $name = '  >' }
+        Write-Host ('{0} {1} {2} {3} {4} {5}' -f (Format-Cell $name 18), (Format-Cell (Format-Compact $row.requests) 7),
+            (Format-Cell (Format-Compact $row.total_tokens) 9), (Format-Cell (Get-CacheLabel $row) 6),
+            (Format-Cell (Get-Cost $row) 23), (Get-Coverage $row))
+    }
+}
+
+function Show-Usage($Data, [string]$Selected = '1h', [int]$Page = 0, [bool]$Paged = $false) {
     if ($Period -eq 'overview') {
         if ($Data.period -cne 'overview' -or @($Data.windows).Count -ne 4 -or
             (($Data.windows | ForEach-Object { $_.period }) -join ',') -cne '1h,7d,30d,all') {
             throw '服务未提供多时间段总览，请更新 VPS observer。'
         }
         Write-Host ('本 Key · 用量总览 · 截止 {0}（北京）' -f (Get-Beijing $Data.as_of -Seconds))
-        Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell '时间段' 12), (Format-Cell '请求/失败' 15),
-            (Format-Cell '输入 Tokens' 17), (Format-Cell '输出 Tokens' 17), '总 Tokens')
+        Write-Host ('{0} {1} {2} {3} {4} 计价覆盖' -f (Format-Cell '时间段' 10), (Format-Cell '请求/失败' 11),
+            (Format-Cell 'Tokens' 9), (Format-Cell '缓存' 7), (Format-Cell '估算 USD' 23))
         foreach ($row in $Data.windows) {
             $label = switch ($row.period) { '1h' { '近 1 小时' } '7d' { '近 7 天' } '30d' { '近 30 天' } 'all' { '总历史' } }
             $total = $row.totals
-            Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell $label 12),
-                (Format-Cell ((Format-Number $total.requests) + '/' + (Format-Number $total.failed_requests)) 15),
-                (Format-Cell (Format-Number $total.input_tokens) 17), (Format-Cell (Format-Number $total.output_tokens) 17),
-                (Format-Number $total.total_tokens))
+            Write-Host ('{0} {1} {2} {3} {4} {5}' -f (Format-Cell $label 10),
+                (Format-Cell ((Format-Compact $total.requests) + '/' + (Format-Compact $total.failed_requests)) 11),
+                (Format-Cell (Format-Compact $total.total_tokens) 9), (Format-Cell (Get-CacheLabel $total) 7),
+                (Format-Cell (Get-Cost $total) 23), (Get-Coverage $total))
         }
+        $window = $Data.windows | Where-Object { $_.period -eq $Selected } | Select-Object -First 1
+        $label = switch ($Selected) { '1h' { '近 1 小时' } '7d' { '近 7 天' } '30d' { '近 30 天' } 'all' { '总历史' } }
+        Write-Host "`n模型明细 · $label · 按估算 USD 降序"
+        Write-Host ('输入 {0} · 输出 {1}' -f (Format-Number $window.totals.input_tokens), (Format-Number $window.totals.output_tokens))
+        Write-Host ('缓存读 {0} · 缓存写 {1}' -f (Format-Number $window.totals.cache_read_tokens), (Format-Number $window.totals.cache_write_tokens))
+        Show-Models $window.models $Page $Paged
+        Write-Host '缓存 = 缓存读 / 全部输入 token；* 部分计价，缺失不计为零；USD 不是订阅扣款。'
         Write-Host ('采集开始 {0} · 采集至 {1} · 状态 {2} · 拒收 {3}' -f
             (Get-Beijing $Data.collection_started_at), (Get-Beijing $Data.last_collected_at -Seconds),
             (Format-Cell $Data.collector_status 24).Trim(), (Format-Number $Data.rejected_events))
@@ -159,6 +226,8 @@ function Show-Usage($Data) {
         (Format-Number $total.input_tokens), (Format-Number $total.output_tokens), (Format-Number $total.cache_read_tokens), (Format-Number $total.cache_write_tokens))
     Write-Host ('计价覆盖 {0}/{1} · 采集至 {2} · 开始 {3}' -f (Format-Number $total.priced_requests), `
         (Format-Number $total.requests), (Get-Beijing $Data.last_collected_at -Seconds), (Get-Beijing $Data.collection_started_at))
+    Write-Host ('Token 缓存命中率 {0} · * 部分计价，不是全部费用' -f (Get-CacheLabel $total))
+    Show-Models $Data.models
     if (-not $Data.PSObject.Properties['accounts'] -or -not $Data.PSObject.Properties['recent']) {
         Write-Host '服务尚未提供调用账号与明细，请更新 VPS observer。'
         return
@@ -290,22 +359,25 @@ function Invoke-CpaReport {
         if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
+        $refresh = $true; $selected = '1h'; $page = 0
         do {
-            $results = @{}; $failures = @{}
-            foreach ($item in $views) {
-                $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
-                $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period } else { '/v1/quota' }
-                if ($item -eq 'usage' -and $Period -ne 'overview') { $path += '&recent=' + $Recent }
-                if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
-                try { $results[$item] = Get-CpaData $base $headers $path $scope $proxy }
-                catch { $failures[$item] = $_.Exception.Message }
+            if ($refresh) {
+                $results = @{}; $failures = @{}
+                foreach ($item in $views) {
+                    $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
+                    $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period } else { '/v1/quota' }
+                    if ($item -eq 'usage' -and $Period -ne 'overview') { $path += '&recent=' + $Recent }
+                    if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
+                    try { $results[$item] = Get-CpaData $base $headers $path $scope $proxy }
+                    catch { $failures[$item] = $_.Exception.Message }
+                }
             }
             if ($useTui) { Clear-Host }
             Write-Host 'CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点'
             foreach ($item in $views) {
                 if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
                 try {
-                    if ($item -eq 'usage') { Show-Usage $results[$item] } else { Show-Quota $results[$item] }
+                    if ($item -eq 'usage') { Show-Usage $results[$item] $selected $page $useTui } else { Show-Quota $results[$item] }
                 } catch {
                     $failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
                     Write-Host ("CPA ${item}：" + $failures[$item])
@@ -313,7 +385,13 @@ function Invoke-CpaReport {
                 Write-Host ''
             }
             if (-not $useTui) { break }
-            do { $action = Read-Host 'R/Enter 刷新 · Q 退出' } while ($action -notin @('', 'r', 'q'))
+            do { $action = Read-Host '1/2/3/4: 1h/7d/30d/全部 · N/P 模型翻页 · R/Enter 刷新 · Q 退出' }
+            while ($null -ne $action -and $action.Trim().ToLowerInvariant() -notin @('', 'r', 'q', '1', '2', '3', '4', 'n', 'p'))
+            if ($null -eq $action) { break }
+            $action = $action.Trim().ToLowerInvariant()
+            $refresh = $action -in @('', 'r')
+            if ($action -in @('1', '2', '3', '4')) { $selected = @('1h', '7d', '30d', 'all')[[int]$action - 1]; $page = 0 }
+            elseif ($action -eq 'n') { $page++ } elseif ($action -eq 'p') { $page-- }
         } while ($action -ne 'q')
         if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
     } finally {
