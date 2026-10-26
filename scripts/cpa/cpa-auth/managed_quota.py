@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Supervise a separate, identity-checked CPA OAuth grant for quota lookup."""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import json
 import os
@@ -9,7 +14,6 @@ import shlex
 import signal
 import socket
 import subprocess
-import sys
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 

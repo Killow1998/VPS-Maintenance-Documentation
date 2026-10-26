@@ -1,4 +1,5 @@
 """Offline client checks. Only synthetic keys and loopback sockets are used."""
+import ast
 import base64
 import contextlib
 import io
@@ -9,6 +10,7 @@ import shutil
 import socket
 import socketserver
 import subprocess
+import sys
 import threading
 import unittest
 from unittest.mock import patch
@@ -91,8 +93,78 @@ class PythonClientTests(unittest.TestCase):
 
     def test_missing_proxy_stops_before_key_or_network(self):
         with patch.dict(os.environ, {"CPA_PROXY": ""}), patch("sys.argv", ["quota", "https://cpa.example.invalid"]), \
-                patch.dict(CLIENT, {"read_key": lambda _: self.fail("must not read a key")}):
+                patch.dict(CLIENT, {"read_key": lambda _: self.fail("must not read a key")}), \
+                contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(RuntimeError):
+                CLIENT["main"]()
+
+    def test_port_input_is_explicit_and_bounded(self):
+        for bad in ("", "0", "65536", "-1", "1.5", "7890/path", "127.0.0.1:7890", "７８９０"):
+            with self.subTest(port=bad), self.assertRaises(RuntimeError):
+                CLIENT["proxy_from_port"](bad)
+        self.assertEqual(CLIENT["proxy_from_port"]("7897"), "http://127.0.0.1:7897")
+        self.assertEqual(CLIENT["proxy_from_port"]("65535"), "http://127.0.0.1:65535")
+
+    def test_no_args_interactive_setup_refresh_and_quit(self):
+        streams = iter((io.StringIO("0\n7897\n"),
+                        io.StringIO("http://cpa.example.invalid\nhttps://cpa.example.invalid/v1/\n"),
+                        io.StringIO("r\nq\n")))
+        calls, events = [], []
+        output = io.StringIO()
+        output.isatty = lambda: True
+
+        def terminal(path, mode, encoding):
+            self.assertEqual((path, mode, encoding), ("/dev/tty", "r", "utf-8"))
+            events.append("terminal")
+            return next(streams)
+
+        def hidden_key(prompt):
+            events.append("key")
+            return "synthetic-key"
+
+        def fetch(base, key, path, scope, opener):
+            events.append("request")
+            self.assertEqual(base, "https://cpa.example.invalid")
+            self.assertEqual(key, "synthetic-key")
+            proxies = [handler for handler in opener.handlers if isinstance(handler, CLIENT["RequiredProxy"])]
+            self.assertEqual(proxies[0].authority, "127.0.0.1:7897")
+            calls.append(path)
+            return overview() if scope == "own_key" else {"scope": "shared_pool", "accounts": []}
+
+        with patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), patch("sys.argv", ["quota"]), \
+                patch("getpass.getpass", hidden_key), patch.dict(CLIENT, {"open": terminal, "fetch": fetch}), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            CLIENT["main"]()
+        self.assertEqual(events, ["terminal", "terminal", "terminal", "key"] + ["request"] * 4)
+        self.assertEqual(calls, ["/v1/usage?period=overview", "/v1/quota"] * 2)
+        self.assertNotIn("synthetic-key", output.getvalue())
+
+    def test_once_can_prompt_without_opening_refresh_terminal(self):
+        calls = []
+        output = io.StringIO()
+        output.isatty = lambda: True
+
+        def terminal(path, mode, encoding):
+            calls.append(path)
+            return io.StringIO("https://cpa.example.invalid\n")
+
+        with patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": "http://127.0.0.1:7890"}), \
+                patch("sys.argv", ["quota", "--once"]), contextlib.redirect_stdout(output), \
+                patch.dict(CLIENT, {"open": terminal, "read_key": lambda _: "synthetic-key",
+                                   "fetch": lambda base, key, path, scope, opener:
+                                   overview() if scope == "own_key" else {"scope": scope, "accounts": []}}):
+            CLIENT["main"]()
+        self.assertEqual(calls, ["/dev/tty"])
+
+    def test_closed_input_or_missing_terminal_stops_before_key(self):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        for fault, expected in ((lambda *a, **kw: io.StringIO(""), EOFError),
+                                (unittest.mock.Mock(side_effect=OSError), RuntimeError)):
+            with self.subTest(error=expected), patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), \
+                    patch("sys.argv", ["quota"]), contextlib.redirect_stdout(output), \
+                    patch.dict(CLIENT, {"open": fault, "read_key": lambda _: self.fail("must not read a key")}), \
+                    self.assertRaises(expected):
                 CLIENT["main"]()
 
     def test_two_requests_render_all_windows_and_pool(self):
@@ -117,6 +189,34 @@ class PythonClientTests(unittest.TestCase):
 
     def test_redirect_handler_never_follows(self):
         self.assertIsNone(CLIENT["NoRedirect"]().redirect_request(None, None, 302, "", {}, "https://other.invalid"))
+
+
+class RuntimeVersionTests(unittest.TestCase):
+    def test_python_310_syntax_for_operation_tools(self):
+        for path in [ROOT.parent / "vpsctl.py", *ROOT.rglob("*.py")]:
+            with self.subTest(path=path.name):
+                ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 10))
+        ast.parse(SOURCE, feature_version=(3, 10))
+
+    def test_entry_points_check_version_before_other_imports_or_work(self):
+        entries = [ROOT.parent / "vpsctl.py", ROOT / "cpa_verify.py",
+                   ROOT / "cpa-tools/api_keys.py", ROOT / "cpa-tools/claude_auth.py",
+                   ROOT / "cpa-tools/remote_admin.py", ROOT / "cpa-observer/observer.py",
+                   ROOT / "cpa-observer/query.py", ROOT / "cpa-auth/managed_setup.py",
+                   ROOT / "cpa-auth/managed_quota.py"]
+        sources = [(str(path), path.read_text(encoding="utf-8")) for path in entries] + [("quota.sh", SOURCE)]
+        for name, source in sources:
+            with self.subTest(entry=name):
+                tree = ast.parse(source)
+                body = tree.body[1:] if isinstance(tree.body[0], ast.Expr) else tree.body
+                self.assertIsInstance(body[0], ast.Import)
+                self.assertEqual([alias.name for alias in body[0].names], ["sys"])
+                self.assertIsInstance(body[1], ast.If)
+                guard = compile(ast.Module(body=body[:2], type_ignores=[]), name, "exec")
+                with patch.object(sys, "version_info", (3, 9, 25)), self.assertRaisesRegex(SystemExit, "Python 3.10"):
+                    exec(guard, {})
+                with patch.object(sys, "version_info", (3, 10, 0)):
+                    exec(guard, {})
 
 
 class PowerShellClientTests(unittest.TestCase):

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Claude 双授权入口：setup-token 模型凭据 + profile/quota 辅助凭据。"""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import datetime as dt
 import fcntl
@@ -12,7 +17,6 @@ import secrets
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from zoneinfo import ZoneInfo
 

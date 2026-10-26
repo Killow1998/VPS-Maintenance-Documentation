@@ -6,6 +6,11 @@ No agent, daemon, package, or script is installed on the VPS. Writes require
 interactive confirmation. No client credentials are written to local files.
 """
 
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import base64
 import contextlib
@@ -22,7 +27,6 @@ import shlex
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error

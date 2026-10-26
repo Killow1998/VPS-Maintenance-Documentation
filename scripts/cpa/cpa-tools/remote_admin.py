@@ -1,4 +1,9 @@
 """Executed on the VPS via SSH stdin; never run as a public HTTP service."""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import copy
 import datetime as dt
 import fcntl
@@ -12,7 +17,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import tempfile
 import time
 from types import SimpleNamespace

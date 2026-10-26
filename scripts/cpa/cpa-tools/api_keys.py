@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Interactive CPA downstream API Key manager. Keys are never printed."""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import fcntl
 import os

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Verify CPA auth and one real generation without printing credentials/bodies."""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import json
 import os
-import sys
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener

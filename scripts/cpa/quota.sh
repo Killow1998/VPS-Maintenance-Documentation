@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Standalone client: Bash + Python 3.9+, no package installation or local files.
+# Standalone client: Bash + Python 3.10+, no package installation or local files.
 set -euo pipefail
 if ! command -v python3 >/dev/null 2>&1; then
-  printf '%s\n' '需要 Python 3.9+，无需安装 pip 包。' >&2
+  printf '%s\n' '需要 Python 3.10+，无需安装 pip 包。' >&2
   exit 1
 fi
 python3 - "$@" <<'PY'
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import datetime as dt
 import getpass
@@ -14,7 +19,6 @@ import math
 import os
 import re
 import shutil
-import sys
 import unicodedata
 import warnings
 from urllib.error import HTTPError
@@ -133,6 +137,32 @@ def normalize_base(base):
     if not valid:
         raise RuntimeError("请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。")
     return base
+
+
+def proxy_from_port(value):
+    if not re.fullmatch(r"[0-9]{1,5}", value) or not 1 <= int(value) <= 65535:
+        raise RuntimeError("代理端口必须是 1–65535 的整数。")
+    return "http://127.0.0.1:" + str(int(value))
+
+
+def prompt_setting(prompt, validate):
+    # Python stdin is the embedded source, including when Bash reads a local file.
+    if not sys.stdout.isatty():
+        raise RuntimeError("交互设置需要终端；自动化请指定 Base URL、--proxy 和 --key-env。")
+    try:
+        terminal = open("/dev/tty", "r", encoding="utf-8")
+    except OSError:
+        raise RuntimeError("交互设置需要终端；自动化请指定 Base URL、--proxy 和 --key-env。") from None
+    with terminal:
+        while True:
+            print(prompt, end="", flush=True)
+            value = terminal.readline()
+            if not value:
+                raise EOFError
+            try:
+                return validate(value.strip())
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
 
 
 def fetch(base, key, path, scope, opener):
@@ -268,29 +298,35 @@ def render_quota(data):
 
 def main():
     parser = argparse.ArgumentParser(description="本 Key 用量、近期调用与匿名号池余量；只需 Base URL + 自己的 CPA API Key。")
-    parser.add_argument("base_url", nargs="?", default=os.environ.get("CPA_BASEURL", ""), help="HTTPS 根地址；默认 CPA_BASEURL")
-    parser.add_argument("--proxy", default=os.environ.get("CPA_PROXY", ""), help="必填本机 HTTP/mixed 代理；默认 CPA_PROXY；禁止直连")
+    parser.add_argument("base_url", nargs="?", default=os.environ.get("CPA_BASEURL", ""), help="HTTPS 根地址；默认 CPA_BASEURL；未提供则交互输入")
+    parser.add_argument("--proxy", default=os.environ.get("CPA_PROXY", ""), help="本机 HTTP/mixed 代理；默认 CPA_PROXY；未提供则询问端口；禁止直连")
     parser.add_argument("--key-env", help="读取已有 Key 环境变量；默认隐藏输入")
     parser.add_argument("--view", choices=["all", "usage", "quota"], default="all", help="默认同时显示个人用量与号池余量")
     parser.add_argument("--period", choices=["overview", "1h", "7d", "30d", "day", "month", "all"], default="overview",
                         help="默认同屏显示滚动 1h/7d/30d 与总历史；day/month 为北京日历期间")
     parser.add_argument("--date", help="指定 YYYY-MM-DD 或 YYYY-MM；与 --period 配合")
     parser.add_argument("--recent", type=int, default=10, help="近期明细条数，0–50，默认 10")
-    parser.add_argument("--tui", action="store_true", help="同屏总览，R/Enter 刷新、Q 退出；不自动轮询")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--tui", dest="tui", action="store_true", help="同屏总览，R/Enter 刷新、Q 退出；交互设置后默认启用")
+    display.add_argument("--once", dest="tui", action="store_false", help="仅查询一次后退出，不进入 TUI")
+    parser.set_defaults(tui=None)
     args = parser.parse_args()
-    if not args.base_url:
-        parser.error("请提供 HTTPS Base URL。")
     if not 0 <= args.recent <= 50:
         parser.error("--recent 必须为 0–50。")
-    base = normalize_base(args.base_url)
+    if args.date and args.period not in ("day", "month"):
+        parser.error("--date 仅支持 day/month。")
+    if args.tui and (args.view != "all" or args.period != "overview" or not sys.stdout.isatty()):
+        parser.error("TUI 需要交互终端且使用默认 all/overview；单次查询请用 --once。")
+    prompted = not args.proxy or not args.base_url
+    if not args.proxy:
+        args.proxy = prompt_setting("本机 HTTP/mixed 代理端口（如 7890）：", proxy_from_port)
     try:
         opener = build_opener(RequiredProxy(args.proxy), NoRedirect())
     except ValueError:
         raise RuntimeError("必须用 --proxy 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。") from None
-    if args.date and args.period not in ("day", "month"):
-        parser.error("--date 仅支持 day/month。")
-    if args.tui and (args.view != "all" or args.period != "overview" or not sys.stdout.isatty()):
-        parser.error("TUI 需要交互终端且使用默认 all/overview；管道或日志采集请省略 --tui。")
+    base = normalize_base(args.base_url) if args.base_url else prompt_setting("HTTPS Base URL：", normalize_base)
+    if args.tui is None:
+        args.tui = (prompted or not sys.argv[1:]) and args.view == "all" and args.period == "overview" and sys.stdout.isatty()
     params = {"period": args.period}
     if args.period != "overview":
         params["recent"] = args.recent

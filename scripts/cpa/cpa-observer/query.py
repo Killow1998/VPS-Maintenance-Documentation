@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Query the observer without putting an API key in command arguments."""
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
+
 import argparse
 import getpass
 import json
