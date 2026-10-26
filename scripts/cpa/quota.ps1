@@ -2,7 +2,11 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$BaseUrl = $env:CPA_BASEURL,
-    [string]$KeyEnv
+    [string]$KeyEnv,
+    [ValidateSet('all', 'usage', 'quota')][string]$View = 'all',
+    [ValidateSet('day', 'month', 'all')][string]$Period = 'day',
+    [string]$Date,
+    [ValidateRange(0, 50)][int]$Recent = 10
 )
 
 function Get-QuotaTime($Value) {
@@ -33,13 +37,7 @@ function Get-ResetLabel($Value) {
 
 function Get-WindowLabel([string]$Name) {
     $label = $Name -replace '^five_hour', '5 小时' -replace '^seven_day', '7 天' -replace '_', ' '
-    $text = ''; $width = 0
-    foreach ($char in $label.ToCharArray()) {
-        $step = if ([int]$char -ge 0x2e80) { 2 } else { 1 }
-        if ($width + $step -gt 16) { break }
-        $text += $char; $width += $step
-    }
-    return $text + (' ' * (16 - $width))
+    return Format-Cell ([Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($label)) 16
 }
 
 function Get-Remaining($Value) {
@@ -51,53 +49,82 @@ function Get-Remaining($Value) {
     return $number
 }
 
-function Invoke-CpaQuota {
-    $ErrorActionPreference = 'Stop'
-    $base = $BaseUrl.TrimEnd('/')
-    if ($base.EndsWith('/v1')) { $base = $base.Substring(0, $base.Length - 3) }
-    $uri = $null
-    if (-not [Uri]::TryCreate($base, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
-        -not $uri.Host -or $uri.Port -eq 0 -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $base -match '\s') {
-        throw '请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。'
-    }
-    $key = $null; $secret = $null; $headers = $null
-    $protocol = [Net.ServicePointManager]::SecurityProtocol
-    try {
-        if ($KeyEnv) {
-            if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
-            $key = [Environment]::GetEnvironmentVariable($KeyEnv)
-            if (-not $key) { throw '指定的 Key 环境变量未加载。' }
-        } else {
-            $secret = Read-Host 'CPA API Key（隐藏输入）' -AsSecureString
-            $key = [Net.NetworkCredential]::new('', $secret).Password
-        }
-        if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
-        $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
-        [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
-        try {
-            $data = Invoke-RestMethod -Uri ($base + '/v1/quota') -Headers $headers -Method Get `
-                -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop
-        } catch {
-            $status = 0
-            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-            $message = switch ($status) {
-                401 { 'Key 无效或已撤销' }
-                404 { '入口未配置 /v1/quota' }
-                429 { '查询过于频繁，请稍后再试' }
-                default { '请检查网络、TLS 和入口服务；脚本不跟随重定向' }
-            }
-            throw "额度查询失败（HTTP $status）：$message。"
-        }
-        if ($data.scope -cne 'shared_pool' -or $data.accounts -isnot [Array]) {
-            throw '此入口未返回匿名号池，请检查 /v1/quota 路由。'
-        }
-    } finally {
-        $key = $null
-        if ($headers) { $headers.Clear() }
-        if ($secret) { $secret.Dispose() }
-        [Net.ServicePointManager]::SecurityProtocol = $protocol
-    }
 
+function Format-Cell($Value, [int]$Size) {
+    $text = [regex]::Replace([string]$Value, '[\p{Cc}\p{Cf}]', ' ')
+    $result = ''; $width = 0
+    foreach ($char in $text.ToCharArray()) {
+        $step = if ([int]$char -ge 0x2e80) { 2 } else { 1 }
+        if ($width + $step -gt $Size) { break }
+        $result += $char; $width += $step
+    }
+    return $result + (' ' * ($Size - $width))
+}
+
+function Format-Number($Value) {
+    if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string]) { return '未知' }
+    return $Value.ToString('N0', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-PublicAccount($Value) {
+    if ($Value -is [string] -and $Value -cmatch '^account-[0-9a-f]{12}$') { return $Value }
+    return '未归属'
+}
+
+function Get-Beijing($Value, [switch]$Seconds) {
+    $target = Get-QuotaTime $Value
+    if ($null -eq $target) { return '未知' }
+    $format = if ($Seconds) { 'MM-dd HH:mm:ss' } else { 'MM-dd HH:mm' }
+    return $target.ToOffset([TimeSpan]::FromHours(8)).ToString($format)
+}
+
+function Get-Cost($Row) {
+    $low = $Row.estimated_cost_usd_low; $high = $Row.estimated_cost_usd_high
+    foreach ($value in @($low, $high)) {
+        if ($null -eq $value -or $value -is [bool] -or $value -is [string]) { return '未知' }
+        if ([double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return '未知' }
+    }
+    $left = '$' + $low.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)
+    if ($low -eq $high) { return $left }
+    return $left + '–$' + $high.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Show-Usage($Data) {
+    $periodLabel = switch ($Data.period) { 'day' { '今日' } 'month' { '本月' } default { '全部' } }
+    if ($Data.date) { $periodLabel = (Format-Cell $Data.date 10).Trim() }
+    $total = $Data.totals
+    Write-Host "本 Key · ${periodLabel}用量（北京）"
+    Write-Host ('请求 {0} · 失败 {1} · Tokens {2} · API 标价估算 {3}' -f `
+        (Format-Number $total.requests), (Format-Number $total.failed_requests), (Format-Number $total.total_tokens), (Get-Cost $total))
+    Write-Host ('输入 {0} · 输出 {1} · 缓存读 {2} · 缓存写 {3}' -f `
+        (Format-Number $total.input_tokens), (Format-Number $total.output_tokens), (Format-Number $total.cache_read_tokens), (Format-Number $total.cache_write_tokens))
+    Write-Host ('计价覆盖 {0}/{1} · 采集至 {2} · 开始 {3}' -f (Format-Number $total.priced_requests), `
+        (Format-Number $total.requests), (Get-Beijing $Data.last_collected_at -Seconds), (Get-Beijing $Data.collection_started_at))
+    if (-not $Data.PSObject.Properties['accounts'] -or -not $Data.PSObject.Properties['recent']) {
+        Write-Host '服务尚未提供调用账号与明细，请更新 VPS observer。'
+        return
+    }
+    Write-Host "`n按调用账号汇总 · 仅本 Key"
+    Write-Host ('{0} {1} {2} {3} API 标价估算' -f (Format-Cell '匿名账号' 21), (Format-Cell '请求' 7), (Format-Cell '失败' 5), (Format-Cell 'Tokens' 13))
+    foreach ($row in $Data.accounts) {
+        Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell (Get-PublicAccount $row.id) 21), `
+            (Format-Cell (Format-Number $row.requests) 7), (Format-Cell (Format-Number $row.failed_requests) 5), `
+            (Format-Cell (Format-Number $row.total_tokens) 13), (Get-Cost $row))
+    }
+    if (@($Data.accounts).Count -eq 0) { Write-Host '选定期间暂无已采集调用。' }
+    Write-Host "`n近期调用 · 选定期间最近 $($Data.recent_limit) 条 · 北京时间"
+    Write-Host ('{0} {1} {2} {3} 状态' -f (Format-Cell '时间' 14), (Format-Cell '匿名账号' 21), (Format-Cell '模型' 24), (Format-Cell 'Tokens' 13))
+    foreach ($row in $Data.recent) {
+        $state = if ($row.failed) { '失败' } else { '成功' }
+        Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell (Get-Beijing $row.timestamp -Seconds) 14), `
+            (Format-Cell (Get-PublicAccount $row.account_id) 21), (Format-Cell $row.model 24), `
+            (Format-Cell (Format-Number $row.total_tokens) 13), $state)
+    }
+    if (@($Data.recent).Count -eq 0) { Write-Host '暂无记录。' }
+    Write-Host '输入已含缓存，输出已含 reasoning；API 标价估算不代表订阅扣款；重试按多次上游执行记录。'
+}
+
+function Show-Quota($Data) {
     $accounts = @($data.accounts)
     $enabled = @($accounts | Where-Object { $_.enabled -eq $true }).Count
     $fresh = @($accounts | Where-Object { $_.enabled -eq $true -and $_.stale -eq $false }).Count
@@ -130,4 +157,71 @@ function Invoke-CpaQuota {
     Write-Host "`n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加"
 }
 
-Invoke-CpaQuota
+function Get-CpaData($Base, $Headers, $Path, $Scope) {
+    try {
+        $data = Invoke-RestMethod -Uri ($Base + $Path) -Headers $Headers -Method Get `
+            -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop
+    } catch {
+        $status = 0
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        $message = switch ($status) {
+            401 { 'Key 无效或已撤销' }
+            404 { '入口未配置用量/额度接口' }
+            429 { '查询过于频繁，请稍后再试' }
+            default { '请检查网络、TLS 和入口服务；脚本不跟随重定向' }
+        }
+        throw "查询失败（HTTP $status）：$message。"
+    }
+    if ($data.scope -cne $Scope) { throw '接口返回的数据范围错误，请检查 observer 路由。' }
+    if ($Scope -eq 'shared_pool' -and $data.accounts -isnot [Array]) { throw '此入口未返回匿名号池。' }
+    if ($Scope -eq 'own_key' -and -not $data.totals) { throw '此入口未返回本 Key 用量。' }
+    return $data
+}
+
+function Invoke-CpaReport {
+    $ErrorActionPreference = 'Stop'
+    $base = $BaseUrl.TrimEnd('/')
+    if ($base.EndsWith('/v1')) { $base = $base.Substring(0, $base.Length - 3) }
+    $uri = $null
+    if (-not [Uri]::TryCreate($base, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
+        -not $uri.Host -or $uri.Port -eq 0 -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $base -match '\s') {
+        throw '请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。'
+    }
+    $key = $null; $secret = $null; $headers = $null
+    $protocol = [Net.ServicePointManager]::SecurityProtocol
+    $views = if ($View -eq 'all') { @('usage', 'quota') } else { @($View) }
+    $results = @{}; $failures = @{}
+    try {
+        if ($KeyEnv) {
+            if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
+            $key = [Environment]::GetEnvironmentVariable($KeyEnv)
+            if (-not $key) { throw '指定的 Key 环境变量未加载。' }
+        } else {
+            $secret = Read-Host 'CPA API Key（隐藏输入）' -AsSecureString
+            $key = [Net.NetworkCredential]::new('', $secret).Password
+        }
+        if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
+        $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
+        [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
+        foreach ($item in $views) {
+            $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
+            $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period + '&recent=' + $Recent } else { '/v1/quota' }
+            if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
+            try { $results[$item] = Get-CpaData $base $headers $path $scope }
+            catch { $failures[$item] = $_.Exception.Message }
+        }
+    } finally {
+        $key = $null
+        if ($headers) { $headers.Clear() }
+        if ($secret) { $secret.Dispose() }
+        [Net.ServicePointManager]::SecurityProtocol = $protocol
+    }
+    foreach ($item in $views) {
+        if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
+        if ($item -eq 'usage') { Show-Usage $results[$item] } else { Show-Quota $results[$item] }
+        Write-Host ''
+    }
+    if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
+}
+
+Invoke-CpaReport

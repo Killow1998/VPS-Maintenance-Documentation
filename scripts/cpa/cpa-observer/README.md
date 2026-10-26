@@ -20,8 +20,19 @@ Both interfaces use the same root Base URL and `Authorization: Bearer <client CP
 | `GET /v1/usage?period=day` | Only the calling Key's usage for the current Beijing calendar day |
 | `GET /v1/usage?period=month&date=2026-10` | Only that Key's October usage |
 | `GET /v1/usage?period=all` | Only that Key's retained usage |
+| `GET /v1/usage?period=day&recent=20` | That Key's totals, anonymous account breakdown and latest 20 execution attempts in the same day |
 
 Missing/invalid keys return 401, unsupported account/client selectors return 400, and request limits return 429. These endpoints are extensions supplied by this service, not native CPA endpoints. All valid downstream Keys in this deployment use the same shared Claude pool. If per-Key upstream routing restrictions are introduced, pool selection must be updated to match them before exposing restricted pools.
+
+The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients show own-Key usage and pool quota together. They need only a Base URL and downstream Key. One-command execution from a pinned GitHub commit is documented in [guide section 9.3](../../../docs/09-cpa-claude.md).
+
+### Own-Key usage response
+
+`totals` and `models` retain the existing totals and model breakdown. `accounts` adds one aggregate per anonymous upstream account/provider: `id`, `provider`, request and failure counts, token fields, estimated cost bounds, pricing coverage and `last_used_at`. `recent` adds execution records with `timestamp`, `account_id`, `model`, `provider`, `failed`, token fields, accounting quality, latency and estimated cost bounds. Neither list contains a raw client Key, credential name, email, auth index, execution ID or request/response body.
+
+Account IDs use the same `account-` HMAC prefix as `/v1/quota`, so a caller can match the account that handled a request to its current quota windows. Removed accounts retain their historical pseudonym. Missing account telemetry produces a null ID, never a guessed account. These aggregates describe only the calling Key's use of each account; shared pool quota remains shared.
+
+`recent` is an optional integer query parameter from 0 to 50, default 10. Records are sorted newest first and filtered to the same Beijing day/month/all period as the aggregates. `recent=0` omits execution details while retaining totals. Invalid or duplicate parameters return 400. Client identity is derived exclusively from the validated Bearer Key; callers cannot select another client or account. All three usage queries share the same client/date filter and one SQLite read transaction.
 
 Use `query.py` to avoid exposing a secret in process arguments. Set `CPA_BASEURL` (or `ANTHROPIC_BASE_URL`) to your HTTPS gateway root. With no `--client`, it reads `ANTHROPIC_AUTH_TOKEN` or prompts without echoing. With `--client client_a`, it reads `CPA_API_KEY_CLIENT_A` from the environment:
 
@@ -85,6 +96,8 @@ sudo journalctl -u cpa-observer --since '30 minutes ago'
 ```
 
 The local `--report` command is for administrators and can summarize all client labels. It is not exposed over the client API. Back up SQLite using its backup API or a consistent snapshot, not a lone database-file copy while WAL writes are active.
+
+For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. The account/recent additions reuse existing columns and require no schema migration. Verify own-Key isolation and the `/v1/usage` response after restarting; restore the prior source if the new read API fails.
 
 ## Reliability limits
 

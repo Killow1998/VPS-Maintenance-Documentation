@@ -2,7 +2,14 @@
 
 本仓库提供两条独立流程：Vultr + XBoard 的代理订阅，以及 VPS + CPA/Claude 的模型网关。既可由用户逐步操作，也可交给具有本地终端和 SSH 能力的部署助手执行；不要求同时安装两套服务。
 
-XBoard 方案最终交付的是每位用户一条包含节点、策略组、DNS 和分流规则的订阅链接，可由 Clash Verge Rev / FlClash 更新；不是让用户导入一个本地配置文件。CPA 方案交付 HTTPS Base URL、独立客户端 Key 和模型 ID，不是 Clash 订阅。
+## 两部分
+
+| 部分 | 用途和交付 | 计量口径 | 主要入口 |
+| --- | --- | --- | --- |
+| XBoard 代理订阅 | Clash Verge Rev / FlClash 使用的远程订阅，包含节点、策略组、DNS 和分流规则；不需导入本地文件 | 上传/下载字节、用户配额、节点总池 | [部署方案](docs/05-xboard-solution.md)、[免安装运维工具](docs/08-terminal-tool.md) |
+| CPA/Claude 模型网关 | Claude Code 使用的 HTTPS Base URL、独立客户端 Key、模型 ID；不是 Clash 订阅 | 本 Key 请求与 token、匿名调用账号、近期执行；共享号池限额单独显示 | [部署及使用指南](docs/09-cpa-claude.md)、[试用清单](docs/09-cpa-claude.md#95-使用者试用清单) |
+
+两部分可以分别部署。VPS 的网络流量、模型 token 和号池额度不能相互替代，也不合并为同一账单。
 
 ## 阅读顺序
 
@@ -30,7 +37,7 @@ XBoard 方案最终交付的是每位用户一条包含节点、策略组、DNS 
 | --- | --- | --- |
 | XBoard 全员流量、用户和配额管理 | [vpsctl.py](scripts/vpsctl.py) | [SSH 隧道终端手册](docs/08-terminal-tool.md)；Python 3.10+，Windows/Linux/macOS；不安装 VPS 常驻服务 |
 | CPA Key、用量和剩余额度 | [api_keys.py](scripts/cpa/cpa-tools/api_keys.py) | [自助工具 SOP](scripts/cpa/cpa-tools/README.md)；管理员使用 SSH，普通用户仅查询自己的用量与匿名号池 |
-| CPA 临时匿名额度查询 | [quota.ps1](scripts/cpa/quota.ps1) / [quota.sh](scripts/cpa/quota.sh) | [一条命令查询](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)；Windows PowerShell 或 Bash，只读快照，不调用模型 |
+| CPA 个人用量与号池额度查询 | [quota.ps1](scripts/cpa/quota.ps1) / [quota.sh](scripts/cpa/quota.sh) | [一条命令查询](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)；Windows PowerShell 或 Bash，显示本 Key 用量、匿名账号、近期调用和共享余量；不调用模型 |
 | Claude 双授权 | [claude_auth.py](scripts/cpa/cpa-tools/claude_auth.py) | [授权流程](scripts/cpa/cpa-auth/README.md)；由账号持有人完成浏览器授权 |
 | CPA 聚合计量和匿名额度接口 | [observer.py](scripts/cpa/cpa-observer/observer.py) | [采集器部署说明](scripts/cpa/cpa-observer/README.md)；可选 VPS 原生服务，不属于 XBoard 免安装工具 |
 | CPA 鉴权与真实生成验收 | [cpa_verify.py](scripts/cpa/cpa_verify.py) | [部署验收步骤](docs/09-cpa-claude.md#8-验证鉴权模型与真实生成)；仅显式运行，真实生成消耗上游用量 |
@@ -119,3 +126,5 @@ Scholar 原生配置有明确版本边界，见专项文档。升级前先核对
 2026-10-26（Asia/Shanghai）Claude 扩展：[原生 CPA 部署与自助工具包](docs/09-cpa-claude.md)，按十二节模板整理 HTTPS、setup-token 与资料双授权、按 Key 用量和剩余额度。主屏与额度页共用黑底，额度预取后直接显示，后台更新保留当前画面。已检查源码、帮助、链接、隐私，并完成离线界面预览和既有部署只读查询；新机部署、凭据换发及写入按指南逐项验收。
 
 [PR #1](https://github.com/Killow1998/VPS-Maintenance-Documentation/pull/1) 合并验收：保留当前 XBoard 脚本、测试和工具手册，新增 CPA 的独立指南与源码，并统一上述入口。XBoard 27 项、CPA observer 14 项本地测试通过；15 个新增 Python 源文件、2 段内嵌远端 Python、相对文件链接及已知私密值扫描通过。独立查询脚本通过 Bash 语法、内嵌 Python 离线查询以及 PowerShell 5.1/7.6 内存入口离线查询；不显示 Key 或邮箱。本次未执行 CPA 新机安装、生产授权或写入，也未调用上游生成接口；没有 GitHub CI 检查，不将本地测试称为生产部署验收。
+
+[PR #2](https://github.com/Killow1998/VPS-Maintenance-Documentation/pull/2) 合并整理：增加当前 Key 的匿名账号用量和近期执行记录，更新独立查询脚本；保留 XBoard 工具不变。17 项 observer 离线测试通过，真实使用按[试用清单](docs/09-cpa-claude.md#95-使用者试用清单)由使用者验收。本轮未修改现有 VPS、部署服务或调用上游模型；贡献者先前报告的生产验证与本轮本地检查分别记录。

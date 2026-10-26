@@ -74,6 +74,20 @@ class StorageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             period_bounds("month", "2026-13")
 
+    def test_account_and_recent_filters_preserve_unknowns(self):
+        before, after = event(execution="before"), event(execution="after")
+        before.update(timestamp="2026-10-25T15:59:59Z", auth_index=None)
+        before.pop("token_breakdown")
+        after.update(timestamp="2026-10-25T16:00:00Z")
+        self.store.ingest([before, after])
+        report = self.store.summary(self.store.client("test-key-a"), "day", "2026-10-25")
+        self.assertEqual(report["totals"]["requests"], 1)
+        self.assertEqual(len(report["recent"]), 1)
+        self.assertIsNone(report["accounts"][0]["id"])
+        self.assertIsNone(report["recent"][0]["account_id"])
+        self.assertIsNone(report["accounts"][0]["cache_read_tokens"])
+        self.assertIsNone(report["recent"][0]["estimated_cost_usd_low"])
+
 
 class FakeBackend:
     def __init__(self):
@@ -137,6 +151,33 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["scope"], "shared_pool")
         self.assertEqual(body["windows"]["five_hour"]["remaining_percent"], 75)
         self.assertNotIn("private-index", json.dumps(body))
+
+    def test_own_usage_account_ids_match_quota_without_leaking_other_keys(self):
+        extra = event(execution="newer-a")
+        extra.update(auth_index="private-index", timestamp="2099-01-01T00:00:00Z")
+        self.observer.store.ingest([extra])
+        status, body = self.get("/v1/usage?period=all&recent=1", "test-key-a")
+        quota_id = self.observer.quota_response()["accounts"][0]["id"]
+        self.assertEqual(status, 200)
+        self.assertEqual(body["totals"]["requests"], 2)
+        self.assertEqual(sum(a["requests"] for a in body["accounts"]), 2)
+        self.assertEqual(len(body["recent"]), 1)
+        self.assertEqual(body["recent"][0]["account_id"], quota_id)
+        self.assertEqual(body["recent"][0]["total_tokens"], 130)
+        self.assertIn(quota_id, {a["id"] for a in body["accounts"]})
+        other = self.get("/v1/usage?period=all&recent=50", "test-key-b")[1]
+        self.assertEqual(other["totals"]["requests"], 1)
+        self.assertEqual(len(other["recent"]), 1)
+        self.assertNotEqual(other["recent"][0]["account_id"], quota_id)
+        for private in ("test-key-a", "test-key-b", "private-index", "private@example.invalid", "execution-a"):
+            self.assertNotIn(private, json.dumps(body))
+
+    def test_recent_limits_cannot_expand_client_scope(self):
+        body = self.get("/v1/usage?period=all&recent=0", "test-key-a")[1]
+        self.assertEqual(body["recent"], [])
+        self.assertEqual(body["totals"]["requests"], 1)
+        for query in ("recent=51", "recent=-1", "recent=", "recent=1&recent=2", "account=other", "client=other"):
+            self.assertEqual(self.get("/v1/usage?" + query, "test-key-a")[0], 400)
 
     def test_revoke_takes_effect_after_short_cache(self):
         self.assertEqual(self.get("/v1/quota", "test-key-a")[0], 200)
