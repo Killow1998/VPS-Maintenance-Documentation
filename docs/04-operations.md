@@ -2,7 +2,7 @@
 
 [返回目录](../README.md)
 
-日常 XBoard 用户、配额、全员流量和服务操作使用[免安装 SSH 终端工具](08-terminal-tool.md)，无需另记管理员密码或用户 ID。可选 CPA/Claude 网关使用[独立部署维护指南](09-cpa-claude.md)和[CPA 工具包](../scripts/cpa/README.md)；不要把 CPA Key/模型用量与 XBoard 订阅/字节流量混为同一计量，也不要为添加工具重装现有业务。
+XBoard 的用户、流量、配额和服务管理见[终端工具手册](08-terminal-tool.md)。CPA/Claude 的模型用量与账号管理见[部署指南](09-cpa-claude.md)和[工具包](../scripts/cpa/README.md)。
 
 ## 1. 每台机器的私有记录
 

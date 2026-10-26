@@ -2,7 +2,7 @@
 
 本页命令从工具包根目录执行：先在仓库根目录运行 `cd scripts/cpa`。实际配置和会话放在仓库外。
 
-For daily self-service use, run `python3 cpa-tools/claude_auth.py` from the project root. It displays links in your terminal, sequences both grants, validates the account, backs up and binds quota, and enables the new account only after acceptance. GPT is not required. Setup, recovery and limitations are maintained in the [self-service SOP](../cpa-tools/README.md). The supervisors below are internal building blocks and advanced/manual entry points.
+For daily use, run `python3 cpa-tools/claude_auth.py` from the tool root. It guides both authorizations, validates the account, backs up configuration and binds quota before enabling the account. See the [user guide](../cpa-tools/README.md) for setup and recovery. The commands below are for advanced maintenance.
 
 `managed_setup.py` runs the locally installed Claude Code `setup-token` command in an isolated configuration directory. It captures terminal output privately, checks the automatic local callback listener, then writes a protected authorization URL for the agent to give the user. The user opens it in their own browser or private window, chooses the account and authorizes. It does not open a browser by default. No token needs to be copied or submitted by the user.
 
@@ -19,7 +19,7 @@ Create a private deployment JSON outside this shareable source directory, mode `
 }
 ```
 
-Replace placeholders using the authorized deployment. The SSH user must have permission to read the observer configuration, manage CPA credentials and run an isolated CPA process. This implementation locates the native binary through `cliproxyapi.service`; adapt that unit name when the installation differs. The remote host needs Python 3, systemd and the deployed native CPA v8. The local host needs Python 3 and Claude Code. Browser-opening utilities are required only for the explicit `--open-browser` opt-in.
+Replace placeholders using the authorized deployment. The SSH user must have permission to read the observer configuration, manage CPA credentials and run an isolated CPA process. This implementation locates the native binary through `cliproxyapi.service`; adapt that unit name when the installation differs. Both hosts require Python 3.10+. The remote host also needs systemd and CPA v8; the local host needs Claude Code. Browser-opening utilities are required only for the explicit `--open-browser` opt-in.
 
 The agent starts a persistent execution session:
 

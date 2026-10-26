@@ -3,6 +3,7 @@
 !.gitignore
 !.gitattributes
 !README.md
+!CHANGELOG.md
 !cpa.sh
 !cpa.ps1
 !docs/

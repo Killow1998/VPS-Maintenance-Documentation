@@ -1,24 +1,44 @@
-# CPA 原生工具包
+# CPA 工具包
 
-从仓库根目录阅读 [VPS + CPA + Claude 部署指南](../../docs/09-cpa-claude.md)。本目录只提供源码和示例，不包含任何部署数据。
+管理 Claude 账号与 API Key，查询模型用量和账户池额度。
 
-只想查个人用量和号池时，使用[首页的一行启动命令](../../README.md#cpa-一键查询)，无需克隆仓库。Linux/macOS 与 Windows 均在启动后询问端口、Base URL 和隐藏 Key；首次公开启动器下载使用当前网络，其余下载和 API 强制代理。若提示 observer 不支持总览，转交[现有服务修复 Prompt](cpa-observer/README.md#repair-prompt)，不要反复换 Key。
+- **查询自己的用量**：[一键启动](../../README.md#cpa-一键查询)。
+- **管理账号和 Key**：[运维工具手册](cpa-tools/README.md)。
+- **部署新服务**：[CPA/Claude 部署指南](../../docs/09-cpa-claude.md)。
+- **更新已有采集服务**：[observer 更新说明](cpa-observer/README.md#repair-prompt)。
 
-| 位置 | 用途 |
+## 运行环境
+
+Python 工具统一使用 **Python 3.10+**。管理员工具在 Linux、macOS 或 Windows WSL 中运行，并通过 SSH 连接 VPS；本机和 VPS 均需检查 Python 版本。
+
+个人查询使用 `quota.sh`（Bash、Python）或 `quota.ps1`（PowerShell 5.1 或 7）。启动后输入本机代理端口、HTTPS Base URL 和 API Key。
+
+## 工具列表
+
+| 入口 | 用途 |
 | --- | --- |
-| `cpa-tools/claude_auth.py` | setup-token + profile/quota 双授权 |
-| `cpa-tools/api_keys.py` | Key TUI、用量、剩余额度 |
-| `quota.sh` / `quota.ps1` | 独立查询自己的用量、近期调用账号与匿名号池余量 |
-| `cpa-auth/` | 受保护的授权进程 |
-| `cpa-observer/` | VPS 原生采集器、SQLite、客户端接口 |
-| `cpa_verify.py` | 显式运行的鉴权和真实生成验证 |
+| [claude_auth.py](cpa-tools/claude_auth.py) | 新增 Claude 账号，完成模型调用与额度查询授权 |
+| [api_keys.py](cpa-tools/api_keys.py) | 管理 Key，查询用量和账户池 |
+| [quota.sh](quota.sh) / [quota.ps1](quota.ps1) | 查询当前 Key 的模型用量、估算费用、缓存命中率和共享余量 |
+| [cpa-observer](cpa-observer/README.md) | 采集用量、保存 SQLite 记录、提供查询接口 |
+| [cpa-auth](cpa-auth/README.md) | 授权流程的底层工具 |
+| [cpa_verify.py](cpa_verify.py) | 验证鉴权和模型生成；生成测试会消耗用量 |
 
-Python 运维工具统一要求 Python 3.10+，与 XBoard 的 `vpsctl.py` 一致。本机使用 macOS/Linux 或 Windows WSL；CPA 的远端 Python 工具及 observer 也按同一版本要求预检，不能只检查本机。普通用户额度查询无需 SSH；管理员需现有 SSH 和对应权限。运行命令示例见 [自助 SOP](cpa-tools/README.md)。
+## 查询看板
 
-临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。在仓库根目录，Linux/macOS 执行 `bash scripts/cpa/quota.sh`，Windows 执行 `.\scripts\cpa\quota.ps1`，均无需参数。依次输入本机 HTTP/mixed 代理端口、HTTPS Base URL 和隐藏的 API Key，即进入看板；不将连接信息或 Key 写入文件。缺少交互终端时必须通过参数或环境变量提供连接信息，缺少代理或连接失败不回退直连。默认同屏显示当前 Key 的近 1h/7d/30d/总历史与号池余量，R/Enter 刷新、Q 退出；每次仅两次只读请求。`--once` / `-Once` 可单次查询，原有完整参数调用保持单次模式。指定具体期间可查询匿名账号汇总、近期明细和计价。新总览需要新版 observer，历史仅限实际保留记录；号池百分比与 token 用量不可混算。固定版本下载、强制代理边界及选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
+看板展示近 1 小时、7 天、30 天和历史用量。输入 `1/2/3/4` 切换模型明细，`N/P` 翻页，`R` 或回车刷新，`Q` 退出。切换和翻页使用已取得的数据。
 
-离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p 'test_quota_*.py' -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。启动器测试核对固定源码哈希，并覆盖失败/篡改不执行、无终端拒绝、交互输入及代理传递。
+首次下载启动器使用当前网络；随后脚本下载及 API 查询使用指定代理，连接失败即停止。Key 仅在本次运行中使用。完整命令及选项见[使用指南](../../docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)，统计含义见[用量与费用说明](../../docs/09-cpa-claude.md#94-用量与费用口径)。
 
-独立看板的四段总览包括 token 加权缓存命中率、USD 标价估算及计价覆盖数。输入 1/2/3/4 切换下方模型明细窗口，N/P 翻页，每页最多 5 个模型；这些操作不联网。单次具体期间查询也有模型汇总。费用按记录入库时的价格计算，不重算历史；未知模型价格或缺计量时不估填，部分费用带 `*`。模型分项需要 observer 在每个窗口返回 `models`，更新步骤见既有修复 Prompt，不需要改表或重建用量。
+## 配置与测试
 
-私密配置用 `--config /PRIVATE/deployment.json` 或 `CPA_TOOLS_CONFIG` 指定，放在克隆目录之外。默认配置路径是便利入口，不是公开模板。不要把私密 env、state、密钥、OAuth 文件、数据库和 VPS 备份复制到本目录。
+私密配置保存在仓库外，通过 `--config /PRIVATE/deployment.json` 或 `CPA_TOOLS_CONFIG` 指定。凭据、授权文件、数据库及服务器备份也应保存在私有目录。
+
+在仓库根目录运行测试：
+
+```bash
+python -B -m unittest discover -s scripts/cpa -p 'test_quota_*.py' -v
+python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v
+```
+
+测试使用模拟凭据、临时数据库和本机接口。安装 PowerShell 后可同时验证 Windows 客户端。

@@ -2,7 +2,7 @@
 
 本页命令从工具包根目录执行：先在仓库根目录运行 `cd scripts/cpa`。实际配置和会话放在仓库外。
 
-Daily administrator operations are available through `python3 cpa-tools/api_keys.py` from the project root: add, revoke, rename, rotate, export privately, and query usage. It keeps labels synchronized with CPA and preserves historical records. GPT is not required. See the [self-service SOP](../cpa-tools/README.md). New Claude accounts use the paired `claude_auth.py` entry point; the observer remains the server-side collector and read API.
+Run `python3 cpa-tools/api_keys.py` from the tool root to manage Keys and query usage. It synchronizes CPA labels and preserves history. See the [user guide](../cpa-tools/README.md). Use `claude_auth.py` to add Claude accounts; observer collects usage and serves the query API.
 
 The TUI's `g` view and `api_keys.py quota --admin` join anonymized account IDs with private account emails over administrator SSH. This mapping is not added to this service's public responses. Ordinary users can run `api_keys.py quota --base-url https://CPA_HOST --key-env CPA_API_KEY_CLIENT_A` with only their Base URL and Key; no deployment configuration or SSH access is required.
 

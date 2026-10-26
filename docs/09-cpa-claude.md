@@ -1,8 +1,8 @@
 # VPS + CLIProxyAPI + Claude Code
 
-在 Linux VPS 上部署 CLIProxyAPI（CPA），通过 Nginx 提供 HTTPS 入口，让电脑上的 Claude Code CLI 使用独立客户端 Key 调用 Claude。服务端采用原生二进制与 systemd，无需 Docker。
+在 Linux VPS 上部署 CLIProxyAPI（CPA），通过 Nginx 提供 HTTPS 入口，让 Claude Code 使用独立 API Key 调用模型。CPA 由 systemd 管理。
 
-适用环境：具备 sudo 权限的 Debian/Ubuntu VPS；客户端为 macOS、Linux 或 Windows。Python 运维脚本统一要求 Python 3.10+，与 XBoard 工具一致；分别检查本机和 VPS 的实际解释器，低版本会在读取凭据和执行操作前退出。自助双授权与 TUI 使用 macOS/Linux，Windows 使用 WSL；独立 PowerShell 查询脚本无需 Python。本文是部署步骤和配置模板，不是整篇粘贴执行的脚本。
+服务端需要具备 sudo 权限的 Debian/Ubuntu。Python 工具统一使用 Python 3.10+，请分别检查本机和 VPS 的版本。管理员工具在 macOS、Linux 或 Windows WSL 中运行；Windows 个人查询使用 PowerShell。
 
 | 读者 | 阅读路径 |
 | --- | --- |
@@ -11,7 +11,7 @@
 | 管理员 | 9.2 管理 Key、查看用量和账号剩余额度；10—11 节用于维护。 |
 | 执行任务的 Agent | 先读第 12 节，再执行对应部署步骤；第 11 节定义交付标准。 |
 
-“VPS”指远端服务器，“本机”指运行浏览器或 Claude Code 的电脑。代码块前标明位置、用途和条件。占位符未补齐时不执行。本文示例不代表目标服务器已部署成功。
+“VPS”指远端服务器，“本机”指使用者的电脑。执行命令前，按标注选择运行位置，并替换示例中的占位符。
 
 ## 1. 准备需求
 
@@ -502,21 +502,51 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 ### 9.3 使用者只用 Base URL + Key 查询
 
-**位置：使用者本机。无需 SSH、管理员配置或 OAuth token。API 查询必须指定本机 HTTP/mixed 代理，不能直连。**
+**在使用者本机运行。** 准备自己的 HTTPS Base URL、API Key，并打开本机 Clash/FlClash。查询脚本使用 HTTP/mixed 代理端口，例如 `7890`。
 
-临时查询使用独立 [quota.sh](../scripts/cpa/quota.sh) 或 [quota.ps1](../scripts/cpa/quota.ps1)，无需安装 pip 包。先在 Clash/FlClash 中确认 HTTP/mixed 监听端口；`7890` 只是示例。纯 SOCKS 端口不能用作这里的 HTTP 代理。
+运行[首页一键命令](../README.md#cpa-一键查询)，依次输入 **代理端口、Base URL、API Key**，即可进入看板。Key 隐藏输入，仅在本次运行中使用。Base URL 须为 HTTPS；末尾的 `/v1` 由脚本自动处理。
 
-无需克隆、运行后再输入三项信息的最短入口见[首页 CPA 一键查询](../README.md#cpa-一键查询)。首次公开启动器下载使用当前网络，之后强制代理下载固定客户端、验证 SHA256，再查询 API。下面保留已取得文件的运行方法，以及连首次下载也强制指定代理的完整命令；两种入口不需要同时运行。
+#### 查看用量
 
-**macOS / Linux：Bash 和 Python 3.10+。已取得新版仓库时，在仓库根目录执行：**
+总览显示当前 Key 的近 1 小时、7 天、30 天和历史用量，包括请求与失败次数、token、缓存命中率、估算费用。下方按模型列出明细，默认展示近 1 小时，按估算费用从高到低排列。账户池区域显示共享额度的余量、重置时间和数据更新时间。
+
+| 操作 | 按键 |
+| --- | --- |
+| 查看近 1 小时 / 7 天 / 30 天 / 历史的模型明细 | `1` / `2` / `3` / `4` |
+| 翻页，每页最多 5 个模型 | `N` / `P` |
+| 刷新 | `R` 或回车 |
+| 退出 | `Q` |
+
+切换和翻页使用已取得的数据。手动刷新分别查询一次用量和账户池接口。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
+
+#### 代理设置
+
+首页启动器的首次下载使用当前网络。输入端口后，脚本通过指定代理下载固定版本客户端、校验 SHA256，并查询 API。
+
+在 Clash 的高优先级规则中，将 CPA 域名交给代理节点，例如 `DOMAIN,api.example.com,节点选择`，再到连接页确认实际使用的节点。脚本使用本机 HTTP 代理 `http://127.0.0.1:端口` 或 `http://[::1]:端口`。
+
+代理失败时查询停止，HTTPS 证书校验始终开启。查询会忽略 `NO_PROXY` 绕过设置并拒绝重定向。纯 SOCKS 端口请改用 Clash 的 HTTP/mixed 端口。
+
+<details>
+<summary>其他启动方式：本地文件与全程代理下载</summary>
+
+已下载仓库时，在仓库根目录运行。
+
+**Linux / macOS**：Bash、Python 3.10+。
 
 ```bash
 bash scripts/cpa/quota.sh
 ```
 
-脚本依次询问 **代理端口 → HTTPS Base URL → API Key（隐藏输入）**，默认进入可刷新的总览。端口必须是 1–65535；URL 必须是 HTTPS，末尾 `/v1` 会自动规范化。端口或 URL 格式错误时可重新输入，Ctrl+C 取消。连接信息和 Key 不写文件。只取得独立文件时，直接 `bash quota.sh`，无需克隆整个仓库。
+**Windows**：PowerShell 5.1 或 7。脚本文件运行遵循本机执行策略。
 
-**首次不落盘启动：还需要 curl。下载脚本本身也必须先知道代理端口，所以这一步在下载前询问一次，再交给脚本复用；不会直连下载。**
+```powershell
+.\scripts\cpa\quota.ps1
+```
+
+如果首次下载也要使用代理，运行以下固定版本命令。
+
+**Linux / macOS**：另需 curl。
 
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
@@ -525,13 +555,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
-**Windows：PowerShell 5.1+，无需 Python。已取得新版仓库时，在仓库根目录执行，同样不传参数：**
-
-```powershell
-.\scripts\cpa\quota.ps1
-```
-
-同样按 **代理端口 → HTTPS Base URL → 隐藏 Key** 输入并进入看板。脚本文件运行受本机执行策略约束，不修改系统策略。首次不落盘启动可使用下面的固定源码入口，同样在运行后询问端口，不把 Key 写进命令：
+**Windows**：
 
 ```powershell
 & {
@@ -544,19 +568,11 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
 }
 ```
 
-随后隐藏输入自己的客户端 Key。同屏显示当前 Key 的**滚动近 1 小时、7 天、30 天、总历史**请求/失败数、总 token、token 缓存命中率、USD 估算及计价覆盖数，以及各匿名账号的号池剩余额度和重置时间。模型明细默认近 1h，包含完整输入/输出和缓存读写合计，按模型的请求、token、缓存比例与估算费用；模型按 USD 估算上界降序排列。`1` / `2` / `3` / `4` 切换明细窗口，`N` / `P` 翻页，每页最多 5 个模型；这些操作只使用当前快照，不联网。`R` 或 Enter 刷新，`Q` 退出；Key 只输入一次，不自动轮询。Bash 加 `--once`，PowerShell 加 `-Once`，即输出一次后退出，此时默认列出近 1h 的全部模型；其他期间可用下表参数。原有完整参数调用仍是单次模式，显式 `--tui` / `-Tui` 可进入看板。每次刷新仅请求一次 `/v1/usage?period=overview` 和一次 `/v1/quota`，不发起模型调用或强制刷新上游额度。表格中的 K/M/B/T 分别为十进制千/百万/十亿/万亿缩写；API 保留原始整数。
+</details>
 
-**缓存与费用口径：** 缓存命中率 = `sum(cache_read_tokens) / sum(input_tokens) × 100%`，输入包括未缓存、缓存读取、缓存写入三个互斥部分；不平均每次命中率，也不把缓存写入当命中。任一记录缺少所需计量时汇总比例未知；零输入也显示未知，已知输入但零缓存读取才是 0%。USD 累加入库时保存的价格快照，不按今天的价格重算历史。费用由未缓存输入、缓存读、缓存写和输出分别计价，输出已含 reasoning；写入 TTL 未区分时取 5 分钟/1 小时价格形成上下界。`*` 是部分计价，小计仅覆盖 `priced_requests/requests`；未收录模型价格或不完整计量不能当免费。标价依据见 [Anthropic 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)，不是订阅账单或所有附加费结算。
+#### 单次查询与自动化
 
-窗口共用服务端截止时间及 SQLite 读取快照，按 `[截止时间-时长, 截止时间)` 计算；近 30 天不等于本月。总历史也只统计截止时间前、当前数据库已保留的记录。界面显示采集开始、最后采集时间、状态及拒收数；这些时间不能证明期间无缺口。窗口相互重叠，不可相加。号池余量来自独立缓存，可能比个人用量旧；多个账号的百分比也不可相加。
-
-**代理边界：** 两端在缺少 `--proxy` / `-ProxyUrl` / `CPA_PROXY` 时向交互终端询问端口；没有终端则在读取 Key 前停止。只接受 `http://127.0.0.1:端口` 或 `http://[::1]:端口`；端口交互生成前者。代理失败时不回退直连，忽略 `NO_PROXY` 的绕过意图，不跟随重定向，仍校验 HTTPS 证书。下载失败也不会执行残留脚本。PowerShell 显式使用 [`-Proxy`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/invoke-restmethod#-proxy)；Python 覆盖 [`ProxyHandler`](https://docs.python.org/3/library/urllib.request.html#urllib.request.ProxyHandler) 的默认绕过行为。不要使用跳过证书校验的选项。
-
-这保证请求进入指定本机代理，**不保证 Clash 最终走某个节点**。在 Clash 的高优先级规则中将 CPA 的实际域名定向到真实代理节点，例如 `DOMAIN,api.example.com,节点选择`，放在宽泛直连规则前，并确认该策略组没有选 `DIRECT`。也可临时使用全局模式并选真实节点。在连接页确认 CPA 域名的最终链路；本脚本不擅自修改客户端规则。
-
-已有环境变量时，Bash 调用追加 `--key-env CPA_API_KEY_CLIENT_A`；PowerShell 脚本调用行追加 `-KeyEnv CPA_API_KEY_CLIENT_A`。参数只填写变量名，不填写 Key 值。省略入口时读取 `CPA_BASEURL`，省略代理参数时读取 `CPA_PROXY`；两端都只询问仍缺失的连接项。自动化环境没有交互终端时，完整提供入口、代理和 Key 环境变量，用 `--once` / `-Once`；脚本不从管道中读取密钥。
-
-以下参数只供自动化或高级查询使用，日常无需填写。参数加在本地脚本命令末尾；不落盘示例中，加在 Bash 的 `bash -s --` 后或 PowerShell 的脚本调用同一行。单期间或单视图查询不要指定 TUI 开关，不能加在 PowerShell 外层 `}` 之后。
+Bash 加 `--once`，PowerShell 加 `-Once`，查询一次后退出。默认输出近 1 小时的全部模型，也可指定以下选项：
 
 | 查询内容 | Bash 参数 | PowerShell 参数 |
 | --- | --- | --- |
@@ -569,52 +585,52 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
 | 指定某日 | `--period day --date 2026-10-26` | `-Period day -Date 2026-10-26` |
 | 今日最近 20 条调用 | `--period day --recent 20` | `-Period day -Recent 20` |
 
-总览不请求逐次明细。选择具体期间后，显示缓存 token、API 标价估算、计价覆盖率、按匿名账号汇总及最近 10 条执行。条数支持 0–50；`0` 只返回汇总。调用中的 `account-…` 与额度页编号一致，表示实际承接上游执行的账号；账号汇总仅含当前 Key。缺失归属显示“未归属”。API 标价估算不等于订阅扣款，重试也可能生成多条执行。
+选择具体期间后，可查看模型、匿名上游账号汇总和最近 10 条执行记录。`--recent` / `-Recent` 接受 0–50，设为 0 时仅显示汇总。同一个 `account-…` 编号在用量与额度页对应同一上游账号。请求重试可能产生多条执行记录。
 
-已安装完整工具包的用户也可运行：
+已有环境变量时，用 `--key-env CPA_API_KEY_CLIENT_A` 或 `-KeyEnv CPA_API_KEY_CLIENT_A` 读取 Key。Base URL 和代理分别可由 `CPA_BASEURL`、`CPA_PROXY` 提供。自动化运行须提供完整连接信息，并使用单次查询模式；真实 Key 保存在环境变量中。
 
-```bash
-python3 scripts/cpa/cpa-tools/api_keys.py quota --base-url https://api.example.com
-```
+参数加在脚本调用后；上方下载命令中，分别加在 Bash 的 `bash -s --` 后或 PowerShell 的脚本调用行末尾。具体期间和单视图查询使用单次模式。
 
-该旧 Python 管理入口支持 `--key-env CPA_API_KEY_CLIENT_A` 和 `--json`，但**不具备本次新增的强制代理约束**。要求强制代理的普通使用者应使用上方独立脚本。本次未修改模型客户端或 `cpa_verify.py` 的网络路径。
+#### 兼容与故障处理
 
-| 接口 | 数据 |
+| 现象 | 处理 |
 | --- | --- |
-| `GET /v1/quota` | 匿名号池和匿名账号的剩余额度窗口 |
-| `GET /v1/usage?period=day&recent=10` | 当前 Key 今日已采集用量、按匿名账号汇总、最近 10 条调用 |
-| `GET /v1/usage?period=month&date=2026-10` | 当前 Key 指定月用量 |
-| `GET /v1/usage?period=all&recent=50` | 当前 Key 全部汇总及最近 50 条调用 |
+| 401 | 核对 API Key 是否有效 |
+| “查询参数不受支持”或缺少模型明细 | 管理员按 [observer 更新说明](../scripts/cpa/cpa-observer/README.md#repair-prompt)检查运行版本 |
+| 数据为零、未知或过时 | 检查采集开始时间、最后采集时间与采集状态 |
+| 代理连接失败 | 核对 Clash 端口，并检查 CPA 域名所用节点 |
 
-公网请求使用 `Authorization: Bearer <自己的客户端Key>`。无效/无 Key 返回 401。普通用户不获得邮箱或其他 Key 的私有用量。
+旧 observer 可先用 `--period day` / `-Period day` 查询今日数据。服务更新保留原数据库、HMAC、Key 和路由，仅替换并重启必要的 observer 服务。
 
-`/v1/usage` 新增 `accounts`（各匿名账号的请求、失败、token、估算费用、最近调用时间）和 `recent`（逐次执行记录），保留原 `totals`、`models`。身份由请求 Key 决定，不接受 `client` 或 `account` 选择参数；非法条数返回 400。升级已有 observer 时，先备份代码和 SQLite 一致快照，复用原数据库、HMAC secret 与路由，替换 `observer.py` 后重启现有 unit，再验证接口。
-
-管理员用 `quota --admin` 或 TUI `g` 通过 SSH 将匿名 ID 匹配邮箱；公网响应不增加邮箱。管理员直接读取 observer 已保存的快照，不临时调用上游。TUI 初次加载预取快照，之后打开面板直接显示；面板 `r` 后台更新，旧画面保留。
-
-当前 Key 共用上游号池，不固定绑定单一账号。各账号百分比不可相加；限额窗口不是剩余 token 数或现金余额。失败数据保留时间与旧值标识，不填成 100%。
+完整工具包中的旧 `api_keys.py quota` 入口按原网络设置运行。需要强制代理查询时，使用本节的 `quota.sh` 或 `quota.ps1`。API 字段与管理员邮箱查询方式见 [observer 文档](../scripts/cpa/cpa-observer/README.md)和[管理员工具手册](../scripts/cpa/cpa-tools/README.md)。
 
 ### 9.4 用量与费用口径
 
-日报/月报按 `Asia/Shanghai`，原始事件使用 UTC。输入 token 已包含互不重叠的普通输入、缓存读取和写入，不重复相加；输出包含 reasoning。
+| 指标 | 含义 |
+| --- | --- |
+| 当前 Key 用量 | 这个 Key 已被采集的调用记录 |
+| token | 模型处理文本等内容时使用的计量单位 |
+| 缓存命中率 | 输入中复用缓存的比例。例如 100 个输入 token 中有 80 个来自缓存，命中率为 80% |
+| 美元估算 | 根据每次请求记录的模型价格与 token 数计算，实际支出以服务商账单为准 |
+| 计价覆盖数 | 能够估算费用的请求数 / 全部请求数；费用前的 `*` 表示只统计了部分请求 |
+| 账户池余量 | 共享上游账号各额度窗口的剩余百分比与重置时间 |
 
-`prices.json` 是带日期的价格快照。费用是 API 标价估算，不是 Claude 订阅账单；缺价格和缺计量数据保留未知。模型调用成本、订阅和 VPS 流量分别记录。
+**时间范围。** 近 1 小时、7 天、30 天都从同一查询截止时间向前计算；日历日报和月报使用北京时间 `Asia/Shanghai`。历史范围取决于数据库保留的记录。各时间范围重叠，应分别查看。账户池按自己的采集周期更新，页面标有更新时间。
 
-队列是内存队列，弹出后落 SQLite；进程在两步之间崩溃会丢事件。该实现用于观察用量，不是事务计费账本。部署前历史不可补造；不同时启动两个消费者。
+**缓存。** 输入总数由普通输入、缓存读取和缓存写入组成；缓存命中率取该期间缓存读取总数占输入总数的比例。没有输入或计量字段缺失时，显示“未知”。
+
+**费用。** 普通输入、缓存读取、缓存写入和输出分别计价，输出包含推理 token。价格保存在每条记录中，后续价格调整保留原记录的金额。缓存写入有效期未记录时，分别按 5 分钟和 1 小时价格估算，显示费用区间。缺少价格或计量信息的请求会标为未知。价格依据见 [Anthropic 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)。
+
+**记录范围。** observer 从部署后开始采集。内存队列到 SQLite 写入之间发生故障时，可能丢失记录，因此该工具用于用量观察，费用核对以服务商账单为准。服务端只运行一个队列消费者，维护时保留数据库。
 
 ### 9.5 使用者试用清单
 
-**位置：使用者本机。需要：已有 HTTPS Base URL、自己的客户端 Key、可用的本机 HTTP/mixed 代理。以下查询只读，不创建账号、不重置用量，也不发起模型请求。**
-
-1. 使用 9.3 固定命令，填写已有入口和实际代理端口。隐藏输入自己的 Key，不输入面板密码或 SSH 信息。在 Clash 连接页确认 CPA 域名经过真实节点而非 DIRECT。
-2. 同屏显示近 1h/7d/30d/总历史、USD 估算、缓存命中率和号池余量。用 1/2/3/4 切换模型明细，N/P 翻页不新增请求。按 R/Enter 刷新，Q 退出。个人汇总仅属于当前 Key；共享百分比不是个人剩余 token。
-3. Bash 加 `--once`，PowerShell 加 `-Once` 可单次查询；再追加 `--view usage` / `-View usage` 仅看个人，或 `--view quota` / `-View quota` 仅看号池。
-4. 具体期间用 `--period 1h` / `-Period 1h` 等查看账号和调用明细。`day/month` 才是北京时间日历期间，滚动 30d 不是本月；`--recent 0` / `-Recent 0` 隐藏逐次明细。
-5. 需要核对真实增量时，先记下本 Key 请求数，完成自己原本就要进行的模型调用，再等采集更新后查询。不要为了查询而额外运行生成验证；重试可能对应多条上游执行，不能要求每条客户端消息恰好增加一条记录。
-6. 返回 401 时检查 Key；总览返回 400 或缺字段时交管理员更新 observer，不能把旧版今日/月数据当作滚动窗口。兼容旧版可去掉 TUI 并用 `-Period day` / `--period day`，仍强制代理。代理关闭时应报错，不应显示新查询成功；不需要关闭整个 VPN 来测试，可临时在此命令指定一个已确认未监听的本地端口。
-7. 反馈时记录系统、选项、错误状态及采集时间，移除入口地址、Key、邮箱及截图中的私有信息。不要将真实 Key 放入命令参数或发给他人。
-
-本轮仓库合并只包含源码与文档，不表示任何一台 VPS 已升级。已有服务是否具备新接口，以该服务的实际返回为准；管理员升级步骤见[observer 维护说明](../scripts/cpa/cpa-observer/README.md)。
+1. 运行[一键查询](../README.md#cpa-一键查询)，输入代理端口、Base URL 和自己的 Key。在 Clash 连接页确认 CPA 域名使用了代理节点。
+2. 检查四个时间范围、模型明细及账户池余量；试用切换、翻页、刷新和退出。
+3. 检查需要的单次查询选项，例如 `--period 7d` / `-Period 7d`。
+4. 完成一次原本就要进行的模型调用，等待采集更新，再核对请求和 token 增量。重试可能增加执行记录数。
+5. 测试代理故障时，可在查询命令中指定一个确认未监听的本机端口；查询应报连接错误。
+6. 反馈时提供系统版本、选项、错误状态和采集时间，隐去 Key、邮箱及私有地址。
 
 ## 10. 常见故障：定位失败层
 

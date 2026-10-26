@@ -1,8 +1,8 @@
-# CPA 自助运维 SOP
+# CPA 运维工具
 
 本页命令从工具包根目录执行：先在仓库根目录运行 `cd scripts/cpa`。实际配置和会话放在仓库外。
 
-两个 Python 入口处理日常操作，无需由 GPT 启动。仅使用 Python 标准库；CPA 原生运行，不引入 Docker、网页管理服务或新的公网端口。
+两个 Python 脚本分别负责账号授权和 API Key 管理，通过 SSH 操作已有 CPA 服务。
 
 | 入口 | 功能 |
 | --- | --- |
@@ -13,8 +13,9 @@
 
 ## 1. 前置条件与一次性配置
 
-- 本机：macOS/Linux、Python 3.10+、SSH，与 XBoard 运维工具使用相同最低 Python 版本；新增 Claude 账号还需安装官方 Claude Code CLI。Windows 请在 WSL 中运行，并在运行脚本的同一电脑浏览器完成授权。运行入口会在连接和读取凭据前拒绝低版本；远端 Python 工具也需 Python 3.10+，升级工具前分别检查本机与 VPS 的实际解释器。
-- VPS：已部署 CPA v8、observer、SQLite、systemd；SSH 管理员可读 observer 配置、写 CPA 凭据并重启 observer。默认 CPA unit 为 `cliproxyapi.service`。本工具不安装服务或升级 CPA。
+- 本机：macOS/Linux 或 Windows WSL，Python 3.10+、SSH。新增账号还需 Claude Code CLI，并在这台电脑的浏览器中完成授权。
+- VPS：Python 3.10+、CPA v8、observer、SQLite、systemd。SSH 管理员需要读取 observer 配置、写入 CPA 凭据和重启 observer 的权限。默认 CPA 服务为 `cliproxyapi.service`。
+- 在本机和 VPS 分别运行 `python3 --version` 检查版本。
 - 已核实 SSH 主机指纹，并配置密钥登录。工具拒绝自动接受新指纹。
 - observer 配置保持原有 HMAC secret、数据库路径和标签。不要重建，否则历史标识会变化。
 
@@ -60,14 +61,14 @@ python3 cpa-tools/claude_auth.py add
 
 1. 输入新增账号邮箱和唯一代号。工具拒绝覆盖已有凭据文件；同一账号的多个 token 不代表新增订阅额度。
 2. 终端显示会话目录。保留终端运行。工具启动隔离的本机 `claude setup-token`，确认真实回调监听后显示授权链接。
-3. **自行复制链接到该账号的隐私窗口**。完成邮箱验证和授权。工具不自动打开 Safari，也不要求复制 token 或回调 URL。
+3. **在浏览器的隐私窗口打开链接**，选择该账号并完成邮箱验证和授权。
 4. 工具私密捕获 token，通过 SSH 以禁用状态导入 VPS，再用仅含新凭据的临时 CPA 发起少量真实生成。此步骤会消耗少量 token。
 5. 工具显示第二条 profile/quota 授权链接。继续选择同一个账号。该步骤临时转发本机 `127.0.0.1:54545` 到 VPS 回调端口；仅用于登录，日常 API 流量走 HTTPS。
 6. 工具核对 profile 邮箱、账号 UUID 和实际 usage 窗口。按提示再次输入两次授权所用邮箱，确认 setup-token 与资料授权属于同账号；不会将用户确认冒充 token 自身披露的身份。
 7. 自动备份配置、凭据和 SQLite 一致快照，写入 `quota_bindings`。模型 token 原值与空 refresh 字段保留。资料凭据保持禁用模型调度，只作为额度来源。
 8. 启用模型凭据，仅重启 observer，检查回环模型接口和额度覆盖、目标账号状态、辅助凭据禁用状态。三项检查通过后显示完成。
 
-**完成依据是工具的最终结果，不是浏览器成功页。** setup-token 与 CPA 普通 OAuth 使用不同的回调页面，不据此推断权限。标准 setup-token 当前只具备推理权限，profile/quota 需要第二种授权。两份凭据在已完成绑定的号池中只计一个逻辑账号。
+浏览器授权完成后，等待终端显示验证结果。setup-token 用于模型调用，profile/quota 授权用于读取账号资料和额度；两份凭据绑定为同一个账号。
 
 可指定非敏感的代号；邮箱也可通过参数传入，但会进入 shell 历史。介意邮箱暴露时使用交互输入：
 
