@@ -502,36 +502,55 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 ### 9.3 使用者只用 Base URL + Key 查询
 
-**位置：使用者本机。无需 SSH、管理员配置或 OAuth token。**
+**位置：使用者本机。无需 SSH、管理员配置或 OAuth token。必须指定本机 HTTP/mixed 代理，不能直连。**
 
-临时查询使用独立 [quota.sh](../scripts/cpa/quota.sh) 或 [quota.ps1](../scripts/cpa/quota.ps1)，无需克隆仓库或下载 TUI。以下命令从固定 GitHub 提交读取脚本并在内存中执行，不保存脚本文件；将示例入口换成自己的 HTTPS Base URL。
+临时查询使用独立 [quota.sh](../scripts/cpa/quota.sh) 或 [quota.ps1](../scripts/cpa/quota.ps1)，无需克隆仓库或安装依赖。以下命令经指定代理下载固定 GitHub 提交的脚本并在内存中执行，不保存脚本文件。先在 Clash/FlClash 中确认 HTTP/mixed 监听端口；`7890` 只是示例。纯 SOCKS 端口不能用作这里的 HTTP 代理。
 
 **macOS / Linux：Bash、curl 和 Python 3.9+，无需 pip 包。**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/13d0dc2254d082b86e8cf71d259dbfb27eb32ede/scripts/cpa/quota.sh | bash -s -- https://api.example.com
+proxy='http://127.0.0.1:7890'
+base='https://api.example.com'
+script="$(curl --fail --silent --show-error --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/bd44a3f0cd24ff1aa22582433ae460805d46e799/scripts/cpa/quota.sh)" &&
+  printf '%s\n' "$script" | bash -s -- "$base" --proxy "$proxy" --tui
 ```
 
 **Windows：PowerShell 5.1+，无需 Python。**
 
 ```powershell
-& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/13d0dc2254d082b86e8cf71d259dbfb27eb32ede/scripts/cpa/quota.ps1').TrimStart([char]0xFEFF))) -BaseUrl 'https://api.example.com'
+& {
+    $ErrorActionPreference = 'Stop'
+    $proxy = 'http://127.0.0.1:7890'
+    $base = Read-Host 'HTTPS Base URL'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/bd44a3f0cd24ff1aa22582433ae460805d46e799/scripts/cpa/quota.ps1'
+    & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -BaseUrl $base -ProxyUrl $proxy -Tui
+}
 ```
 
-随后隐藏输入自己的客户端 Key。脚本默认各请求一次 `/v1/usage` 和 `/v1/quota`，依次显示：本 Key 今日请求/失败数、输入/输出/缓存/总 token、API 标价估算和计价覆盖率；按匿名调用账号汇总的消耗；最近 10 条调用的时间、匿名账号、模型、token 和状态；号池剩余额度条、北京时间重置时间和 `(2d3h left)` 短倒计时。脚本读取 observer 数据，不触发上游刷新或模型调用。颜色只作用于条形，终端背景保持当前设置。
+随后隐藏输入自己的客户端 Key。同屏显示当前 Key 的**滚动近 1 小时、7 天、30 天、总历史**请求/失败数、输入/输出/总 token，以及各匿名账号的号池剩余额度和重置时间。`R` 或 Enter 刷新，`Q` 退出；Key 只输入一次，不自动轮询。去掉 `--tui` / `-Tui` 即输出一次后退出。每次刷新仅请求一次 `/v1/usage?period=overview` 和一次 `/v1/quota`，不发起模型调用或强制刷新上游额度。
 
-已有环境变量时，Bash 命令末尾追加 `--key-env CPA_API_KEY_CLIENT_A`；PowerShell 追加 `-KeyEnv CPA_API_KEY_CLIENT_A`。参数只填写变量名，不填写 Key 值。省略入口时读取 `CPA_BASEURL`。自动化环境没有交互终端时，使用 Key 环境变量。脚本拒绝 HTTPS 接口重定向，不转发鉴权头到新地址。
+窗口共用服务端截止时间及 SQLite 读取快照，按 `[截止时间-时长, 截止时间)` 计算；近 30 天不等于本月。总历史也只统计截止时间前、当前数据库已保留的记录。界面显示采集开始、最后采集时间、状态及拒收数；这些时间不能证明期间无缺口。窗口相互重叠，不可相加。号池余量来自独立缓存，可能比个人用量旧；多个账号的百分比也不可相加。
 
-| 查询内容 | Bash 命令末尾追加 | PowerShell 命令末尾追加 |
+**代理边界：** 未填写 `--proxy` / `-ProxyUrl` 或 `CPA_PROXY` 就在读取 Key 前停止。只接受 `http://127.0.0.1:端口` 或 `http://[::1]:端口`。代理失败时不回退直连，忽略 `NO_PROXY` 的绕过意图，不跟随重定向，仍校验 HTTPS 证书。下载失败也不会执行残留脚本。PowerShell 显式使用 [`-Proxy`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/invoke-restmethod#-proxy)；Python 覆盖 [`ProxyHandler`](https://docs.python.org/3/library/urllib.request.html#urllib.request.ProxyHandler) 的默认绕过行为。不要使用跳过证书校验的选项。
+
+这保证请求进入指定本机代理，**不保证 Clash 最终走某个节点**。在 Clash 的高优先级规则中将 CPA 的实际域名定向到真实代理节点，例如 `DOMAIN,api.example.com,节点选择`，放在宽泛直连规则前，并确认该策略组没有选 `DIRECT`。也可临时使用全局模式并选真实节点。在连接页确认 CPA 域名的最终链路；本脚本不擅自修改客户端规则。
+
+已有环境变量时，Bash 调用追加 `--key-env CPA_API_KEY_CLIENT_A`；PowerShell 脚本调用行追加 `-KeyEnv CPA_API_KEY_CLIENT_A`。参数只填写变量名，不填写 Key 值。省略入口时读取 `CPA_BASEURL`，省略代理参数时读取 `CPA_PROXY`。自动化环境没有交互终端时使用 Key 环境变量，并省略 TUI 开关。
+
+以下参数加在脚本调用处：Bash 的 `bash -s --` 后，PowerShell 的 `-BaseUrl` 同一行。单期间或单视图查询先去掉 TUI 开关，不能加在 PowerShell 外层 `}` 之后。
+
+| 查询内容 | Bash 参数 | PowerShell 参数 |
 | --- | --- | --- |
-| 仅自己的用量与调用记录 | `--view usage` | `-View usage` |
+| 仅自己的四段总览 | `--view usage` | `-View usage` |
 | 仅号池剩余额度 | `--view quota` | `-View quota` |
+| 近 1 小时明细与计价 | `--period 1h` | `-Period 1h` |
+| 近 7 天 / 30 天明细 | `--period 7d` / `--period 30d` | `-Period 7d` / `-Period 30d` |
 | 本月用量 | `--period month` | `-Period month` |
 | 全部已采集用量 | `--period all` | `-Period all` |
 | 指定某日 | `--period day --date 2026-10-26` | `-Period day -Date 2026-10-26` |
-| 最近 20 条调用 | `--recent 20` | `-Recent 20` |
+| 今日最近 20 条调用 | `--period day --recent 20` | `-Period day -Recent 20` |
 
-近期明细限定在同一统计期间，条数支持 0–50；`0` 只返回汇总。调用中的 `account-…` 与额度页的匿名账号编号一致，表示实际承接该次上游执行的账号。每个匿名账号的汇总只包含当前 Key 的调用。缺失归属显示“未归属”；旧账号的历史记录会继续保留。共享窗口的额度百分比与个人 token 消耗分别展示。
+总览不请求逐次明细。选择具体期间后，显示缓存 token、API 标价估算、计价覆盖率、按匿名账号汇总及最近 10 条执行。条数支持 0–50；`0` 只返回汇总。调用中的 `account-…` 与额度页编号一致，表示实际承接上游执行的账号；账号汇总仅含当前 Key。缺失归属显示“未归属”。API 标价估算不等于订阅扣款，重试也可能生成多条执行。
 
 已安装完整工具包的用户也可运行：
 
@@ -539,7 +558,7 @@ curl -fsSL https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Document
 python3 scripts/cpa/cpa-tools/api_keys.py quota --base-url https://api.example.com
 ```
 
-该 Python 入口支持 `--key-env CPA_API_KEY_CLIENT_A` 和 `--json`，用于读取已有环境变量及输出完整匿名结构。
+该旧 Python 管理入口支持 `--key-env CPA_API_KEY_CLIENT_A` 和 `--json`，但**不具备本次新增的强制代理约束**。要求强制代理的普通使用者应使用上方独立脚本。本次未修改模型客户端或 `cpa_verify.py` 的网络路径。
 
 | 接口 | 数据 |
 | --- | --- |
@@ -566,14 +585,15 @@ python3 scripts/cpa/cpa-tools/api_keys.py quota --base-url https://api.example.c
 
 ### 9.5 使用者试用清单
 
-**位置：使用者本机。需要：已有 HTTPS Base URL 和自己的客户端 Key。以下查询只读，不创建账号、不重置用量，也不发起模型请求。**
+**位置：使用者本机。需要：已有 HTTPS Base URL、自己的客户端 Key、可用的本机 HTTP/mixed 代理。以下查询只读，不创建账号、不重置用量，也不发起模型请求。**
 
-1. 使用 9.3 的固定版本命令，将 `https://api.example.com` 换成已有入口。隐藏输入自己的 Key，不输入面板密码或 SSH 信息。
-2. 默认显示个人今日用量、按匿名账号汇总、最近 10 条执行和共享号池余量。个人汇总只属于当前 Key；共享余量不等于个人剩余 token。
-3. 追加 `--view usage` / `-View usage` 只看个人用量；追加 `--view quota` / `-View quota` 只看号池。Bash 使用前者，PowerShell 使用后者。
-4. 用 `--period month` / `-Period month` 查看本月，再用 `--recent 0` / `-Recent 0` 隐藏逐次明细。日期边界为北京时间；零记录、未知计量和历史缺口不等于服务故障。
+1. 使用 9.3 固定命令，填写已有入口和实际代理端口。隐藏输入自己的 Key，不输入面板密码或 SSH 信息。在 Clash 连接页确认 CPA 域名经过真实节点而非 DIRECT。
+2. 同屏显示近 1h/7d/30d/总历史和号池余量。按 R/Enter 只刷新当前屏幕，Q 退出。个人汇总仅属于当前 Key；共享百分比不是个人剩余 token。
+3. 去掉 TUI 开关可单次查询；再追加 `--view usage` / `-View usage` 仅看个人，或 `--view quota` / `-View quota` 仅看号池。
+4. 具体期间用 `--period 1h` / `-Period 1h` 等查看账号和调用明细。`day/month` 才是北京时间日历期间，滚动 30d 不是本月；`--recent 0` / `-Recent 0` 隐藏逐次明细。
 5. 需要核对真实增量时，先记下本 Key 请求数，完成自己原本就要进行的模型调用，再等采集更新后查询。不要为了查询而额外运行生成验证；重试可能对应多条上游执行，不能要求每条客户端消息恰好增加一条记录。
-6. 返回 401 时检查自己的 Key；出现“服务尚未提供调用账号与明细”时，交管理员核对 observer 版本。记录系统、命令选项、错误状态和采集时间；反馈前移除入口地址、Key、邮箱及调用明细截图中的私有信息。
+6. 返回 401 时检查 Key；总览返回 400 或缺字段时交管理员更新 observer，不能把旧版今日/月数据当作滚动窗口。兼容旧版可去掉 TUI 并用 `-Period day` / `--period day`，仍强制代理。代理关闭时应报错，不应显示新查询成功；不需要关闭整个 VPN 来测试，可临时在此命令指定一个已确认未监听的本地端口。
+7. 反馈时记录系统、选项、错误状态及采集时间，移除入口地址、Key、邮箱及截图中的私有信息。不要将真实 Key 放入命令参数或发给他人。
 
 本轮仓库合并只包含源码与文档，不表示任何一台 VPS 已升级。已有服务是否具备新接口，以该服务的实际返回为准；管理员升级步骤见[observer 维护说明](../scripts/cpa/cpa-observer/README.md)。
 
@@ -695,3 +715,5 @@ next_action: null
 2026-10-26（Asia/Shanghai）：增加独立 Bash / PowerShell 匿名额度查询脚本和固定提交的一条命令入口。初次提交完成 Bash 与内嵌 Python 语法、帮助入口、管道执行、隐藏输入和已有服务只读查询；输出不含 Key 或邮箱。PR #1 合并时补充 PowerShell 7.6 离线接口测试，覆盖单次查询、不跟随重定向、无效 HTTP 入口拒绝和错误正文隐藏；测试不连接生产服务。Windows PowerShell 5.1 的文件语法和内存入口离线查询通过；本机文件执行策略不允许直接运行未签名脚本，不修改该策略，使用上方内存命令入口。
 
 2026-10-26（Asia/Shanghai）：PR #2 补齐按 Key 隔离的匿名调用账号汇总与近期明细，独立脚本默认合并个人用量和号池余量。贡献者报告 17 项 observer 检查通过、其已有服务更新后历史数量保持、真实管道隐藏输入与只读组合查询通过；提交时新增 PowerShell 用量视图尚未执行。合并方独立通过 17 项离线测试，并在 PowerShell 5.1/7.6 用模拟接口验证 all/usage/quota 三个视图、请求数量、鉴权头和敏感字段不显示；没有真实网络请求。此预检不代表复验了贡献者的生产环境；实际使用由使用者按 9.5 验收，未因此更新运行中的 VPS。
+
+2026-10-26（Asia/Shanghai）：独立查询客户端默认总览，强制显式本机代理，并提供可刷新终端模式。observer 增加同一截止时间和 SQLite 快照的 1h/7d/30d/总历史汇总，以及滚动期间明细。20 项 observer 测试及 10 项客户端测试通过，后者包含 PowerShell 5.1/7 的本地 CONNECT 测试、NO_PROXY 绕过防护、失败拒绝和合成总览；PowerShell 7 的伪终端验证同屏、刷新、退出。Bash 语法通过，Python 查询核心经本地测试；macOS/Linux 真实 TUI 尚未实机验收。无生产 API 请求、VPS 部署或数据库迁移。旧 API 保持兼容；新总览需要管理员升级现有 observer，见其维护说明。

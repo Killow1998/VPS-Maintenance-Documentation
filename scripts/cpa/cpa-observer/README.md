@@ -21,10 +21,12 @@ Both interfaces use the same root Base URL and `Authorization: Bearer <client CP
 | `GET /v1/usage?period=month&date=2026-10` | Only that Key's October usage |
 | `GET /v1/usage?period=all` | Only that Key's retained usage |
 | `GET /v1/usage?period=day&recent=20` | That Key's totals, anonymous account breakdown and latest 20 execution attempts in the same day |
+| `GET /v1/usage?period=overview` | Four own-Key windows: rolling 1h, 7d, 30d, and retained history, with one cutoff and one SQLite read snapshot |
+| `GET /v1/usage?period=1h&recent=20` | Own-Key detail for the last hour; `7d` and `30d` are also supported |
 
 Missing/invalid keys return 401, unsupported account/client selectors return 400, and request limits return 429. These endpoints are extensions supplied by this service, not native CPA endpoints. All valid downstream Keys in this deployment use the same shared Claude pool. If per-Key upstream routing restrictions are introduced, pool selection must be updated to match them before exposing restricted pools.
 
-The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients show own-Key usage and pool quota together. They need only a Base URL and downstream Key. One-command execution from a pinned GitHub commit is documented in [guide section 9.3](../../../docs/09-cpa-claude.md).
+The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients require an explicit local HTTP/mixed proxy as well as a Base URL and downstream Key. Missing or failed proxies cannot fall back to DIRECT; the local proxy must also route the gateway through a real proxy node. Their default overview shows all four periods and the cached pool quota. `--tui` / `-Tui` enables a refreshable terminal screen, with two requests per manual refresh and no automatic polling. Pinned download commands also use the proxy; see [guide section 9.3](../../../docs/09-cpa-claude.md).
 
 ### Own-Key usage response
 
@@ -33,6 +35,10 @@ The standalone [quota.sh](../quota.sh) and [quota.ps1](../quota.ps1) clients sho
 Account IDs use the same `account-` HMAC prefix as `/v1/quota`, so a caller can match the account that handled a request to its current quota windows. Removed accounts retain their historical pseudonym. Missing account telemetry produces a null ID, never a guessed account. These aggregates describe only the calling Key's use of each account; shared pool quota remains shared.
 
 `recent` is an optional integer query parameter from 0 to 50, default 10. Records are sorted newest first and filtered to the same Beijing day/month/all period as the aggregates. `recent=0` omits execution details while retaining totals. Invalid or duplicate parameters return 400. Client identity is derived exclusively from the validated Bearer Key; callers cannot select another client or account. All three usage queries share the same client/date filter and one SQLite read transaction.
+
+`period=overview` is a separate compact response with `windows`, each containing `period`, `start_utc`, `end_utc`, and `totals`. All four use the same `as_of` cutoff and database read transaction. The rolling windows are `[as_of-duration, as_of)`; retained history has no lower time bound but excludes future records. No account identifiers or individual execution records are returned in this overview. It accepts no `date` or `recent` parameters. Ordinary detail queries also support `1h`, `7d` and `30d`; `date` remains limited to calendar day/month. These additions do not change existing day/month/all callers.
+
+Windows overlap and must not be added together. Thirty rolling days are not a calendar month. `collection_started_at`, `last_collected_at`, `collector_status`, `rejected_events` and the historical-coverage warning accompany the overview. They do not prove continuous collection: outages and earlier deletions may leave gaps. `/v1/quota` is a separate cached snapshot, not part of the usage transaction and not a per-client token allowance.
 
 Use `query.py` to avoid exposing a secret in process arguments. Set `CPA_BASEURL` (or `ANTHROPIC_BASE_URL`) to your HTTPS gateway root. With no `--client`, it reads `ANTHROPIC_AUTH_TOKEN` or prompts without echoing. With `--client client_a`, it reads `CPA_API_KEY_CLIENT_A` from the environment:
 
@@ -97,7 +103,9 @@ sudo journalctl -u cpa-observer --since '30 minutes ago'
 
 The local `--report` command is for administrators and can summarize all client labels. It is not exposed over the client API. Back up SQLite using its backup API or a consistent snapshot, not a lone database-file copy while WAL writes are active.
 
-For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. The account/recent additions reuse existing columns and require no schema migration. Verify own-Key isolation and the `/v1/usage` response after restarting; restore the prior source if the new read API fails.
+For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart only the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. Account/recent and rolling-overview additions reuse existing columns and require no schema migration. Do not reinstall CPA, restart the forwarding node, reset usage or recreate client Keys. Never run a second usage-queue consumer for testing.
+
+After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, atomically restore the prior source and restart only observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
 
 ## Reliability limits
 

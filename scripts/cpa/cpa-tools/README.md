@@ -188,7 +188,7 @@ source /PRIVATE/EXISTING_DEPLOYMENT/.cpa-env
 
 **普通用户只需 HTTPS Base URL 和自己的 CPA API Key**，不需要 SSH 或管理 Key。接口是 `GET /v1/quota`，以 `Authorization: Bearer` 鉴权，返回匿名号池和每个匿名上游账号的五小时/七天等限额窗口：已用百分比、剩余百分比、重置时间、数据新鲜状态。
 
-临时查询无需下载本 TUI：使用独立的 [quota.sh](../quota.sh)（Bash + Python 标准库）或 [quota.ps1](../quota.ps1)（PowerShell 5.1+）。从 GitHub 固定提交读取并直接执行的命令见[部署指南第 9.3 节](../../../docs/09-cpa-claude.md)。两个入口隐藏输入 Key，默认显示本 Key 今日用量、按匿名账号的消耗、近期 10 条调用及号池余量；可选本月/全部、指定日期、0–50 条明细或单独视图。明细的匿名账号编号与额度条对应，只能查看当前 Key 的记录。
+临时查询无需下载本管理 TUI：使用独立的 [quota.sh](../quota.sh)（Bash + Python 标准库）或 [quota.ps1](../quota.ps1)（PowerShell 5.1+）。[部署指南第 9.3 节](../../../docs/09-cpa-claude.md)提供经指定代理下载固定版本并执行的命令。两个独立客户端必须设置本机 HTTP/mixed 代理，缺失或失败不回退直连。默认同屏显示本 Key 近 1h/7d/30d/总历史及号池余量，终端模式可手动刷新、退出；具体期间仍可查看匿名账号与近期明细。新总览需要新版 observer，未采集历史不能补造。本页旧 `api_keys.py` 管理工具不因这次改动获得强制代理约束。
 
 本机已加载原 env 时可运行：
 

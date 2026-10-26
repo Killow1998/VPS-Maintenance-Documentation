@@ -37,7 +37,7 @@
 | --- | --- | --- |
 | XBoard 全员流量、用户和配额管理 | [vpsctl.py](scripts/vpsctl.py) | [SSH 隧道终端手册](docs/08-terminal-tool.md)；Python 3.10+，Windows/Linux/macOS；不安装 VPS 常驻服务 |
 | CPA Key、用量和剩余额度 | [api_keys.py](scripts/cpa/cpa-tools/api_keys.py) | [自助工具 SOP](scripts/cpa/cpa-tools/README.md)；管理员使用 SSH，普通用户仅查询自己的用量与匿名号池 |
-| CPA 个人用量与号池额度查询 | [quota.ps1](scripts/cpa/quota.ps1) / [quota.sh](scripts/cpa/quota.sh) | [一条命令查询](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)；Windows PowerShell 或 Bash，显示本 Key 用量、匿名账号、近期调用和共享余量；不调用模型 |
+| CPA 个人用量与号池额度查询 | [quota.ps1](scripts/cpa/quota.ps1) / [quota.sh](scripts/cpa/quota.sh) | [强制代理终端看板](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)；Windows PowerShell 或 Bash，同屏显示近 1h/7d/30d/总历史和共享余量；可刷新，不调用模型 |
 | Claude 双授权 | [claude_auth.py](scripts/cpa/cpa-tools/claude_auth.py) | [授权流程](scripts/cpa/cpa-auth/README.md)；由账号持有人完成浏览器授权 |
 | CPA 聚合计量和匿名额度接口 | [observer.py](scripts/cpa/cpa-observer/observer.py) | [采集器部署说明](scripts/cpa/cpa-observer/README.md)；可选 VPS 原生服务，不属于 XBoard 免安装工具 |
 | CPA 鉴权与真实生成验收 | [cpa_verify.py](scripts/cpa/cpa_verify.py) | [部署验收步骤](docs/09-cpa-claude.md#8-验证鉴权模型与真实生成)；仅显式运行，真实生成消耗上游用量 |

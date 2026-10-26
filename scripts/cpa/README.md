@@ -13,6 +13,8 @@
 
 本机使用 Python 3.9+，macOS/Linux 或 Windows WSL。普通用户额度查询无需 SSH；管理员需现有 SSH 和对应权限。运行命令示例见 [自助 SOP](cpa-tools/README.md)。
 
-临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。两者只读取 Base URL 和自己的客户端 Key，默认显示今日用量、按匿名账号汇总的消耗、近期 10 条调用及号池剩余额度条。账号编号跨用量与额度视图一致，时间使用北京时间。可直接从 GitHub 固定提交读取执行，不在本机保存脚本；命令和期间/条数选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
+临时查询只需运行一个文件：`quota.sh` 使用 Bash + Python 标准库，`quota.ps1` 使用原生 PowerShell 5.1+。必须指定本机 HTTP/mixed 代理，缺少代理或连接失败不回退直连。默认同屏显示当前 Key 的近 1h/7d/30d/总历史与号池余量，TUI 模式支持 R/Enter 刷新、Q 退出；每次仅两次只读请求。指定具体期间可查询匿名账号汇总、近期明细和计价。新总览需要新版 observer，历史仅限实际保留记录；号池百分比与 token 用量不可混算。固定版本下载、强制代理边界及选项见[部署指南第 9.3 节](../../docs/09-cpa-claude.md)。
+
+离线验收：在仓库根目录运行 `python -B -m unittest discover -s scripts/cpa -p test_quota_clients.py -v` 以及 `python -B -m unittest discover -s scripts/cpa/cpa-observer -p test_observer.py -v`。仅使用合成凭据、临时 SQLite 和本机测试端口；安装了 PowerShell 时一并验证其客户端。
 
 私密配置用 `--config /PRIVATE/deployment.json` 或 `CPA_TOOLS_CONFIG` 指定，放在克隆目录之外。默认配置路径是便利入口，不是公开模板。不要把私密 env、state、密钥、OAuth 文件、数据库和 VPS 备份复制到本目录。
