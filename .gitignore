@@ -59,6 +59,7 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/README.md
 !scripts/cpa/quota.sh
 !scripts/cpa/quota.ps1
+!scripts/cpa/test_quota_clients.py
 !scripts/cpa/cpa-auth/README.md
 !scripts/cpa/cpa-auth/USER_WORKFLOW.md
 !scripts/cpa/cpa-auth/managed_quota.py

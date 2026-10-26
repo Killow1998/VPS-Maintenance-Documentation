@@ -39,9 +39,14 @@ def stamp(value):
     return parsed.astimezone(UTC).isoformat()
 
 
-def period_bounds(period, date=None, timezone="Asia/Shanghai"):
+def period_bounds(period, date=None, timezone="Asia/Shanghai", at=None):
     zone = ZoneInfo(timezone)
-    current = dt.datetime.now(zone)
+    current = at or dt.datetime.now(zone)
+    if period in ("1h", "7d", "30d"):
+        if date:
+            raise ValueError("date does not apply to rolling periods")
+        duration = {"1h": dt.timedelta(hours=1), "7d": dt.timedelta(days=7), "30d": dt.timedelta(days=30)}[period]
+        return (current - duration).astimezone(UTC).isoformat(), current.astimezone(UTC).isoformat()
     if period == "all":
         if date:
             raise ValueError("date does not apply to all")
@@ -57,7 +62,7 @@ def period_bounds(period, date=None, timezone="Asia/Shanghai"):
         start = dt.datetime(year, month, 1, tzinfo=zone)
         end = dt.datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=zone)
     else:
-        raise ValueError("period must be day, month or all")
+        raise ValueError("period must be 1h, 7d, 30d, day, month or all")
     return start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
 
 
@@ -310,8 +315,6 @@ class Store:
             clauses.append("timestamp>=? AND timestamp<?")
             args.extend([start, end])
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
-                        "output_tokens", "reasoning_tokens", "total_tokens"]
         with self.db() as con:
             con.execute("BEGIN")
             models = self.aggregate(con, where, args, "model")
@@ -323,18 +326,8 @@ class Store:
                 FROM records""" + where + " ORDER BY timestamp DESC, id DESC LIMIT ?", args + [recent])]
         for record in records:
             record["account_id"] = self.public_account(record["account_id"])
-        fields = ["requests", "failed_requests", "input_tokens", "uncached_tokens", "cache_read_tokens",
-                  "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
-                  "estimated_cost_usd_low", "estimated_cost_usd_high", "priced_requests",
-                  "incomplete_accounting_requests"]
-        totals = {}
-        for name in fields:
-            values = [row[name] for row in models if row[name] is not None]
-            if name in token_fields and any(row[name] is None for row in models):
-                totals[name] = None
-            else:
-                totals[name] = sum(values) if values else (None if "cost" in name else 0)
-        for item in [totals] + models + accounts + records:
+        totals = self.total_rows(models)
+        for item in models + accounts + records:
             for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
                 if item.get(name) is not None:
                     item[name] = round(item[name], 8)
@@ -349,6 +342,52 @@ class Store:
                 "record_unit": "upstream_execution_attempt; retries may create multiple records",
                 "cost_basis": "API list-price estimate; not subscription charges; cache writes span 5m/1h rates",
                 "accounting_limitations": "in-memory queue can lose events on outage/restart or between pop and commit"}
+
+    @staticmethod
+    def total_rows(models):
+        token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
+                        "output_tokens", "reasoning_tokens", "total_tokens"]
+        fields = ["requests", "failed_requests", "input_tokens", "uncached_tokens", "cache_read_tokens",
+                  "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
+                  "estimated_cost_usd_low", "estimated_cost_usd_high", "priced_requests",
+                  "incomplete_accounting_requests"]
+        totals = {}
+        for name in fields:
+            values = [row[name] for row in models if row[name] is not None]
+            if name in token_fields and any(row[name] is None for row in models):
+                totals[name] = None
+            else:
+                totals[name] = sum(values) if values else (None if "cost" in name else 0)
+        for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
+            if totals[name] is not None:
+                totals[name] = round(totals[name], 8)
+        return totals
+
+    def overview(self, client):
+        if not client:
+            raise ValueError("overview requires an authenticated client")
+        cutoff = dt.datetime.now(UTC)
+        windows = []
+        with self.db() as con:
+            con.execute("BEGIN")
+            metadata = dict(con.execute("SELECT key, value FROM metadata"))
+            for period in ("1h", "7d", "30d", "all"):
+                start, _ = period_bounds(period, at=cutoff)
+                end = cutoff.isoformat()
+                where, args = " WHERE client_id=? AND timestamp<?", [client, end]
+                if start:
+                    where += " AND timestamp>=?"
+                    args.append(start)
+                windows.append({"period": period, "start_utc": start, "end_utc": end,
+                                "totals": self.total_rows(self.aggregate(con, where, args, "model"))})
+        return {"scope": "own_key", "period": "overview", "timezone": "Asia/Shanghai",
+                "as_of": cutoff.isoformat(), "windows": windows,
+                "collection_started_at": metadata.get("collection_started_at"),
+                "last_collected_at": metadata.get("collector_last_success"),
+                "collector_status": metadata.get("collector_status", "starting"),
+                "rejected_events": int(metadata.get("rejected_events", 0)),
+                "history_before_collection": "not_available",
+                "accounting_limitations": "retained observations only; collector outages can leave gaps"}
 
 
 def quota_windows(body):
@@ -604,8 +643,13 @@ class Handler(BaseHTTPRequestHandler):
                 recent = query.get("recent", ["10"])[0]
                 if not re.fullmatch(r"[0-9]{1,2}", recent) or int(recent) > 50:
                     raise ValueError("recent must be between 0 and 50")
-                result = observer.store.summary(client, query.get("period", ["day"])[0],
-                                                query.get("date", [None])[0], int(recent))
+                period = query.get("period", ["day"])[0]
+                if period == "overview":
+                    if set(query) != {"period"}:
+                        raise ValueError("overview accepts no date or recent")
+                    result = observer.store.overview(client)
+                else:
+                    result = observer.store.summary(client, period, query.get("date", [None])[0], int(recent))
             self.answer(200, result)
         except ValueError:
             self.answer(400, {"error": "invalid_query"})

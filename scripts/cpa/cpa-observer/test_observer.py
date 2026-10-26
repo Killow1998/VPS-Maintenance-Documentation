@@ -88,6 +88,46 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(report["accounts"][0]["cache_read_tokens"])
         self.assertIsNone(report["recent"][0]["estimated_cost_usd_low"])
 
+    def test_overview_rolling_boundaries_isolation_and_unknowns(self):
+        cutoff = dt.datetime(2026, 10, 25, 12, tzinfo=dt.timezone.utc)
+        offsets = [1800, 3600, 3601, 7*86400, 7*86400+1, 30*86400, 30*86400+1, 0, -1]
+        items = []
+        for index, seconds in enumerate(offsets):
+            item = event(execution=f"window-{index}")
+            item["timestamp"] = (cutoff - dt.timedelta(seconds=seconds)).isoformat()
+            if index == 6:
+                item.pop("token_breakdown")
+            items.append(item)
+        other = event("test-key-b", "other-window")
+        other["timestamp"] = items[0]["timestamp"]
+        self.store.ingest(items + [other])
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cutoff
+
+        with patch("observer.dt.datetime", Clock):
+            result = self.store.overview(self.store.client("test-key-a"))
+        self.assertEqual([w["period"] for w in result["windows"]], ["1h", "7d", "30d", "all"])
+        self.assertEqual([w["totals"]["requests"] for w in result["windows"]], [2, 4, 6, 7])
+        self.assertEqual([w["totals"]["total_tokens"] for w in result["windows"]], [260, 520, 780, 910])
+        self.assertEqual({w["end_utc"] for w in result["windows"]}, {result["as_of"]})
+        self.assertIsNone(result["windows"][-1]["totals"]["cache_read_tokens"])
+        self.assertEqual(result["windows"][-1]["totals"]["priced_requests"], 6)
+        self.assertNotIn("test-key", json.dumps(result))
+        self.assertNotIn("private-account", json.dumps(result))
+
+    def test_empty_overview_and_rolling_date_validation(self):
+        result = self.store.overview(self.store.client("test-key-a"))
+        self.assertEqual([w["totals"]["requests"] for w in result["windows"]], [0]*4)
+        self.assertTrue(all(w["totals"]["estimated_cost_usd_low"] is None for w in result["windows"]))
+        for period, seconds in (("1h", 3600), ("7d", 604800), ("30d", 2592000)):
+            start, end = period_bounds(period)
+            self.assertEqual((dt.datetime.fromisoformat(end)-dt.datetime.fromisoformat(start)).total_seconds(), seconds)
+            with self.assertRaises(ValueError):
+                period_bounds(period, "2026-10-25")
+
 
 class FakeBackend:
     def __init__(self):
@@ -178,6 +218,20 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["totals"]["requests"], 1)
         for query in ("recent=51", "recent=-1", "recent=", "recent=1&recent=2", "account=other", "client=other"):
             self.assertEqual(self.get("/v1/usage?" + query, "test-key-a")[0], 400)
+
+    def test_overview_api_and_rolling_details_are_own_key_only(self):
+        status, body = self.get("/v1/usage?period=overview", "test-key-a")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["scope"], "own_key")
+        self.assertEqual([w["totals"]["requests"] for w in body["windows"]], [1]*4)
+        self.assertNotIn("recent", body)
+        for query in ("period=overview&date=2026-10", "period=overview&recent=0",
+                      "period=overview&client=other", "period=overview&period=all"):
+            self.assertEqual(self.get("/v1/usage?" + query, "test-key-a")[0], 400)
+        for period in ("1h", "7d", "30d"):
+            status, body = self.get("/v1/usage?period=" + period, "test-key-a")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["totals"]["requests"], 1)
 
     def test_revoke_takes_effect_after_short_cache(self):
         self.assertEqual(self.get("/v1/quota", "test-key-a")[0], 200)

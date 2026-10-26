@@ -2,11 +2,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$BaseUrl = $env:CPA_BASEURL,
+    [string]$ProxyUrl = $env:CPA_PROXY,
     [string]$KeyEnv,
     [ValidateSet('all', 'usage', 'quota')][string]$View = 'all',
-    [ValidateSet('day', 'month', 'all')][string]$Period = 'day',
+    [ValidateSet('overview', '1h', '7d', '30d', 'day', 'month', 'all')][string]$Period = 'overview',
     [string]$Date,
-    [ValidateRange(0, 50)][int]$Recent = 10
+    [ValidateRange(0, 50)][int]$Recent = 10,
+    [switch]$Tui
 )
 
 function Get-QuotaTime($Value) {
@@ -90,7 +92,32 @@ function Get-Cost($Row) {
 }
 
 function Show-Usage($Data) {
-    $periodLabel = switch ($Data.period) { 'day' { '今日' } 'month' { '本月' } default { '全部' } }
+    if ($Period -eq 'overview') {
+        if ($Data.period -cne 'overview' -or @($Data.windows).Count -ne 4 -or
+            (($Data.windows | ForEach-Object { $_.period }) -join ',') -cne '1h,7d,30d,all') {
+            throw '服务未提供多时间段总览，请更新 VPS observer。'
+        }
+        Write-Host ('本 Key · 用量总览 · 截止 {0}（北京）' -f (Get-Beijing $Data.as_of -Seconds))
+        Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell '时间段' 12), (Format-Cell '请求/失败' 15),
+            (Format-Cell '输入 Tokens' 17), (Format-Cell '输出 Tokens' 17), '总 Tokens')
+        foreach ($row in $Data.windows) {
+            $label = switch ($row.period) { '1h' { '近 1 小时' } '7d' { '近 7 天' } '30d' { '近 30 天' } 'all' { '总历史' } }
+            $total = $row.totals
+            Write-Host ('{0} {1} {2} {3} {4}' -f (Format-Cell $label 12),
+                (Format-Cell ((Format-Number $total.requests) + '/' + (Format-Number $total.failed_requests)) 15),
+                (Format-Cell (Format-Number $total.input_tokens) 17), (Format-Cell (Format-Number $total.output_tokens) 17),
+                (Format-Number $total.total_tokens))
+        }
+        Write-Host ('采集开始 {0} · 采集至 {1} · 状态 {2} · 拒收 {3}' -f
+            (Get-Beijing $Data.collection_started_at), (Get-Beijing $Data.last_collected_at -Seconds),
+            (Format-Cell $Data.collector_status 24).Trim(), (Format-Number $Data.rejected_events))
+        Write-Host '滚动窗口相互重叠，不可相加；总历史仅含已采集并保留的数据，可能存在采集缺口。'
+        return
+    }
+    $periodLabel = switch ($Data.period) {
+        '1h' { '近 1 小时' } '7d' { '近 7 天' } '30d' { '近 30 天' }
+        'day' { '今日' } 'month' { '本月' } default { '全部' }
+    }
     if ($Data.date) { $periodLabel = (Format-Cell $Data.date 10).Trim() }
     $total = $Data.totals
     Write-Host "本 Key · ${periodLabel}用量（北京）"
@@ -157,24 +184,25 @@ function Show-Quota($Data) {
     Write-Host "`n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加"
 }
 
-function Get-CpaData($Base, $Headers, $Path, $Scope) {
+function Get-CpaData($Base, $Headers, $Path, $Scope, $Proxy) {
     try {
         $data = Invoke-RestMethod -Uri ($Base + $Path) -Headers $Headers -Method Get `
-            -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop
+            -Proxy $Proxy -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop
     } catch {
         $status = 0
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
         $message = switch ($status) {
+            400 { '查询参数不受支持；总览/滚动时间段需要新版 observer' }
             401 { 'Key 无效或已撤销' }
             404 { '入口未配置用量/额度接口' }
             429 { '查询过于频繁，请稍后再试' }
-            default { '请检查网络、TLS 和入口服务；脚本不跟随重定向' }
+            default { '请检查指定代理、TLS 和入口服务；不会回退直连或跟随重定向' }
         }
         throw "查询失败（HTTP $status）：$message。"
     }
     if ($data.scope -cne $Scope) { throw '接口返回的数据范围错误，请检查 observer 路由。' }
     if ($Scope -eq 'shared_pool' -and $data.accounts -isnot [Array]) { throw '此入口未返回匿名号池。' }
-    if ($Scope -eq 'own_key' -and -not $data.totals) { throw '此入口未返回本 Key 用量。' }
+    if ($Scope -eq 'own_key' -and -not $data.totals -and -not $data.windows) { throw '此入口未返回本 Key 用量。' }
     return $data
 }
 
@@ -187,10 +215,25 @@ function Invoke-CpaReport {
         -not $uri.Host -or $uri.Port -eq 0 -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $base -match '\s') {
         throw '请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。'
     }
+    $proxy = $null
+    if (-not [Uri]::TryCreate($ProxyUrl, [UriKind]::Absolute, [ref]$proxy) -or $proxy.Scheme -ne 'http' -or
+        $proxy.Host -notin @('127.0.0.1', '[::1]') -or $proxy.Port -le 0 -or
+        $proxy.Authority -notmatch ':\d+$' -or $proxy.AbsolutePath -ne '/' -or
+        $proxy.UserInfo -or $proxy.Query -or $proxy.Fragment -or $ProxyUrl -match '\s') {
+        throw '必须用 -ProxyUrl 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。'
+    }
+    # Refuse destinations that the platform would bypass even with an explicit proxy.
+    if ([Net.WebProxy]::new($proxy, $false).IsBypassed($uri)) {
+        throw '该入口会被系统绕过代理，已拒绝请求。请使用远程 HTTPS 域名。'
+    }
+    if ($Date -and $Period -notin @('day', 'month')) { throw 'Date 仅支持 day/month。' }
+    if ($Tui -and ($View -ne 'all' -or $Period -ne 'overview' -or
+            [Console]::IsInputRedirected -or [Console]::IsOutputRedirected)) {
+        throw 'TUI 需要交互终端且使用默认 all/overview；管道或日志采集请省略 -Tui。'
+    }
     $key = $null; $secret = $null; $headers = $null
     $protocol = [Net.ServicePointManager]::SecurityProtocol
     $views = if ($View -eq 'all') { @('usage', 'quota') } else { @($View) }
-    $results = @{}; $failures = @{}
     try {
         if ($KeyEnv) {
             if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
@@ -203,25 +246,38 @@ function Invoke-CpaReport {
         if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
-        foreach ($item in $views) {
-            $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
-            $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period + '&recent=' + $Recent } else { '/v1/quota' }
-            if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
-            try { $results[$item] = Get-CpaData $base $headers $path $scope }
-            catch { $failures[$item] = $_.Exception.Message }
-        }
+        do {
+            $results = @{}; $failures = @{}
+            foreach ($item in $views) {
+                $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
+                $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period } else { '/v1/quota' }
+                if ($item -eq 'usage' -and $Period -ne 'overview') { $path += '&recent=' + $Recent }
+                if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
+                try { $results[$item] = Get-CpaData $base $headers $path $scope $proxy }
+                catch { $failures[$item] = $_.Exception.Message }
+            }
+            if ($Tui) { Clear-Host }
+            Write-Host 'CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点'
+            foreach ($item in $views) {
+                if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
+                try {
+                    if ($item -eq 'usage') { Show-Usage $results[$item] } else { Show-Quota $results[$item] }
+                } catch {
+                    $failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
+                    Write-Host ("CPA ${item}：" + $failures[$item])
+                }
+                Write-Host ''
+            }
+            if (-not $Tui) { break }
+            do { $action = Read-Host 'R/Enter 刷新 · Q 退出' } while ($action -notin @('', 'r', 'q'))
+        } while ($action -ne 'q')
+        if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
     } finally {
         $key = $null
         if ($headers) { $headers.Clear() }
         if ($secret) { $secret.Dispose() }
         [Net.ServicePointManager]::SecurityProtocol = $protocol
     }
-    foreach ($item in $views) {
-        if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
-        if ($item -eq 'usage') { Show-Usage $results[$item] } else { Show-Quota $results[$item] }
-        Write-Host ''
-    }
-    if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
 }
 
 Invoke-CpaReport
