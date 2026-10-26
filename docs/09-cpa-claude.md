@@ -521,7 +521,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/1a1a9188f03e2937c86cabbb721376e04225a1eb/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8335db5d27211d6af37704db85ec8efb0172b5c0/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -539,7 +539,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/1a1a9188f03e2937c86cabbb721376e04225a1eb/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8335db5d27211d6af37704db85ec8efb0172b5c0/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```
@@ -742,3 +742,5 @@ next_action: null
 2026-10-26（Asia/Shanghai）：按多端一致要求，PowerShell 5.1/7 也支持无参数启动，按端口、HTTPS 入口、隐藏 Key 交互填写后默认进入总览；增加 `-Once`，端口和 URL 格式错误可重输。18 项客户端及版本检查通过，覆盖两版 PowerShell 的模拟交互、单次模式、无终端拒绝和真实回环 CONNECT；PowerShell 7 实际伪终端完成无参数启动、遮掩 Key、R 刷新、Q 退出，接口使用合成返回，无生产查询。Windows 临时验收脚本已删除。
 
 2026-10-25（America/Los_Angeles）：首页新增 Linux/macOS 与 Windows 各一行启动入口；最初公开启动器下载允许使用当前网络，后续固定版本客户端下载和 API 查询强制代理，执行前核对 SHA256。25 项客户端/启动器测试及 20 项 observer 测试通过；PowerShell 实际终端经代理下载并通过校验后到达 Base URL 提示，未输入真实 Key。Bash 在本机 Git Bash 完成语法、模拟执行、真实下载及校验；串接 Windows Python 时其终端检测拒绝继续，未将此当作 Linux/macOS 实机交互验收。另补齐旧 observer 总览 400 的说明和[可转发修复 Prompt](../scripts/cpa/cpa-observer/README.md#repair-prompt)。没有更新生产 observer 或修改任何 VPS。
+
+2026-10-26（America/Los_Angeles）：四段总览补充 USD 标价估算、计价覆盖及 token 加权缓存命中率；observer 返回每个窗口的模型分项，复用现有聚合和数据库列，不改 schema。Linux/Windows 查询支持在当前快照切换模型窗口及翻页，无额外请求；每次刷新仍为两个只读接口。已有具体期间查询也补齐模型表。费用只累加入库快照，未知价格/计量不补零，部分计价标 `*`；输入含缓存、输出含 reasoning，不重复收费。27 项客户端/启动器和 21 项 observer 测试通过，覆盖跨 Key 隔离、多模型成本、未知计量、历史价格不重算、代理拒绝及 PowerShell 5.1/7 交互；PowerShell 7 真实终端使用合成返回验证切换、翻页、刷新与退出。Bash 语法及内嵌 Python 验证通过；Linux/macOS 真实终端和生产数据仍待目标使用者验收。启动器及固定下载命令更新到源码 `8335db5d27211d6af37704db85ec8efb0172b5c0` 并重新核对哈希。维护 Prompt 已补充模型/计价/缓存验收；本轮没有升级 VPS、改 prices.json、调用付费模型或写入任何生产用量。
