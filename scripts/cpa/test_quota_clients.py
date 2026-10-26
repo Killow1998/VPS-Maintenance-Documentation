@@ -228,7 +228,7 @@ class PowerShellClientTests(unittest.TestCase):
 
     def run_ps(self, shell, code):
         env = {**os.environ, "CPA_TEST_SOURCE": str(ROOT / "quota.ps1"), "CPA_TEST_KEY": "synthetic-client-key",
-               "CPA_PROXY": "", "NO_PROXY": "*", "no_proxy": "*"}
+               "CPA_BASEURL": "", "CPA_PROXY": "", "NO_PROXY": "*", "no_proxy": "*"}
         prefix = "$ErrorActionPreference='Stop'; $scriptSource=[IO.File]::ReadAllText($env:CPA_TEST_SOURCE).TrimStart([char]0xFEFF); "
         result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
                                  base64.b64encode((prefix + code).encode("utf-16-le")).decode()],
@@ -264,6 +264,64 @@ $rejected=$false
 try { & ([scriptblock]::Create($scriptSource)) -BaseUrl 'https://cpa.example.invalid' -KeyEnv CPA_TEST_KEY }
 catch { $rejected=$true }
 if (-not $rejected -or $script:calls) { throw 'missing proxy accepted' }
+"""
+        for shell in self.shells:
+            with self.subTest(shell=shell):
+                self.run_ps(shell, code)
+
+    def test_prompted_setup_default_tui_and_once(self):
+        code = r"""
+$script:reads=0; $script:calls=0; $script:clears=0
+function Read-Host {
+    param($Prompt,[switch]$AsSecureString)
+    $script:reads++
+    if ($script:reads -eq 5) {
+        if (-not $AsSecureString) { throw 'key must be hidden' }
+        $secret = [Security.SecureString]::new()
+        foreach ($char in $env:CPA_TEST_KEY.ToCharArray()) { $secret.AppendChar($char) }
+        return $secret
+    }
+    if ($AsSecureString) { throw 'unexpected key prompt' }
+    switch ($script:reads) {
+        1 { return '0' }
+        2 { return '7897' }
+        3 { return 'http://cpa.example.invalid' }
+        4 { return 'https://cpa.example.invalid/v1/' }
+        6 { return 'r' }
+        7 { return 'q' }
+        default { throw 'unexpected input' }
+    }
+}
+function Clear-Host { $script:clears++ }
+function Invoke-RestMethod {
+    param($Uri,$Headers,$Method,$Proxy,[switch]$UseBasicParsing,$MaximumRedirection,$TimeoutSec,$ErrorAction)
+    if ([string]$Proxy -ne 'http://127.0.0.1:7897/' -or $MaximumRedirection -ne 0) { throw 'unsafe transport' }
+    if ($Headers.Authorization -ne ('Bearer '+$env:CPA_TEST_KEY)) { throw 'missing auth' }
+    if ($script:reads -lt 5) { throw 'network before setup' }
+    $script:calls++
+    if ($Uri -eq 'https://cpa.example.invalid/v1/usage?period=overview') { return ('DATA' | ConvertFrom-Json) }
+    if ($Uri -eq 'https://cpa.example.invalid/v1/quota') { return ('{"scope":"shared_pool","accounts":[]}' | ConvertFrom-Json) }
+    throw 'unexpected query'
+}
+# Simulate a terminal for the input-flow test; transport tests use real loopback sockets.
+$scriptSource = $scriptSource.Insert($scriptSource.LastIndexOf('Invoke-CpaReport'), "function Test-CpaTerminal { return `$true }`n")
+& ([scriptblock]::Create($scriptSource)) ARGUMENTS
+if ($script:calls -ne CALLS -or $script:reads -ne READS -or $script:clears -ne CLEARS) { throw 'wrong interaction count' }
+""".replace("DATA", json.dumps(overview()))
+        for shell in self.shells:
+            for args, calls, reads, clears in (("", 4, 7, 2), ("-Once", 2, 5, 0)):
+                with self.subTest(shell=shell, args=args):
+                    self.run_ps(shell, code.replace("ARGUMENTS", args).replace("CALLS", str(calls))
+                                .replace("READS", str(reads)).replace("CLEARS", str(clears)))
+
+    def test_no_terminal_stops_before_hidden_key(self):
+        code = r"""
+function Read-Host { throw 'key prompt must not run without a terminal' }
+function Invoke-RestMethod { throw 'network must not run without a key' }
+$rejected=$false
+try { & ([scriptblock]::Create($scriptSource)) -BaseUrl 'https://cpa.example.invalid' -ProxyUrl 'http://127.0.0.1:7890' }
+catch { $rejected = $_.Exception.Message -match 'KeyEnv' }
+if (-not $rejected) { throw 'no-terminal preflight failed' }
 """
         for shell in self.shells:
             with self.subTest(shell=shell):

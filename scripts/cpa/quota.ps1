@@ -8,8 +8,40 @@ param(
     [ValidateSet('overview', '1h', '7d', '30d', 'day', 'month', 'all')][string]$Period = 'overview',
     [string]$Date,
     [ValidateRange(0, 50)][int]$Recent = 10,
-    [switch]$Tui
+    [switch]$Tui,
+    [switch]$Once
 )
+
+$explicitTui = $PSBoundParameters.ContainsKey('Tui')
+$noArguments = $PSBoundParameters.Count -eq 0
+
+function Test-CpaTerminal {
+    return ($Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected -and
+        -not [Console]::IsOutputRedirected)
+}
+
+function Read-CpaSetting([string]$Prompt, [scriptblock]$Validate) {
+    if (-not (Test-CpaTerminal)) {
+        throw '交互设置需要终端；自动化请指定 BaseUrl、ProxyUrl 和 KeyEnv。'
+    }
+    while ($true) {
+        $value = Read-Host $Prompt
+        if ($null -eq $value) { throw '已取消输入。' }
+        try { return (& $Validate $value.Trim()) }
+        catch { Write-Host $_.Exception.Message }
+    }
+}
+
+function ConvertTo-CpaBase([string]$Value) {
+    $base = $Value.TrimEnd('/')
+    if ($base.EndsWith('/v1')) { $base = $base.Substring(0, $base.Length - 3) }
+    $uri = $null
+    if (-not [Uri]::TryCreate($base, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
+        -not $uri.Host -or $uri.Port -eq 0 -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $base -match '[\s\p{Cc}]') {
+        throw '请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。'
+    }
+    return $base
+}
 
 function Get-QuotaTime($Value) {
     if ($Value -is [DateTimeOffset]) { return $Value }
@@ -208,12 +240,21 @@ function Get-CpaData($Base, $Headers, $Path, $Scope, $Proxy) {
 
 function Invoke-CpaReport {
     $ErrorActionPreference = 'Stop'
-    $base = $BaseUrl.TrimEnd('/')
-    if ($base.EndsWith('/v1')) { $base = $base.Substring(0, $base.Length - 3) }
-    $uri = $null
-    if (-not [Uri]::TryCreate($base, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
-        -not $uri.Host -or $uri.Port -eq 0 -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $base -match '\s') {
-        throw '请提供 HTTPS Base URL，不包含用户名、密码、查询参数或片段。'
+    if ($Once -and $Tui) { throw 'Once 和 Tui 不能同时使用。' }
+    if ($Date -and $Period -notin @('day', 'month')) { throw 'Date 仅支持 day/month。' }
+    $interactive = Test-CpaTerminal
+    if ($Tui -and ($View -ne 'all' -or $Period -ne 'overview' -or -not $interactive)) {
+        throw 'TUI 需要交互终端且使用默认 all/overview；单次查询请用 -Once。'
+    }
+    $prompted = -not $ProxyUrl -or -not $BaseUrl
+    if (-not $ProxyUrl) {
+        $ProxyUrl = Read-CpaSetting '本机 HTTP/mixed 代理端口（如 7890）' {
+            param($Value)
+            if ($Value -cnotmatch '^[0-9]{1,5}$' -or [int]$Value -lt 1 -or [int]$Value -gt 65535) {
+                throw '代理端口必须是 1–65535 的整数。'
+            }
+            return 'http://127.0.0.1:' + [int]$Value
+        }
     }
     $proxy = $null
     if (-not [Uri]::TryCreate($ProxyUrl, [UriKind]::Absolute, [ref]$proxy) -or $proxy.Scheme -ne 'http' -or
@@ -222,14 +263,16 @@ function Invoke-CpaReport {
         $proxy.UserInfo -or $proxy.Query -or $proxy.Fragment -or $ProxyUrl -match '\s') {
         throw '必须用 -ProxyUrl 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。'
     }
+    $base = if ($BaseUrl) { ConvertTo-CpaBase $BaseUrl } else {
+        Read-CpaSetting 'HTTPS Base URL' { param($Value) ConvertTo-CpaBase $Value }
+    }
+    $uri = [Uri]$base
     # Refuse destinations that the platform would bypass even with an explicit proxy.
     if ([Net.WebProxy]::new($proxy, $false).IsBypassed($uri)) {
         throw '该入口会被系统绕过代理，已拒绝请求。请使用远程 HTTPS 域名。'
     }
-    if ($Date -and $Period -notin @('day', 'month')) { throw 'Date 仅支持 day/month。' }
-    if ($Tui -and ($View -ne 'all' -or $Period -ne 'overview' -or
-            [Console]::IsInputRedirected -or [Console]::IsOutputRedirected)) {
-        throw 'TUI 需要交互终端且使用默认 all/overview；管道或日志采集请省略 -Tui。'
+    $useTui = if ($Once) { $false } elseif ($explicitTui) { [bool]$Tui } else {
+        ($prompted -or $noArguments) -and $View -eq 'all' -and $Period -eq 'overview' -and $interactive
     }
     $key = $null; $secret = $null; $headers = $null
     $protocol = [Net.ServicePointManager]::SecurityProtocol
@@ -240,6 +283,7 @@ function Invoke-CpaReport {
             $key = [Environment]::GetEnvironmentVariable($KeyEnv)
             if (-not $key) { throw '指定的 Key 环境变量未加载。' }
         } else {
+            if (-not $interactive) { throw '隐藏输入需要交互终端；自动化请用 -KeyEnv 指定已有环境变量。' }
             $secret = Read-Host 'CPA API Key（隐藏输入）' -AsSecureString
             $key = [Net.NetworkCredential]::new('', $secret).Password
         }
@@ -256,7 +300,7 @@ function Invoke-CpaReport {
                 try { $results[$item] = Get-CpaData $base $headers $path $scope $proxy }
                 catch { $failures[$item] = $_.Exception.Message }
             }
-            if ($Tui) { Clear-Host }
+            if ($useTui) { Clear-Host }
             Write-Host 'CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点'
             foreach ($item in $views) {
                 if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
@@ -268,7 +312,7 @@ function Invoke-CpaReport {
                 }
                 Write-Host ''
             }
-            if (-not $Tui) { break }
+            if (-not $useTui) { break }
             do { $action = Read-Host 'R/Enter 刷新 · Q 退出' } while ($action -notin @('', 'r', 'q'))
         } while ($action -ne 'q')
         if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
