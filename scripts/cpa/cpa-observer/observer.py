@@ -265,7 +265,42 @@ class Store:
                             (str(rejected + (int(old[0]) if old else 0)),))
         return inserted, rejected
 
-    def summary(self, client=None, period="day", date=None):
+    def public_account(self, identity):
+        if (isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{64}", identity)
+                and identity != self.digest("account:unknown")):
+            return "account-" + identity[:12]
+        return None
+
+    def aggregate(self, con, where, args, by):
+        token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
+                        "output_tokens", "reasoning_tokens", "total_tokens"]
+        columns, group, order = ("model", "model", "model") if by == "model" else (
+            "account_id, provider, max(timestamp) last_used_at", "account_id, provider", "max(timestamp) DESC, account_id")
+        sql = "SELECT " + columns + """, count(*) requests, sum(failed) failed_requests,
+                 sum(input_tokens) input_tokens, sum(uncached_tokens) uncached_tokens,
+                 sum(cache_read_tokens) cache_read_tokens, sum(cache_write_tokens) cache_write_tokens,
+                 sum(output_tokens) output_tokens, sum(reasoning_tokens) reasoning_tokens,
+                 sum(total_tokens) total_tokens, sum(cost_low) estimated_cost_usd_low,
+                 sum(cost_high) estimated_cost_usd_high,
+                 sum(cost_low IS NOT NULL) priced_requests,
+                 sum(accounting_quality!='complete') incomplete_accounting_requests
+                 FROM records""" + where + " GROUP BY " + group + " ORDER BY " + order
+        sql = sql.replace("FROM records", ", " + ", ".join(
+            "count(" + name + ") known_" + name for name in token_fields) + " FROM records")
+        rows = [dict(row) for row in con.execute(sql, args)]
+        for item in rows:
+            item["unknown_token_fields"] = []
+            for name in token_fields:
+                if item.pop("known_" + name) < item["requests"]:
+                    item[name] = None
+                    item["unknown_token_fields"].append(name)
+            if by != "model":
+                item["id"] = self.public_account(item.pop("account_id"))
+        return rows
+
+    def summary(self, client=None, period="day", date=None, recent=10):
+        if not isinstance(recent, int) or isinstance(recent, bool) or not 0 <= recent <= 50:
+            raise ValueError("recent must be between 0 and 50")
         start, end = period_bounds(period, date)
         clauses, args = [], []
         if client is not None:
@@ -277,25 +312,17 @@ class Store:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
                         "output_tokens", "reasoning_tokens", "total_tokens"]
-        sql = """SELECT model, count(*) requests, sum(failed) failed_requests,
-                 sum(input_tokens) input_tokens, sum(uncached_tokens) uncached_tokens,
-                 sum(cache_read_tokens) cache_read_tokens, sum(cache_write_tokens) cache_write_tokens,
-                 sum(output_tokens) output_tokens, sum(reasoning_tokens) reasoning_tokens,
-                 sum(total_tokens) total_tokens, sum(cost_low) estimated_cost_usd_low,
-                 sum(cost_high) estimated_cost_usd_high,
-                 sum(cost_low IS NOT NULL) priced_requests,
-                 sum(accounting_quality!='complete') incomplete_accounting_requests
-                 FROM records""" + where + " GROUP BY model ORDER BY model"
-        sql = sql.replace("FROM records", ", " + ", ".join(
-            "count(" + name + ") known_" + name for name in token_fields) + " FROM records")
         with self.db() as con:
-            models = [dict(row) for row in con.execute(sql, args)]
-        for item in models:
-            item["unknown_token_fields"] = []
-            for name in token_fields:
-                if item.pop("known_" + name) < item["requests"]:
-                    item[name] = None
-                    item["unknown_token_fields"].append(name)
+            con.execute("BEGIN")
+            models = self.aggregate(con, where, args, "model")
+            accounts = self.aggregate(con, where, args, "account")
+            records = [dict(row) for row in con.execute("""SELECT timestamp, model, provider, account_id,
+                failed, input_tokens, uncached_tokens, cache_read_tokens, cache_write_tokens,
+                output_tokens, reasoning_tokens, total_tokens, accounting_quality, latency_ms,
+                cost_low estimated_cost_usd_low, cost_high estimated_cost_usd_high
+                FROM records""" + where + " ORDER BY timestamp DESC, id DESC LIMIT ?", args + [recent])]
+        for record in records:
+            record["account_id"] = self.public_account(record["account_id"])
         fields = ["requests", "failed_requests", "input_tokens", "uncached_tokens", "cache_read_tokens",
                   "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
                   "estimated_cost_usd_low", "estimated_cost_usd_high", "priced_requests",
@@ -307,7 +334,7 @@ class Store:
                 totals[name] = None
             else:
                 totals[name] = sum(values) if values else (None if "cost" in name else 0)
-        for item in [totals] + models:
+        for item in [totals] + models + accounts + records:
             for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
                 if item.get(name) is not None:
                     item[name] = round(item[name], 8)
@@ -318,6 +345,8 @@ class Store:
                 "collector_status": self.meta("collector_status") or "starting",
                 "rejected_events": int(self.meta("rejected_events") or 0),
                 "history_before_collection": "not_available", "totals": totals, "models": models,
+                "accounts": accounts, "recent": records, "recent_limit": recent,
+                "record_unit": "upstream_execution_attempt; retries may create multiple records",
                 "cost_basis": "API list-price estimate; not subscription charges; cache writes span 5m/1h rates",
                 "accounting_limitations": "in-memory queue can lose events on outage/restart or between pop and commit"}
 
@@ -570,9 +599,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("quota accepts no account selectors")
                 result = observer.quota_response()
             else:
-                if set(query) - {"period", "date"}:
+                if set(query) - {"period", "date", "recent"}:
                     raise ValueError("unsupported query parameter")
-                result = observer.store.summary(client, query.get("period", ["day"])[0], query.get("date", [None])[0])
+                recent = query.get("recent", ["10"])[0]
+                if not re.fullmatch(r"[0-9]{1,2}", recent) or int(recent) > 50:
+                    raise ValueError("recent must be between 0 and 50")
+                result = observer.store.summary(client, query.get("period", ["day"])[0],
+                                                query.get("date", [None])[0], int(recent))
             self.answer(200, result)
         except ValueError:
             self.answer(400, {"error": "invalid_query"})
