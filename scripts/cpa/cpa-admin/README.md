@@ -113,4 +113,3 @@ python3.11 server.py
 `probe_cpa_routes.py` 使用隔离配置、假凭据、模拟 HTTP 上游和临时端口运行现有官方 CPA 二进制。它验证普通请求、流式请求、count_tokens、本账号 429 和未知前缀不会进入另一账号。不得把真实 OAuth 目录传给探针。标准库测试覆盖策略、并发版本、密码/会话、单次票据、过期、CSRF、前缀注入、重试和流式转发。
 
 官方参考：[账号池 PR #6569](https://github.com/router-for-me/CLIProxyAPI/pull/6569)、[调度插件](https://help.router-for.me/plugin/scheduler)。本方案不依赖未合并账号池功能，也不将存在回退路径的调度插件单独视为权限边界。
-

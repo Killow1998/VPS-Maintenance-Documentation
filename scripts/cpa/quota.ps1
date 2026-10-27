@@ -109,7 +109,7 @@ function Save-CpaConfig([string]$Base, [string]$Proxy, [string]$Key) {
         } else { & chmod 600 $temporary; if ($LASTEXITCODE -ne 0) { throw 'permissions' } }
         $data = @{version=1; base_url=$Base; proxy_url=$Proxy; api_key=$Key} | ConvertTo-Json -Compress
         [IO.File]::WriteAllText($temporary, $data + "`n", [Text.UTF8Encoding]::new($false))
-        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary, $path, $null) }
+        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary, $path, [System.Management.Automation.Language.NullString]::Value) }
         else { [IO.File]::Move($temporary, $path) }
         $temporary = $null
     } catch { throw '配置未保存；请检查 ~/.cpa 的权限和可用空间。' }

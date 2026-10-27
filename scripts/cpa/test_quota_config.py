@@ -113,6 +113,8 @@ class PowerShellConfigTests(unittest.TestCase):
                 code = r'''
 $ErrorActionPreference='Stop'
 $s=[IO.File]::ReadAllText($env:CPA_TEST_SOURCE).TrimStart([char]0xFEFF)
+# Synthetic-only diagnostics preserve the failing operation; production errors stay redacted.
+$s=$s.Replace("throw '配置未保存；请检查 ~/.cpa 的权限和可用空间。'", 'throw ("fixture save: " + $_.Exception.Message)')
 . ([scriptblock]::Create($s.Substring(0,$s.LastIndexOf('Invoke-CpaReport'))))
 function Get-CpaConfigPath { return (Join-Path (Join-Path $env:CPA_TEST_HOME '.cpa') 'query.json') }
 function Test-CpaTerminal { return $true }
@@ -148,7 +150,7 @@ if(-not $failed) { throw 'corrupt profile accepted' }
 '''.replace('DATA', json.dumps(overview()))
                 env = dict(os.environ, CPA_TEST_HOME=home, CPA_TEST_SOURCE=str(ROOT/'quota.ps1'),
                            CPA_BASEURL='', CPA_PROXY='', CPA_QUERY_CHOICE='')
-                result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand',
                     base64.b64encode(code.encode('utf-16-le')).decode()], env=env, capture_output=True, timeout=40)
                 self.assertNotIn(b'synthetic-key', result.stdout+result.stderr)
                 self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
