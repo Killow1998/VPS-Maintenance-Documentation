@@ -52,6 +52,25 @@ def atomic_json(path, value):
         Path(temporary).unlink(missing_ok=True)
 
 
+def sqlite_snapshot(source, destination):
+    """Use the live database owner's identity so WAL sidecars stay writable."""
+    source, destination = Path(source), Path(destination)
+    owner = source.stat()
+    if os.geteuid() not in (0, owner.st_uid):
+        raise RuntimeError("database_owner_required")
+    with tempfile.TemporaryDirectory(prefix=".snapshot-", dir=source.parent) as temporary:
+        if os.geteuid() == 0:
+            os.chown(temporary, owner.st_uid, owner.st_gid)
+        identity = {"user": owner.st_uid, "group": owner.st_gid, "extra_groups": []} if os.geteuid() != owner.st_uid else {}
+        target = Path(temporary) / "usage.sqlite"
+        script = 'import sqlite3,sys\ns=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True)\nd=sqlite3.connect(sys.argv[2])\ns.backup(d)\nd.close()\ns.close()'
+        subprocess.run([sys.executable, "-c", script, str(source), str(target)],
+                       check=True, capture_output=True, timeout=60, **identity)
+        shutil.move(str(target), destination)
+        os.chown(destination, os.geteuid(), os.getegid())
+        os.chmod(destination, 0o600)
+
+
 class Admin:
     def __init__(self, job):
         self.j = job
@@ -76,6 +95,62 @@ class Admin:
 
     def files(self):
         return self.call("/v8/management/credentials").get("files", [])
+
+    def control_call(self, path, data=None):
+        request = Request("http://127.0.0.1:" + str(self.j.get("control_port", 8319)) + path,
+                          headers={"Authorization": "Bearer " + self.c["management_key"], "Content-Type": "application/json"},
+                          data=json.dumps(data).encode() if data is not None else None)
+        try:
+            with self.opener.open(request, timeout=35) as response:
+                return json.loads(response.read(4 * 1024 * 1024))
+        except Exception as error:
+            if getattr(error, "code", None) == 409:
+                raise RuntimeError("权限已在另一端修改，或账号路由未就绪；返回后重新打开权限页。") from None
+            raise RuntimeError("权限服务不可用；检查 cpa-admin 服务状态。") from None
+
+    def control_operation(self):
+        action = self.j["action"]
+        if action == "control_state":
+            return {"state": self.control_call("/internal/state")}
+        if action == "control_save":
+            return {"state": self.control_call("/internal/policies", self.j["payload"])}
+        if action == "control_ticket":
+            return self.control_call("/internal/login-ticket", {})
+        if action == "control_password":
+            return self.control_call("/internal/password", {"username": self.j["username"], "password": self.j["password"]})
+        if action == "control_sync_routes":
+            auth_dir = Path(os.path.expanduser(self.call("/v8/management/config/oauth")["auth-dir"]))
+            helpers = {v["credential"] for v in self.c.get("quota_bindings", {}).values()}
+            changes = []
+            for item in self.files():
+                if item.get("provider") != "claude" or item.get("name") in helpers or not item.get("auth_index"):
+                    continue
+                name = item["name"]
+                require(Path(name).name == name and name.endswith(".json"), "unsupported_credential_path")
+                filename = auth_dir / name
+                data = json.loads(filename.read_text())
+                if data.get("cpa_auth_role") == "quota_only":
+                    continue
+                prefix = "acl-" + hmac.new(self.c["hmac_secret"].encode(), ("account:" + item["auth_index"]).encode(), hashlib.sha256).hexdigest()[:12]
+                if data.get("prefix", "") != prefix:
+                    changes.append({"name": name, "prefix": prefix, "previous_prefix": data.get("prefix", ""), "path": str(filename)})
+            if not changes:
+                self.control_call("/internal/refresh", {})
+                return {"message": "账号路由已就绪；现有权限保留。"}
+            destination = self.backup("account-routes", tuple(item["path"] for item in changes))
+            atomic_json(destination / "route-changes.json", changes)
+            applied = []
+            try:
+                for item in changes:
+                    self.call("/v8/management/credentials/fields", {"name": item["name"], "prefix": item["prefix"]}, "PATCH")
+                    applied.append(item)
+                self.control_call("/internal/refresh", {})
+            except Exception:
+                for item in applied:
+                    self.call("/v8/management/credentials/fields", {"name": item["name"], "prefix": item["previous_prefix"]}, "PATCH")
+                raise RuntimeError("路由同步失败；已还原本次前缀。备份：" + str(destination)) from None
+            return {"message": "已配置 " + str(len(changes)) + " 个账号的隔离路由；请在权限页授予 Key 访问。", "backup": str(destination)}
+        raise RuntimeError("unknown_control_action")
 
     def keys(self):
         keys = self.call("/v8/management/config/access/api-keys")
@@ -105,9 +180,7 @@ class Admin:
             shutil.copy2(path, destination / (str(i) + "-" + Path(path).name))
             os.chmod(destination / (str(i) + "-" + Path(path).name), 0o600)
         if credentials:
-            with sqlite3.connect("file:" + self.c["database"] + "?mode=ro", uri=True) as source:
-                with sqlite3.connect(destination / "usage.sqlite") as target:
-                    source.backup(target)
+            sqlite_snapshot(self.c["database"], destination / "usage.sqlite")
         return destination
 
     def restart_observer(self):
@@ -205,7 +278,8 @@ class Admin:
                 rollback_ok = False
             raise RuntimeError("key_change_failed_" + ("rolled_back" if rollback_ok else "manual_recovery_required") + ":" + str(destination)) from None
         return {"changed": True, "backup": str(destination), "keys": self.records(new_keys),
-                "history_preserved": True, "revocation_cache_seconds": 5}
+                "history_preserved": True, "revocation_cache_seconds": 5,
+                "needs_account_permissions": action in ("keys_add", "keys_rotate") and Path("/etc/cpa-admin/config.json").exists()}
 
     def usage(self, keys):
         spec = importlib.util.spec_from_file_location("cpa_usage_observer", self.j.get("observer_script", "/opt/cpa-observer/observer.py"))
@@ -367,11 +441,13 @@ def main():
     job = json.load(sys.stdin)
     path = Path(job["observer_config"])
     with open(str(path) + ".admin.lock", "a") as lock:
-        reads = {"keys_list", "keys_usage", "keys_quota", "keys_export", "auth_status", "auth_preflight"}
+        reads = {"keys_list", "keys_usage", "keys_quota", "keys_export", "auth_status", "auth_preflight", "control_state"}
         fcntl.flock(lock, fcntl.LOCK_SH if job["action"] in reads else fcntl.LOCK_EX)
         admin = Admin(job)
         action = job["action"]
-        if action.startswith("keys_"):
+        if action.startswith("control_"):
+            result = admin.control_operation()
+        elif action.startswith("keys_"):
             result = admin.key_operation()
         elif action == "auth_status":
             result = admin.auth_status()

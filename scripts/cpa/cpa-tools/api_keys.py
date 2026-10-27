@@ -7,6 +7,7 @@ if sys.version_info < (3, 10):
 
 import argparse
 import fcntl
+import getpass
 import os
 from pathlib import Path
 import re
@@ -114,7 +115,8 @@ def install_key(cfg, action, name, output, selector=None):
         raise RuntimeError(reason + "\n恢复记录：" + str(pending) +
                            "\n先核实 VPS 状态；已生效时用导出同步原 env。") from None
     pending.unlink()
-    return {"ok": True, "message": name + (" 已新增" if action == "keys_add" else " 已换 Key"),
+    return {"ok": True, "message": name + (" 已新增" if action == "keys_add" else " 已换 Key") +
+            ("；在 p 账号权限页或网页授权后可调用" if result.get("needs_account_permissions") else ""),
             "env_file": path, "backup": result.get("backup"), "reload_required": True}
 
 
@@ -124,6 +126,18 @@ def confirmed(message, yes=False):
 
 def execute(cfg, args):
     action = args.command
+    if action == "web-login":
+        return remote(cfg, "control_ticket")
+    if action == "admin-password":
+        print("将替换网页登录管理员；旧用户名、密码、会话和未使用的登录链接会失效。")
+        password = getpass.getpass("新管理员密码（至少 14 字符）：")
+        if password != getpass.getpass("再次输入密码："):
+            raise RuntimeError("两次密码不一致；未修改。")
+        return remote(cfg, "control_password", username=args.name, password=password)
+    if action == "sync-routes":
+        return remote(cfg, "control_sync_routes")
+    if action == "permissions":
+        return remote(cfg, "control_state")
     if action in ("add", "delete", "rename", "rotate", "export", "normalize-env"):
         env_path(cfg, getattr(args, "out", None))
     if action == "list":
@@ -172,8 +186,13 @@ def main():
     parser.add_argument("--demo", action="store_true", help="离线预览 TUI，不连接 VPS 或修改文件")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("list", help="查看名称、完整 id 和活动状态；不显示 Key")
+    commands.add_parser("web-login", help="生成两分钟有效的一次性管理员登录链接")
+    commands.add_parser("permissions", help="查看网页和 TUI 共用的账号权限")
+    commands.add_parser("sync-routes", help="为新增 Claude 账号备份并配置隔离路由，不授予任何 Key 权限")
+    password = commands.add_parser("admin-password", help="替换网页登录管理员，并撤销旧账号登录；密码隐藏输入")
+    password.add_argument("name", type=name_value, help="新的管理员名称")
     commands.add_parser("normalize-env", help="统一原 env 的 export 写法，不更换 Key")
-    add = commands.add_parser("add", help="生成并启用一个新 Key")
+    add = commands.add_parser("add", help="生成新 Key；部署权限网关后需另外授予账号权限")
     add.add_argument("name", type=name_value)
     add.add_argument("--out", help="可选；默认更新配置 env_file 指向的原有 env")
     delete = commands.add_parser("delete", help="撤销 Key，保留历史")

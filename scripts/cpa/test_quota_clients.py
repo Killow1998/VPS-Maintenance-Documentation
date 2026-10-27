@@ -122,7 +122,7 @@ class PythonClientTests(unittest.TestCase):
     def test_no_args_interactive_setup_refresh_and_quit(self):
         streams = iter((io.StringIO("0\n7897\n"),
                         io.StringIO("http://cpa.example.invalid\nhttps://cpa.example.invalid/v1/\n"),
-                        io.StringIO("2\nn\np\n4\nr\nq\n")))
+                        io.StringIO("2\nn\np\n4\nr\nq\n"), io.StringIO("n\n")))
         calls, events, selections = [], [], []
         output = io.StringIO()
         output.isatty = lambda: True
@@ -156,7 +156,7 @@ class PythonClientTests(unittest.TestCase):
                                                                         "render_overview": observed_render}), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             CLIENT["main"]()
-        self.assertEqual(events, ["terminal", "terminal", "terminal", "key"] + ["request"] * 4)
+        self.assertEqual(events, ["terminal", "terminal", "terminal", "key", "request", "request", "terminal", "request", "request"])
         self.assertEqual(calls, ["/v1/usage?period=overview", "/v1/quota"] * 2)
         self.assertEqual(selections, [("1h", 0), ("7d", 0), ("7d", 1), ("7d", 0), ("all", 0), ("all", 0)])
         self.assertNotIn("synthetic-key", output.getvalue())
@@ -176,7 +176,7 @@ class PythonClientTests(unittest.TestCase):
                                    "fetch": lambda base, key, path, scope, opener:
                                    overview() if scope == "own_key" else {"scope": scope, "accounts": []}}):
             CLIENT["main"]()
-        self.assertEqual(calls, ["/dev/tty"])
+        self.assertEqual(calls, ["/dev/tty", "/dev/tty"])
 
     def test_closed_input_or_missing_terminal_stops_before_key(self):
         output = io.StringIO()
@@ -270,6 +270,8 @@ class PowerShellClientTests(unittest.TestCase):
     def run_ps(self, shell, code):
         env = {**os.environ, "CPA_TEST_SOURCE": str(ROOT / "quota.ps1"), "CPA_TEST_KEY": "synthetic-client-key",
                "CPA_BASEURL": "", "CPA_PROXY": "", "NO_PROXY": "*", "no_proxy": "*"}
+        # Do not pass PowerShell 7 module paths into the Windows PowerShell 5.1 process.
+        env = {key: value for key, value in env.items() if key.casefold() != "psmodulepath"}
         prefix = "$ErrorActionPreference='Stop'; $scriptSource=[IO.File]::ReadAllText($env:CPA_TEST_SOURCE).TrimStart([char]0xFEFF); "
         result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
                                  base64.b64encode((prefix + code).encode("utf-16-le")).decode()],
@@ -343,12 +345,13 @@ function Read-Host {
         2 { return '7897' }
         3 { return 'http://cpa.example.invalid' }
         4 { return 'https://cpa.example.invalid/v1/' }
-        6 { return '2' }
-        7 { return 'n' }
-        8 { return 'p' }
-        9 { return '4' }
-        10 { return 'r' }
-        11 { return 'q' }
+        6 { return 'n' }
+        7 { return '2' }
+        8 { return 'n' }
+        9 { return 'p' }
+        10 { return '4' }
+        11 { return 'r' }
+        12 { return 'q' }
         default { throw 'unexpected input' }
     }
 }
@@ -369,7 +372,7 @@ $scriptSource = $scriptSource.Insert($scriptSource.LastIndexOf('Invoke-CpaReport
 if ($script:calls -ne CALLS -or $script:reads -ne READS -or $script:clears -ne CLEARS) { throw 'wrong interaction count' }
 """.replace("DATA", json.dumps(overview()))
         for shell in self.shells:
-            for args, calls, reads, clears in (("", 4, 11, 6), ("-Once", 2, 5, 0)):
+            for args, calls, reads, clears in (("", 4, 12, 6), ("-Once", 2, 6, 0)):
                 with self.subTest(shell=shell, args=args):
                     self.run_ps(shell, code.replace("ARGUMENTS", args).replace("CALLS", str(calls))
                                 .replace("READS", str(reads)).replace("CLEARS", str(clears)))

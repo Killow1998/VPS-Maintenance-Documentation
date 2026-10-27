@@ -75,7 +75,7 @@ class Screen:
                  "  ·  USD 为 API 标价估算；未知不等于零", curses.A_DIM)
         self.put(height - 3, 1, self.status, curses.A_BOLD if self.error else curses.A_DIM)
         self.put(height - 2, 1, "↑↓ 选择  n 新增  e 改名  k 换Key  x 删除  s 导出  Enter 明细")
-        self.put(height - 1, 1, "g 剩余额度  / 筛选  h 历史  r 刷新  1/2/3 时间范围  q 退出")
+        self.put(height - 1, 1, "p 账号权限  b 网页登录  g 额度  / 筛选  h 历史  r 刷新  1/2/3 时间  q 退出")
         self.w.refresh()
 
     def background(self, kind, work):
@@ -245,6 +245,16 @@ class Screen:
                     self.quota_snapshot = result["quota"]
                     self.show_quota()
                     self.status = "就绪"
+                elif kind == "policy":
+                    from policy_view import PolicyView
+                    if any(c["id"] == result["selected_id"] for c in result["state"]["clients"]):
+                        PolicyView(self.w, self.cfg, result["state"], result["selected_id"]).show()
+                    else:
+                        self.notice("Key 已变更", ["此 Key 已在另一端删除或轮换；刷新列表后重试。"])
+                    self.status = "就绪"
+                elif kind == "login-link":
+                    self.notice("管理员网页登录 · 2 分钟内有效，仅用一次", [result["url"], "", "复制到浏览器即可。不要转发给其他人。"])
+                    self.status = "就绪"
                 else:
                     lines = [result.get("message", "完成")]
                     if result.get("env_file"):
@@ -302,6 +312,14 @@ class Screen:
                 elif not self.busy and char == "g":
                     self.status = "读取剩余额度…"
                     self.background("quota", lambda: demo_quota() if self.cfg.get("_demo") else remote(self.cfg, "keys_quota"))
+                elif not self.busy and char in ("p", "b") and not self.cfg.get("_demo"):
+                    if char == "b":
+                        self.status = "生成短时管理员链接…"
+                        self.background("login-link", lambda: remote(self.cfg, "control_ticket"))
+                    elif rows and rows[self.selected]["active"]:
+                        selected_id = rows[self.selected]["id"]
+                        self.status = "读取账号权限…"
+                        self.background("policy", lambda: {**remote(self.cfg, "control_state"), "selected_id": selected_id})
                 elif not self.busy and char in ("n", "e", "k", "x", "s"):
                     self.action(char)
             except (RuntimeError, argparse.ArgumentTypeError) as error:

@@ -500,11 +500,23 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 工具沿用首次部署的同一 env，新变量采用 `export CPA_API_KEY_<名称>=...`，新 Key 使用 `sk-cpa-` 加随机串。已有 Key 不因整理写法而换发。新增、修改、删除成功后显示一次 env 绝对路径。删除保留用量历史；换 Key 后旧历史单列。详见[自助 SOP](../scripts/cpa/cpa-tools/README.md)。
 
+### 9.2.1 可选的账号权限管理
+
+部署 [cpa-admin 权限网关](../scripts/cpa/cpa-admin/README.md)后，管理员可在原 HTTPS 域名 `/admin/` 或 TUI 的 `p` 页，为每个 Key 勾选允许使用的账号。`b` 生成短时网页登录链接；独立管理员密码通过 SSH 设置。新建或轮换 Key 默认无账号权限，需要重新授权；改名保留权限。所有额度查询仍经权限网关筛选，不能直接公开 observer 来绕过筛选。
+
 ### 9.3 使用者只用 Base URL + Key 查询
 
 **在使用者本机运行。** 准备自己的 HTTPS Base URL、API Key，并打开本机 Clash/FlClash。查询脚本使用 HTTP/mixed 代理端口，例如 `7890`。
 
-运行[首页一键命令](../README.md#cpa-一键查询)，依次输入 **代理端口、Base URL、API Key**，即可进入看板。Key 隐藏输入，仅在本次运行中使用。Base URL 须为 HTTPS；末尾的 `/v1` 由脚本自动处理。
+运行[首页一键命令](../README.md#cpa-一键查询)，依次输入 **代理端口、Base URL、API Key**，即可进入看板。Key 隐藏输入。首次成功查询后询问是否保存到 `~/.cpa/query.json`，默认不保存。Base URL 须为 HTTPS；末尾的 `/v1` 由脚本自动处理。
+
+#### 保存连接配置
+
+同意保存后，下次启动先显示 `1 载入已有配置`、`2 重新输入`。选择载入时，启动器用保存的代理下载已校验的客户端，再读取已存 Base URL 和 Key；不重复询问端口。重新输入后，成功查询可确认替换旧配置。Key 失效或代理端口改变时选 `2`。
+
+配置目录为 `~/.cpa`，Windows 对应 `%USERPROFILE%\.cpa`。文件只保存版本、代理地址（含端口）、Base URL、API Key。Key 以明文存入本机私密文件：Linux/macOS 目录权限为 `700`、文件为 `600`；Windows ACL 仅允许当前用户。不要上传或分享该目录。保存失败保留旧配置；不读取符号链接或允许其他用户访问的配置。删除 `query.json` 可清除已存连接信息，不撤销服务器上的 Key。
+
+未同意保存、查询失败或无交互终端时不写配置。直接运行查询脚本时，显式连接参数或环境变量继续使用；无参数交互启动才显示配置菜单。个人查询配置与管理员原 `.cpa-env`、`CPA_TOOLS_CONFIG` 相互独立，不迁移或替换原管理配置。
 
 #### 查看用量
 
@@ -597,6 +609,7 @@ Bash 加 `--once`，PowerShell 加 `-Once`，查询一次后退出。默认输�
 | --- | --- |
 | 401 | 核对 API Key 是否有效 |
 | “查询参数不受支持”或缺少模型明细 | 管理员按 [observer 更新说明](../scripts/cpa/cpa-observer/README.md#repair-prompt)检查运行版本 |
+| HTTP 200 但提示“数据范围错误，请检查 observer 路由” | 检查 JSON 的 `scope`：额度必须为 `shared_pool`，个人用量为 `own_key`。若网关按 Key 筛选账号，仍保留 `shared_pool` 并增加 `visibility: authorized_accounts`，不能把公网入口改回未筛选的 observer 来消除报错 |
 | 数据为零、未知或过时 | 检查采集开始时间、最后采集时间与采集状态 |
 | 代理连接失败 | 核对 Clash 端口，并检查 CPA 域名所用节点 |
 

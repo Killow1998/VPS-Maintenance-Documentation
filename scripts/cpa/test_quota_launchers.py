@@ -80,7 +80,7 @@ main
                 self.assertIn(b"mismatch" if status == 0 else b"download failed", result.stderr)
 
     def test_nonterminal_and_old_python_stop_before_download(self):
-        for setup in ("", "python3() { return 1; }"):
+        for setup in ("", "find_python() { return 1; }"):
             with self.subTest(setup=setup):
                 result = self.run_bash(setup + '\ncurl() { echo UNEXPECTED_DOWNLOAD; }\nmain\n')
                 self.assertNotEqual(result.returncode, 0)
@@ -98,6 +98,7 @@ class PowerShellLauncherTests(unittest.TestCase):
         prefix = "$ErrorActionPreference='Stop'; $launcher=[IO.File]::ReadAllText($env:CPA_TEST_LAUNCHER); "
         env = {**os.environ, "CPA_TEST_LAUNCHER": str(ROOT / "cpa.ps1"), "CPA_BASEURL": "stale",
                "CPA_PROXY": "stale", "NO_PROXY": "*", "no_proxy": "*"}
+        env = {key: value for key, value in env.items() if key.casefold() != "psmodulepath"}
         result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
                                  base64.b64encode((prefix + code).encode("utf-16-le")).decode()],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)

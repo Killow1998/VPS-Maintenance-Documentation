@@ -9,7 +9,7 @@
 | `claude_auth.py` | 新增 Claude 账号；依次完成 setup-token、profile/quota 授权；校验、备份、绑定、启用；中断续接；查看凭据状态 |
 | `api_keys.py` | 全屏 TUI；新增、删除、改名、换 Key；查询指定 Key 或全部 Key 用量；导出到本机私密文件 |
 
-`common.py`、`remote_admin.py`、`key_tui.py`、`key_view.py`、`quota_view.py`、`tui_theme.py` 和 `pool_quota.py` 是内部模块。保留同目录结构，并把相邻的 `cpa-auth`、`cpa-observer` 源码一并保留。日常操作只运行上面两个入口。
+`common.py`、`remote_admin.py`、`key_tui.py`、`key_view.py`、`quota_view.py`、`tui_theme.py` 和 `pool_quota.py`、`policy_view.py` 是内部模块。保留同目录结构，并把相邻的 `cpa-auth`、`cpa-observer` 源码一并保留。日常操作只运行上面两个入口。
 
 ## 1. 前置条件与一次性配置
 
@@ -107,6 +107,7 @@ python3 cpa-tools/api_keys.py
 | `n` / `e` / `k` / `x` / `s` | 新增 / 改名 / 换 Key / 删除 / 导出原 env |
 | `1` / `2` / `3` | 今日 / 本月 / 全部，北京时间 |
 | `g` | 管理员号池额度，显示账号邮箱及对应的余量窗口 |
+| `p` / `b` | 编辑选中 Key 的账号权限 / 生成短时网页登录链接（需要 cpa-admin） |
 | `/` / `h` / `r` / `q` | 筛选 / 显示历史 / 刷新 / 退出 |
 
 换 Key、删除需要输入选中调用者名称确认。新增、修改、删除成功后，结果面板**显示一次 `.cpa-env` 的完整绝对路径**；回车返回主屏。长路径完整换行显示。主屏不展示 Key 内容，也不逐行输出后台响应和备份元数据。
@@ -258,3 +259,16 @@ VPS 默认备份位于 `/var/backups/cpa-tools/`，目录 `700`，凭据和配�
 | 用量 API 增补 | 17 项 observer 检查通过；跨 Key 隔离、日期边界、编号匹配和条数限制已覆盖 |
 
 字符裁剪局部计时：典型表格行 1000 次由约 680 ms 降至 42 ms。该数字只计本机文本处理。SSH 首次握手和 VPS 执行耗时分别记录，不写成整体提速比例。
+
+## 账号权限与网页登录
+
+可选的 [cpa-admin](../cpa-admin/README.md)保留官方 CPA，在服务端执行账号白名单。网页和 TUI 共用策略，新 Key/轮换后的 Key 默认无账号权限。新增 Claude 账号后先运行 `sync-routes`，再在 TUI 的 `p` 页授权；资料/额度辅助凭据不进入模型池。
+
+```bash
+python3 cpa-tools/api_keys.py sync-routes
+python3 cpa-tools/api_keys.py permissions
+python3 cpa-tools/api_keys.py web-login
+python3 cpa-tools/api_keys.py admin-password admin
+```
+
+忘记网页登录用户名或密码时，通过已有 SSH 管理权限运行 `web-login` 获取两分钟一次性链接，或用 `admin-password 新用户名` 替换网页登录管理员。替换成功后只保留新账号，旧用户名、密码、会话和未使用的登录链接全部失效；下游 Key、账号权限和历史用量保留。链接只显示给操作者，自行选择浏览器打开。管理权限不交给下游 API Key。

@@ -159,7 +159,16 @@ def detail_lines(row, usage):
 
 def render_cli(result):
     size = max(80, min(120, shutil.get_terminal_size((110, 24)).columns))
-    if "quota" in result:
+    if "url" in result and "expires_seconds" in result:
+        print("管理员登录链接 · 2 分钟有效，仅用一次\n" + result["url"])
+    elif "state" in result:
+        data = result["state"]
+        names = {a["id"]: a["name"] for a in data["accounts"]}
+        print("账号权限 v" + str(data["revision"]) + " · " + ("已执行" if data["enforcement"] == "enforced" else "待切换"))
+        for row in data["clients"]:
+            print(cell(row["name"], 18) + ("启用  " if row["enabled"] else "停用  ") +
+                  ("、".join(names.get(i, i) for i in row["account_ids"]) or "无账号权限"))
+    elif "quota" in result:
         print("\n".join(quota_lines(result["quota"], size)))
     elif "keys" in result:
         print(cell("调用者", 27) + cell("状态", 10) + "ID（短）")
