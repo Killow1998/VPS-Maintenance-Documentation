@@ -150,6 +150,7 @@ if(-not $failed) { throw 'corrupt profile accepted' }
 '''.replace('DATA', json.dumps(overview()))
                 env = dict(os.environ, CPA_TEST_HOME=home, CPA_TEST_SOURCE=str(ROOT/'quota.ps1'),
                            CPA_BASEURL='', CPA_PROXY='', CPA_QUERY_CHOICE='')
+                env = {key: value for key, value in env.items() if key.casefold() != "psmodulepath"}
                 result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand',
                     base64.b64encode(code.encode('utf-16-le')).decode()], env=env, capture_output=True, timeout=40)
                 self.assertNotIn(b'synthetic-key', result.stdout+result.stderr)

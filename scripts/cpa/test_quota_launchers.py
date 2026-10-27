@@ -98,6 +98,7 @@ class PowerShellLauncherTests(unittest.TestCase):
         prefix = "$ErrorActionPreference='Stop'; $launcher=[IO.File]::ReadAllText($env:CPA_TEST_LAUNCHER); "
         env = {**os.environ, "CPA_TEST_LAUNCHER": str(ROOT / "cpa.ps1"), "CPA_BASEURL": "stale",
                "CPA_PROXY": "stale", "NO_PROXY": "*", "no_proxy": "*"}
+        env = {key: value for key, value in env.items() if key.casefold() != "psmodulepath"}
         result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
                                  base64.b64encode((prefix + code).encode("utf-16-le")).decode()],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)

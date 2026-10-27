@@ -270,6 +270,8 @@ class PowerShellClientTests(unittest.TestCase):
     def run_ps(self, shell, code):
         env = {**os.environ, "CPA_TEST_SOURCE": str(ROOT / "quota.ps1"), "CPA_TEST_KEY": "synthetic-client-key",
                "CPA_BASEURL": "", "CPA_PROXY": "", "NO_PROXY": "*", "no_proxy": "*"}
+        # Do not pass PowerShell 7 module paths into the Windows PowerShell 5.1 process.
+        env = {key: value for key, value in env.items() if key.casefold() != "psmodulepath"}
         prefix = "$ErrorActionPreference='Stop'; $scriptSource=[IO.File]::ReadAllText($env:CPA_TEST_SOURCE).TrimStart([char]0xFEFF); "
         result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
                                  base64.b64encode((prefix + code).encode("utf-16-le")).decode()],
