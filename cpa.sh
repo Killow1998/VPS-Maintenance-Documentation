@@ -82,7 +82,7 @@ main() {
   fi
   source=$(curl -q -fsS --proxy "$proxy" --noproxy '' --proto '=https' \
     --location --max-redirs 0 --connect-timeout 10 --max-time 60 \
-    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/f43a9550e42a32f115784865346ae3288ca53941/scripts/cpa/quota.sh') || {
+    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/177b9b2cb2111a91fde2ba8ca11eed19856f61dd/scripts/cpa/quota.sh') || {
     printf '%s\n' 'Client download failed; no direct fallback.' >&2
     return 1
   }
