@@ -32,6 +32,90 @@ function Read-CpaSetting([string]$Prompt, [scriptblock]$Validate) {
     }
 }
 
+function ConvertTo-CpaProxy([string]$Value) {
+    $proxy = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$proxy) -or $proxy.Scheme -ne 'http' -or
+        $proxy.Host -notin @('127.0.0.1', '[::1]') -or $proxy.Port -le 0 -or
+        $proxy.Authority -notmatch ':\d+$' -or $proxy.AbsolutePath -ne '/' -or
+        $proxy.UserInfo -or $proxy.Query -or $proxy.Fragment -or $Value -match '\s') {
+        throw '必须用 -ProxyUrl 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。'
+    }
+    return $proxy
+}
+
+function Get-CpaConfigPath { return (Join-Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cpa') 'query.json') }
+
+function Test-CpaPrivatePath([string]$Path, [bool]$Directory = $false) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer -ne $Directory) {
+        throw '配置路径必须是普通目录或文件，不能是链接。'
+    }
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = Get-Acl -LiteralPath $Path
+        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw '配置不归当前用户所有。' }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -ne $sid.Value) {
+                throw '配置允许其他用户访问。'
+            }
+        }
+    } else {
+        $isMac = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+        $info = if ($isMac) { & stat -f '%u %Lp' $Path } else { & stat -c '%u %a' -- $Path }
+        if ($LASTEXITCODE -ne 0) { throw '无法核对配置权限。' }
+        $parts = $info.Trim() -split ' '
+        if ($parts[0] -ne (& id -u) -or ([Convert]::ToInt32($parts[1], 8) -band 63)) { throw '配置需要当前用户独占权限。' }
+    }
+}
+
+function Read-CpaConfig {
+    $path = Get-CpaConfigPath
+    try {
+        Test-CpaPrivatePath (Split-Path $path) $true
+        Test-CpaPrivatePath $path
+        if ((Get-Item -LiteralPath $path -Force).Length -gt 16384) { throw 'size' }
+        $saved = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($saved.version -ne 1 -or $saved.api_key -isnot [string] -or $saved.api_key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'format' }
+        $saved.base_url = ConvertTo-CpaBase $saved.base_url
+        $null = ConvertTo-CpaProxy $saved.proxy_url
+        return $saved
+    } catch { throw '已存配置无法读取、权限不安全或内容无效；请重新输入。' }
+}
+
+function Save-CpaConfig([string]$Base, [string]$Proxy, [string]$Key) {
+    $path = Get-CpaConfigPath; $directory = Split-Path $path; $temporary = $null
+    try {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            $null = New-Item -ItemType Directory -Path $directory -ErrorAction Stop
+            if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                $acl = New-Object System.Security.AccessControl.DirectorySecurity
+                $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid)
+                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+                Set-Acl -LiteralPath $directory -AclObject $acl -ErrorAction Stop
+            } else { & chmod 700 $directory; if ($LASTEXITCODE -ne 0) { throw 'permissions' } }
+        }
+        Test-CpaPrivatePath $directory $true
+        if (Test-Path -LiteralPath $path) { Test-CpaPrivatePath $path }
+        $temporary = Join-Path $directory ('.query-' + [Guid]::NewGuid().ToString('N'))
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Dispose()
+        if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            $acl = New-Object System.Security.AccessControl.FileSecurity
+            $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid)
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
+            Set-Acl -LiteralPath $temporary -AclObject $acl -ErrorAction Stop
+        } else { & chmod 600 $temporary; if ($LASTEXITCODE -ne 0) { throw 'permissions' } }
+        $data = @{version=1; base_url=$Base; proxy_url=$Proxy; api_key=$Key} | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($temporary, $data + "`n", [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary, $path, $null) }
+        else { [IO.File]::Move($temporary, $path) }
+        $temporary = $null
+    } catch { throw '配置未保存；请检查 ~/.cpa 的权限和可用空间。' }
+    finally { if ($temporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary -Force } }
+}
+
 function ConvertTo-CpaBase([string]$Value) {
     $base = $Value.TrimEnd('/')
     if ($base.EndsWith('/v1')) { $base = $base.Substring(0, $base.Length - 3) }
@@ -315,7 +399,20 @@ function Invoke-CpaReport {
     if ($Tui -and ($View -ne 'all' -or $Period -ne 'overview' -or -not $interactive)) {
         throw 'TUI 需要交互终端且使用默认 all/overview；单次查询请用 -Once。'
     }
-    $prompted = -not $ProxyUrl -or -not $BaseUrl
+    $saved = $null
+    if ($interactive) {
+        $choice = $env:CPA_QUERY_CHOICE
+        if (-not $choice -and -not ($BaseUrl -or $ProxyUrl -or $KeyEnv) -and (Test-Path -LiteralPath (Get-CpaConfigPath))) {
+            $choice = Read-CpaSetting '1 载入已有配置  2 重新输入' {
+                param($Value) if ($Value -notin @('1','2')) { throw '请输入 1 或 2。' }; return $Value
+            }
+        }
+        if ($choice -eq '1') {
+            try { $saved = Read-CpaConfig; $BaseUrl = $saved.base_url; $ProxyUrl = $saved.proxy_url }
+            catch { Write-Host $_.Exception.Message }
+        }
+    }
+    $prompted = $null -ne $saved -or -not $ProxyUrl -or -not $BaseUrl
     if (-not $ProxyUrl) {
         $ProxyUrl = Read-CpaSetting '本机 HTTP/mixed 代理端口（如 7890）' {
             param($Value)
@@ -325,13 +422,7 @@ function Invoke-CpaReport {
             return 'http://127.0.0.1:' + [int]$Value
         }
     }
-    $proxy = $null
-    if (-not [Uri]::TryCreate($ProxyUrl, [UriKind]::Absolute, [ref]$proxy) -or $proxy.Scheme -ne 'http' -or
-        $proxy.Host -notin @('127.0.0.1', '[::1]') -or $proxy.Port -le 0 -or
-        $proxy.Authority -notmatch ':\d+$' -or $proxy.AbsolutePath -ne '/' -or
-        $proxy.UserInfo -or $proxy.Query -or $proxy.Fragment -or $ProxyUrl -match '\s') {
-        throw '必须用 -ProxyUrl 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。'
-    }
+    $proxy = ConvertTo-CpaProxy $ProxyUrl
     $base = if ($BaseUrl) { ConvertTo-CpaBase $BaseUrl } else {
         Read-CpaSetting 'HTTPS Base URL' { param($Value) ConvertTo-CpaBase $Value }
     }
@@ -347,7 +438,8 @@ function Invoke-CpaReport {
     $protocol = [Net.ServicePointManager]::SecurityProtocol
     $views = if ($View -eq 'all') { @('usage', 'quota') } else { @($View) }
     try {
-        if ($KeyEnv) {
+        if ($saved) { $key = $saved.api_key }
+        elseif ($KeyEnv) {
             if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
             $key = [Environment]::GetEnvironmentVariable($KeyEnv)
             if (-not $key) { throw '指定的 Key 环境变量未加载。' }
@@ -359,7 +451,7 @@ function Invoke-CpaReport {
         if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
-        $refresh = $true; $selected = '1h'; $page = 0
+        $refresh = $true; $selected = '1h'; $page = 0; $offerSave = $interactive -and -not $saved
         do {
             if ($refresh) {
                 $results = @{}; $failures = @{}
@@ -383,6 +475,14 @@ function Invoke-CpaReport {
                     Write-Host ("CPA ${item}：" + $failures[$item])
                 }
                 Write-Host ''
+            }
+            if (-not $failures.Count -and $offerSave) {
+                $offerSave = $false
+                $answer = Read-CpaSetting ('保存代理、Base URL 和 API Key 到 ' + (Get-CpaConfigPath) + '？[y/N]') { param($Value) return $Value.ToLowerInvariant() }
+                if ($answer -in @('y','yes')) {
+                    Save-CpaConfig $base ([string]$proxy) $key
+                    Write-Host ('已保存：' + (Get-CpaConfigPath))
+                }
             }
             if (-not $useTui) { break }
             do { $action = Read-Host '1/2/3/4: 1h/7d/30d/全部 · N/P 模型翻页 · R/Enter 刷新 · Q 退出' }

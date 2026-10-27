@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Standalone client: Bash + Python 3.10+, no package installation or local files.
+# Standalone client: Bash + Python 3.10+, optional private connection profile.
 set -euo pipefail
-if ! command -v python3 >/dev/null 2>&1; then
+cpa_python=''
+for candidate in "${CPA_PYTHON:-python3}" python3.14 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    cpa_python="$candidate"
+    break
+  fi
+done
+if [[ -z "$cpa_python" ]]; then
   printf '%s\n' '需要 Python 3.10+，无需安装 pip 包。' >&2
   exit 1
 fi
-python3 - "$@" <<'PY'
+"$cpa_python" - "$@" <<'PY'
 import sys
 
 if sys.version_info < (3, 10):
@@ -19,6 +26,9 @@ import math
 import os
 import re
 import shutil
+import stat
+import tempfile
+from pathlib import Path
 import unicodedata
 import warnings
 from urllib.error import HTTPError
@@ -163,6 +173,77 @@ def prompt_setting(prompt, validate):
                 return validate(value.strip())
             except RuntimeError as error:
                 print(str(error), file=sys.stderr)
+
+
+def config_path():
+    return Path.home() / ".cpa" / "query.json"
+
+
+def private_path(path, directory=False):
+    info = path.lstat()
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("配置权限无效；目录需要 700，文件需要 600，且归当前用户所有。")
+
+
+def load_config():
+    path = config_path()
+    try:
+        private_path(path.parent, directory=True)
+        private_path(path)
+        with path.open(encoding="utf-8") as source:
+            saved = json.loads(source.read(16385))
+        if saved.get("version") != 1:
+            raise ValueError
+        saved["base_url"] = normalize_base(saved["base_url"])
+        RequiredProxy(saved["proxy_url"])
+        if not re.fullmatch(r"[\x21-\x7e]{1,1024}", saved["api_key"]):
+            raise ValueError
+        return saved
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
+        raise RuntimeError("已存配置无法读取、权限不安全或内容无效；请重新输入。") from None
+
+
+def save_config(base, proxy, key):
+    path = config_path()
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        private_path(path.parent, directory=True)
+        if path.exists() or path.is_symlink():
+            private_path(path)
+        fd, temporary = tempfile.mkstemp(prefix=".query-", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump({"version": 1, "base_url": base, "proxy_url": proxy, "api_key": key}, output)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    except (OSError, RuntimeError):
+        raise RuntimeError("配置未保存；请检查 ~/.cpa 的权限和可用空间。") from None
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def config_choice(value):
+    if value not in ("1", "2"):
+        raise RuntimeError("请输入 1 或 2。")
+    return value
+
+
+def select_config(args):
+    if not sys.stdout.isatty():
+        return None
+    choice = os.environ.get("CPA_QUERY_CHOICE")
+    if choice is None and not (args.base_url or args.proxy or args.key_env) and config_path().exists():
+        choice = prompt_setting("1 载入已有配置  2 重新输入：", config_choice)
+    if choice == "1":
+        try:
+            return load_config()
+        except RuntimeError as error:
+            print(str(error), file=sys.stderr)
+    return None
 
 
 def fetch(base, key, path, scope, opener):
@@ -381,7 +462,10 @@ def main():
         parser.error("--date 仅支持 day/month。")
     if args.tui and (args.view != "all" or args.period != "overview" or not sys.stdout.isatty()):
         parser.error("TUI 需要交互终端且使用默认 all/overview；单次查询请用 --once。")
-    prompted = not args.proxy or not args.base_url
+    saved = select_config(args)
+    if saved:
+        args.base_url, args.proxy = saved["base_url"], saved["proxy_url"]
+    prompted = bool(saved) or not args.proxy or not args.base_url
     if not args.proxy:
         args.proxy = prompt_setting("本机 HTTP/mixed 代理端口（如 7890）：", proxy_from_port)
     try:
@@ -404,7 +488,8 @@ def main():
                 terminal = open("/dev/tty", "r", encoding="utf-8")
             except OSError:
                 raise RuntimeError("TUI 需要交互终端。") from None
-        key = read_key(args.key_env)
+        key = saved["api_key"] if saved else read_key(args.key_env)
+        offer_save = sys.stdout.isatty() and not saved
         refresh, selected, page = True, "1h", 0
         while True:
             if refresh:
@@ -434,6 +519,12 @@ def main():
                 except RuntimeError as error:
                     print(f"CPA {view}：{error}", file=sys.stderr)
                     failed = True
+            if not failed and offer_save:
+                offer_save = False
+                answer = prompt_setting(f"保存代理、Base URL 和 API Key 到 {config_path()}？[y/N]：", str.lower)
+                if answer in ("y", "yes"):
+                    save_config(base, args.proxy, key)
+                    print(f"已保存：{config_path()}")
             if not args.tui:
                 break
             while True:

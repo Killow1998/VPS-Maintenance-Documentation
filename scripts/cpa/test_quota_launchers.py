@@ -80,7 +80,7 @@ main
                 self.assertIn(b"mismatch" if status == 0 else b"download failed", result.stderr)
 
     def test_nonterminal_and_old_python_stop_before_download(self):
-        for setup in ("", "python3() { return 1; }"):
+        for setup in ("", "find_python() { return 1; }"):
             with self.subTest(setup=setup):
                 result = self.run_bash(setup + '\ncurl() { echo UNEXPECTED_DOWNLOAD; }\nmain\n')
                 self.assertNotEqual(result.returncode, 0)

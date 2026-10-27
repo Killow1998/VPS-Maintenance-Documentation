@@ -70,17 +70,26 @@ def remote(cfg, action, **args):
     source = (ROOT / "remote_admin.py").read_text()
     job = {k: v for k, v in cfg.items() if not k.startswith("_")}
     job.update(action=action, **args)
-    ssh = cfg["ssh"]
-    if cfg.get("_ssh_control_path"):
-        ssh = [ssh[0], "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
-               "-o", "ControlPath=" + cfg["_ssh_control_path"]] + ssh[1:]
     python = cfg.get("remote_python", ["python3"])
-    command = ssh[:-1] + ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+    def command():
+        ssh = cfg["ssh"]
+        if cfg.get("_ssh_no_mux"):
+            ssh = [ssh[0], "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"] + ssh[1:]
+        elif cfg.get("_ssh_control_path"):
+            ssh = [ssh[0], "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                   "-o", "ControlPath=" + cfg["_ssh_control_path"]] + ssh[1:]
+        return ssh[:-1] + ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                           "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                           ssh[-1], shlex.join(python) + " -c " + shlex.quote(source)]
     try:
-        result = subprocess.run(command, input=json.dumps(job), text=True,
+        result = subprocess.run(command(), input=json.dumps(job), text=True,
                                 capture_output=True, timeout=220)
+        # Descriptor transfer failed before a remote session/command existed.
+        # Never retry arbitrary SSH errors: a mutation may already have executed.
+        if result.returncode == 255 and not result.stdout and "mux_client_request_session: send fds failed" in result.stderr and not cfg.get("_ssh_no_mux"):
+            cfg["_ssh_no_mux"] = True
+            result = subprocess.run(command(), input=json.dumps(job), text=True,
+                                    capture_output=True, timeout=220)
     except subprocess.TimeoutExpired:
         raise RuntimeError("SSH 超时；不要重复修改。先用 list/status 核实 VPS 状态。") from None
     try:

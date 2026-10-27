@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CPA · 账号调用权限</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <section id="login-panel" class="login-panel hidden" aria-labelledby="login-title">
+    <form id="login-form" class="panel login-card">
+      <h1 id="login-title">管理员登录</h1>
+      <p>管理 Key 与账号权限。普通 API Key 不能登录此后台。</p>
+      <label>管理员名称<input id="username" autocomplete="username" maxlength="64" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" maxlength="256" required></label>
+      <div id="login-error" role="alert"></div>
+      <button class="button primary" id="login-submit" type="submit">登录</button>
+      <p class="muted">也可从 TUI 获取 2 分钟内有效的一次性登录链接。</p>
+    </form>
+  </section>
+  <aside class="sidebar">
+    <a class="brand" href="#permissions"><span class="brand-mark">C</span> CPA <span class="brand-sub">ADMIN</span></a>
+    <div class="nav-caption">管理后台</div>
+    <nav aria-label="主导航">
+      <a class="nav-link active" href="#permissions"><span>▦</span> 调用权限</a>
+      <a class="nav-link" href="#accounts"><span>◫</span> 账号额度</a>
+      <a class="nav-link" href="#audit"><span>≡</span> 操作记录</a>
+    </nav>
+    <div class="sidebar-bottom"><span class="avatar">管</span><div><strong>管理员</strong><small>授权配置由你控制</small></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><div>CPA <span class="slash">/</span> 访问管理</div><div><span id="mode-badge" class="demo-badge"><i></i> 本地原型 · 未连接 VPS</span> <button id="logout" class="button subtle hidden">退出登录</button></div></header>
+    <div class="content">
+      <div class="page-title"><div><h1>账号调用权限</h1><p>为每个 API Key 选择可调用的账号。开关由管理员设置。</p></div><button id="refresh" class="button subtle">↻ 刷新快照</button></div>
+      <div id="mode-notice" class="notice">当前展示模拟账号、用量和额度。保存只更新本机策略，尚未改变线上 CPA 的调用权限。</div>
+      <div id="error" class="error hidden" role="alert"></div>
+      <div class="metrics" id="metrics" aria-live="polite"></div>
+      <section class="panel permissions" id="permissions" aria-labelledby="matrix-title">
+        <div class="panel-heading"><div><h2 id="matrix-title">Key 与账号授权</h2><p>每个开关对应一条调用权限；不开放的账号不参与调度。</p></div><label class="search"><span>⌕</span><input id="search" type="search" placeholder="查找 Key 名称" aria-label="查找 Key 名称"></label></div>
+        <div class="mobile-table-hint">左右滑动查看全部账号；Key 名称固定在左侧。</div>
+        <div class="table-scroll"><table id="matrix"><thead></thead><tbody></tbody></table></div>
+        <div class="policy-help"><span class="dot"></span> 全部关闭的 Key 拒绝调用。多个 Key 使用同一账号时，共享该账号的订阅额度。</div>
+        <div class="savebar"><div id="save-status" role="status">正在读取策略…</div><div class="button-group"><button id="discard" class="button subtle" disabled>撤销修改</button><button id="save" class="button primary" disabled>保存本地策略</button></div></div>
+      </section>
+      <section class="check-panel" aria-labelledby="check-title">
+        <div><h2 id="check-title">权限检查</h2><p>按已保存策略判断；不调用模型。</p></div>
+        <div class="check-controls"><select id="check-client" aria-label="选择 Key"></select><span>→</span><select id="check-account" aria-label="选择账号"></select><button id="check" class="button">检查</button></div>
+        <div id="check-result" class="check-result" role="status">选择 Key 和账号，检查调用是否获准。</div>
+      </section>
+      <section id="accounts" aria-labelledby="accounts-title">
+        <div class="section-heading"><div><h2 id="accounts-title">账号剩余额度</h2><div id="quota-caption" class="quota-caption">北京时间 UTC+8</div></div><button class="button subtle" id="quota-refresh">刷新额度</button></div>
+        <div id="quota-status" class="quota-caption quota-status" role="status"></div>
+        <div class="account-grid" id="account-cards"></div>
+      </section>
+      <section class="panel audit" id="audit" aria-labelledby="audit-title"><div class="panel-heading"><div><h2 id="audit-title">操作记录</h2><p>记录网页和 TUI 的授权变更。</p></div><span class="muted">北京时间 UTC+8</span></div><div id="audit-list"></div></section>
+      <footer>使用者沿用 Base URL + API Key。账号白名单只能由管理员修改。</footer>
+    </div>
+  </main>
+</body>
+</html>

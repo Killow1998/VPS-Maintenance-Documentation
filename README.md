@@ -13,7 +13,7 @@
 
 ## CPA 一键查询
 
-先打开本机 Clash/FlClash，再运行对应命令。启动后依次输入 **代理端口、HTTPS Base URL、API Key**。API Key 输入时隐藏。
+先打开本机 Clash/FlClash，再运行对应命令。启动后依次输入 **代理端口、HTTPS Base URL、API Key**。API Key 输入时隐藏。首次成功查询后，可选择把连接配置保存到 `~/.cpa/query.json`；下次启动选择 `1 载入已有配置` 或 `2 重新输入`。
 
 **Linux / macOS**：Bash、curl、Python 3.10+。
 

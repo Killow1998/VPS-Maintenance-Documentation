@@ -1,0 +1,29 @@
+[Unit]
+Description=CPA admin and account permission gateway
+After=network.target cliproxyapi.service cpa-observer.service
+
+[Service]
+Type=simple
+User=cpa-observer
+Group=cpa-observer
+WorkingDirectory=/opt/cpa-admin
+ExecStart=/usr/bin/python3 -B /opt/cpa-admin/service.py --config /etc/cpa-admin/config.json
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cpa-admin
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+TasksMax=64
+LimitNOFILE=512
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=60
+LogRateLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target
