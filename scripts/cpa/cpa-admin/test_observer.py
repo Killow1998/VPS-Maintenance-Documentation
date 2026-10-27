@@ -1,4 +1,5 @@
 import copy
+from collections import Counter
 import json
 from pathlib import Path
 import tempfile
@@ -8,6 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend import Backend, scope_quota
+from server import PolicyError
 
 
 class ObserverIntegrationTest(unittest.TestCase):
@@ -20,6 +22,7 @@ class ObserverIntegrationTest(unittest.TestCase):
              "windows": {"five_hour": {"remaining_percent": 25, "resets_at": "2026-10-26T17:00:00Z"}}}],
             "checked_at": "2026-10-26T12:00:00Z", "query_status": "ok", "stale": False, "windows": {}}
         self.failures = set()
+        self.quota_calls, self.quota_limit = Counter(), None
         fixture = self
 
         class Observer(BaseHTTPRequestHandler):
@@ -32,7 +35,11 @@ class ObserverIntegrationTest(unittest.TestCase):
                 elif self.path in fixture.failures:
                     code, data = 503, {"error": "private diagnostic must not escape"}
                 elif self.path == "/v1/quota":
-                    code, data = 200, fixture.snapshot
+                    fixture.quota_calls[key] += 1
+                    if fixture.quota_limit is not None and fixture.quota_calls[key] > fixture.quota_limit:
+                        code, data = 429, {"error": "rate_limited"}
+                    else:
+                        code, data = 200, fixture.snapshot
                 elif self.path == "/v1/usage?period=1h":
                     count = 2 if key.endswith("a") else 0
                     code, data = 200, {"totals": {"requests": count, "total_tokens": count * 123},
@@ -111,6 +118,25 @@ class ObserverIntegrationTest(unittest.TestCase):
         self.assertIsNone(result["windows"]["five_hour"]["min_remaining_percent"])
         self.assertTrue(result["stale"])
         self.assertEqual(self.snapshot["accounts"][1]["windows"]["five_hour"]["remaining_percent"], 25)
+
+    def test_public_quota_uses_each_callers_rate_limit_and_keeps_acl(self):
+        self.quota_limit = 60
+        for _ in range(35):
+            for key, account in (("fixture-a", "a"), ("fixture-b", "b")):
+                result = self.backend.quota({account}, key=key)
+                self.assertEqual([a["id"] for a in result["accounts"]], [account])
+        for _ in range(25):
+            self.backend.quota({"a"}, key="fixture-a")
+        with self.assertRaises(PolicyError):
+            self.backend.quota({"a"}, key="fixture-a")
+        self.assertEqual(self.backend.quota({"b"}, key="fixture-b")["accounts_total"], 1)
+        self.assertEqual(self.quota_calls, {"Bearer fixture-a": 61, "Bearer fixture-b": 36})
+
+    def test_explicit_invalid_key_does_not_fall_back_to_another_key(self):
+        for key in ("fixture-invalid", ""):
+            with self.subTest(key=key), self.assertRaises(PolicyError):
+                self.backend.quota({"a"}, key=key)
+        self.assertEqual(self.quota_calls, {})
 
 
 if __name__ == "__main__":

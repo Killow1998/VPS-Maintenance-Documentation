@@ -102,6 +102,7 @@ scripts/cpa/cpa-admin/web/*
 !scripts/cpa/cpa-admin/verify_remote.py
 !scripts/cpa/cpa-admin/probe_cpa_routes.py
 !scripts/cpa/cpa-admin/test_observer.py
+!scripts/cpa/cpa-admin/test_deploy.py
 !scripts/cpa/cpa-admin/test_policy.py
 !scripts/cpa/cpa-admin/test_service.py
 !scripts/cpa/cpa-admin/web/index.html

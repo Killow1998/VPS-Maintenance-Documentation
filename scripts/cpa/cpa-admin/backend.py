@@ -126,9 +126,10 @@ class Backend:
         client = next((c for c in state["clients"] if c["id"] == identity), None)
         return [a for a in state["accounts"] if client and client["enabled"] and a["id"] in client["account_ids"]]
 
-    def quota(self, allowed_ids=None):
-        with self.lock:
-            key = next(iter(self.client_keys.values()), None)
+    def quota(self, allowed_ids=None, *, key=None):
+        if key is None:
+            with self.lock:
+                key = next(iter(self.client_keys.values()), None)
         if not key:
             raise PolicyError(503, "尚无可用于查询额度的 API Key。")
         snapshot = self.observer_get("/v1/quota", key)

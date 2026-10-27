@@ -11,7 +11,7 @@
 网页部署在原 HTTPS 域名的 `/admin/`。独立管理员密码和 SSH 短时链接均可使用。
 
 ```bash
-# 首次设置自己的管理员密码；隐藏输入两次，不进入 shell 历史或 env
+# 设置或替换网页登录管理员；密码隐藏输入两次
 python3 cpa-tools/api_keys.py admin-password admin
 
 # 生成一次性登录链接，自行复制到浏览器；2 分钟有效
@@ -25,7 +25,9 @@ python3 cpa-tools/api_keys.py
 python3 cpa-tools/api_keys.py permissions
 ```
 
-不创建默认密码。首次使用密码登录前，管理员通过已有 SSH 权限执行 `admin-password`。更换密码会撤销全部现有网页登录会话。密码只存 scrypt 哈希；会话和短时链接只存哈希。网页登录会话 8 小时有效，Cookie 使用 Secure、HttpOnly、SameSite=Strict，并限制在 `/admin/`。写操作核对同源 Origin。
+网页登录使用一个管理员账号。首次设置或忘记用户名、密码时，通过已有 SSH 权限执行 `admin-password 新用户名`。执行成功后只保留这个管理员，旧用户名、密码、全部会话和未使用的短时链接立即失效。输入无效或写入失败时保留原登录信息。此操作不修改下游 Key、账号权限或历史用量。
+
+密码只存 scrypt 哈希；会话和短时链接只存哈希。网页登录会话 8 小时有效，Cookie 使用 Secure、HttpOnly、SameSite=Strict，并限制在 `/admin/`。写操作核对同源 Origin。
 
 网页每行是一个 Key，每列是一个逻辑账号。修改后点击“保存权限”。空白名单拒绝模型请求；停用 Key 保留其白名单和历史。多账号仅在获准范围内调度，订阅额度不会按 Key 分割。额度条表示剩余百分比，重置时间为北京时间，括号显示 `2d3h left`。旧快照标注旧值；采集未知不显示成零。
 
@@ -66,7 +68,7 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 部署前读取既有 `cpa-tools/.deployment.private.json`，确认域名、SSH、CPA/observer 版本、真实监听端口、配置路径、Nginx 内层 TLS 路由和账号身份。缺失信息应向操作者询问。不要将现有本机旧版 observer 覆盖到已修复的线上版本。
 
-`deploy_remote.py` 是当前已有环境的受控部署入口，JSON 任务通过 SSH 标准输入传送。它要求已有 Nginx CPA 站点、observer、标准路径以及明确的初始受限 Key/账号，检查不匹配就停止。首次部署需要提供 `deployment`、`files`、`remote_admin`、`restricted_key`、`restricted_email`；其他已有 Key 保留全部当前账号，新 Key 默认无权限。不要脱离预检盲目执行或将它当成通用安装脚本。
+`deploy_remote.py` 是当前已有环境的受控部署入口，JSON 任务通过 SSH 标准输入传送。它要求已有 Nginx CPA 站点、observer、标准路径以及明确的初始受限 Key/账号。首次部署需要提供 `deployment`、`files`、`remote_admin`、`restricted_key`、`restricted_email`。`restricted_key` 填完整 Key ID 或唯一的显示名称，名称区分大小写；`restricted_email` 必须唯一对应一个已启用的账号。Key 匹配检查在写文件、启动服务和修改账号路由前完成。名称不存在、重名或部署期间 Key 清单变化时停止；不写入初始权限。其他已有 Key 保留全部当前账号，新 Key 默认无权限。不要脱离预检盲目执行或将它当成通用安装脚本。
 
 1. 备份实际 Nginx 文件、CPA/observer 配置、被改凭据；使用 SQLite backup API 取得一致快照。记录原服务 PID、历史条数和源码校验值。
 2. 安装 `/opt/cpa-admin/`、`/etc/cpa-admin/config.json`、`/var/lib/cpa-admin/control.sqlite` 与 `cpa-admin.service`。服务使用现有 `cpa-observer` 用户，只监听回环 8319。配置目录须显式设 750，不能依赖受 umask 影响的 mkdir 参数。
@@ -76,13 +78,19 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 密码设置需要操作者亲自输入；自动部署不生成或展示密码。服务源码升级前先备份，替换必要文件后仅重启 `cpa-admin`。读接口和 UI 不要求重启 CPA、observer 或 XBoard。
 
-额度和近 1h 用量通过回环 observer 的已鉴权 `GET /v1/quota`、`GET /v1/usage?period=1h` 读取。后台不直接打开 observer 的数据库，也不导入其内部 Python 模块。管理员只读额度接口为 `/admin/api/quota`，要求管理员会话；下游 Key 只能通过 `/v1/quota` 查看获准账号的匿名额度，聚合值在过滤后重新计算。响应保留 `scope: shared_pool`，新增 `visibility: authorized_accounts`；已发布的 sh/ps1 客户端需要这个稳定的数据类别。
+额度和近 1h 用量通过回环 observer 的已鉴权 `GET /v1/quota`、`GET /v1/usage?period=1h` 读取。下游请求向 observer 传递当前调用者的 Key，各 Key 使用自己的查询限额。后台不直接打开 observer 的数据库，也不导入其内部 Python 模块。管理员只读额度接口为 `/admin/api/quota`，要求管理员会话；下游 Key 只能通过 `/v1/quota` 查看获准账号的匿名额度，聚合值在过滤后重新计算。响应保留 `scope: shared_pool`，新增 `visibility: authorized_accounts`；已发布的 sh/ps1 客户端需要这个稳定的数据类别。
 
 旧版后台直接以 `mode=ro` 读取 WAL 数据库；systemd 的只读挂载内，当 SQLite 的 `-wal`/`-shm` 文件不存在时会报 `unable to open database file`，造成正常采集被误显示为“额度未知”。[SQLite 官方说明](https://sqlite.org/wal.html#read_only_databases)列出了只读 WAL 的条件。复用 observer HTTP 接口可避免此生命周期依赖。不要用 `immutable=1` 读取仍在写入的用量数据库，也不要为此关闭服务隔离或重建历史库。
 
 服务故障时网关拒绝请求，不自动绕过权限层。保持管理服务、官方 CPA 和 observer 三者健康。新服务使用线程上限和 512M 内存上限，大请求控制并发；Nginx 的 128M 上限不改变模型提供方自身的限制。
 
 ### 既有服务修复
+
+审查修复按以下范围更新：
+
+- 多用户额度查询互相限流：一起更新 `backend.py` 和 `service.py`，只重启 `cpa-admin`。下游查询会携带当前调用者的 Key，仍按白名单过滤账号。
+- 更换管理员后旧账号仍可登录：更新 `authentication.py`，同步本机 `cpa-tools/api_keys.py` 的操作提示。源码更新保留现有登录信息；需要撤销旧账号时，由操作者通过 SSH 执行 `admin-password 新用户名`。成功后旧账号、会话及未使用短时链接全部失效。
+- 初始受限 Key 名称填错：更新 `deploy_remote.py`，供后续首次部署使用。已部署环境通过网页或 TUI 核对并修正受限 Key 的白名单；不要重新导入整套初始权限。
 
 先按 [observer Operation 与修复 Prompt](../cpa-observer/README.md#repair-prompt)核对运行源码、Python、路由和备份。若额度返回 HTTP 200 但客户端报“数据范围错误”，检查 `/v1/quota` 的 `scope`；网关应返回 `shared_pool` 并保留白名单过滤。若总览缺少每窗口 `models`，更新至包含模型分项的 observer。两种问题分别核对源码，按需替换 `backend.py` 或 `observer.py`，分别只重启对应服务。
 
@@ -104,12 +112,12 @@ sudo python3 /var/backups/cpa-admin/DEPLOYMENT_TIME-initial/rollback-routing.py
 
 ```bash
 cd cpa-admin
-python3.11 -B -m unittest -v test_policy.py test_service.py test_observer.py
-python3.11 server.py
+python3 -B -m unittest discover -p 'test_*.py' -v
+python3 server.py
 ```
 
 `server.py` 仅为本机演示入口，显示模拟账号与额度，不能反代到公网。正式入口是 `service.py --config /etc/cpa-admin/config.json`。UI 资源共用；生产模式有登录和真实策略状态。
 
-`probe_cpa_routes.py` 使用隔离配置、假凭据、模拟 HTTP 上游和临时端口运行现有官方 CPA 二进制。它验证普通请求、流式请求、count_tokens、本账号 429 和未知前缀不会进入另一账号。不得把真实 OAuth 目录传给探针。标准库测试覆盖策略、并发版本、密码/会话、单次票据、过期、CSRF、前缀注入、重试和流式转发。
+`probe_cpa_routes.py` 使用隔离配置、假凭据、模拟 HTTP 上游和临时端口运行现有官方 CPA 二进制。它验证普通请求、流式请求、count_tokens、本账号 429 和未知前缀不会进入另一账号。不得把真实 OAuth 目录传给探针。标准库测试覆盖部署选择器、策略、并发版本、管理员替换与登录并发、单次票据、过期、CSRF、逐 Key 查询限额、前缀注入、重试和流式转发。
 
 官方参考：[账号池 PR #6569](https://github.com/router-for-me/CLIProxyAPI/pull/6569)、[调度插件](https://help.router-for.me/plugin/scheduler)。本方案不依赖未合并账号池功能，也不将存在回退路径的调度插件单独视为权限边界。

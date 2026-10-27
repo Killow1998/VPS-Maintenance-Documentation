@@ -2,13 +2,16 @@ import copy
 import http.client
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from authentication import Authentication, digest
+import authentication
 from server import PolicyError, Store
 from service import COOKIE, Server
 
@@ -44,6 +47,99 @@ class AuthenticationTest(unittest.TestCase):
         self.auth.set_password("admin", "long-fixture-password")
         with self.assertRaises(PolicyError): self.auth.actor(token)
 
+    def test_renamed_admin_reset_revokes_legacy_accounts_sessions_and_tickets(self):
+        password = "fixture-password-old"
+        self.auth.set_password("old_admin", password)
+        with self.store.db() as con:
+            con.execute("INSERT INTO administrators SELECT 'legacy_admin',salt,password_hash FROM administrators")
+        tokens = [self.auth.login({"username": name, "password": password}, "fixture")
+                  for name in ("old_admin", "legacy_admin")]
+        tokens.append(self.auth.login({"ticket": self.auth.ticket()}, "fixture"))
+        ticket = self.auth.ticket()
+        before = self.store.snapshot()
+        self.auth.set_password("new_admin", "fixture-password-new")
+        for token in tokens:
+            with self.assertRaises(PolicyError): self.auth.actor(token)
+        for name in ("old_admin", "legacy_admin"):
+            with self.assertRaises(PolicyError):
+                self.auth.login({"username": name, "password": password}, "fixture")
+        with self.assertRaises(PolicyError): self.auth.login({"ticket": ticket}, "fixture")
+        token = self.auth.login({"username": "new_admin", "password": "fixture-password-new"}, "fixture")
+        self.assertEqual(self.auth.actor(token), "web:new_admin")
+        with self.store.db() as con:
+            self.assertEqual(con.execute("SELECT name FROM administrators").fetchall(), [("new_admin",)])
+        self.assertEqual(self.store.snapshot(), before)
+
+    def test_same_username_reset_rejects_old_password(self):
+        self.auth.set_password("admin", "fixture-password-old")
+        self.auth.set_password("admin", "fixture-password-new")
+        with self.assertRaises(PolicyError):
+            self.auth.login({"username": "admin", "password": "fixture-password-old"}, "fixture")
+        token = self.auth.login({"username": "admin", "password": "fixture-password-new"}, "fixture")
+        self.assertEqual(self.auth.actor(token), "web:admin")
+
+    def test_invalid_reset_preserves_current_login(self):
+        self.auth.set_password("admin", "fixture-password-old")
+        token = self.auth.login({"username": "admin", "password": "fixture-password-old"}, "fixture")
+        for name, password in (("bad name", "fixture-password-new"), ("new_admin", "short")):
+            with self.assertRaises(PolicyError): self.auth.set_password(name, password)
+        self.assertEqual(self.auth.actor(token), "web:admin")
+
+    def test_failed_reset_rolls_back_old_credentials_and_sessions(self):
+        self.auth.set_password("admin", "fixture-password-old")
+        token = self.auth.login({"username": "admin", "password": "fixture-password-old"}, "fixture")
+        with self.store.db() as con:
+            con.executescript("CREATE TRIGGER reject_reset BEFORE INSERT ON administrators "
+                              "WHEN NEW.name='blocked' BEGIN SELECT RAISE(ABORT,'fixture'); END;")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.auth.set_password("blocked", "fixture-password-new")
+        self.assertEqual(self.auth.actor(token), "web:admin")
+        token = self.auth.login({"username": "admin", "password": "fixture-password-old"}, "fixture")
+        self.assertEqual(self.auth.actor(token), "web:admin")
+
+    def test_reset_during_password_validation_leaves_no_old_session(self):
+        self.auth.set_password("admin", "fixture-password-old")
+        hashing, resetting, reset_done = threading.Event(), threading.Event(), threading.Event()
+        original_hash = authentication.password_hash
+        tokens, errors = [], []
+
+        def paused_hash(password, salt):
+            if password == "fixture-password-old":
+                hashing.set()
+                if not resetting.wait(5): raise RuntimeError("reset did not start")
+                reset_done.wait(1)
+            result = original_hash(password, salt)
+            if password == "fixture-password-new": resetting.set()
+            return result
+
+        def login():
+            try:
+                tokens.append(self.auth.login({"username": "admin", "password": "fixture-password-old"}, "fixture"))
+            except Exception as error:
+                errors.append(error)
+
+        def reset():
+            try:
+                self.auth.set_password("replacement", "fixture-password-new")
+            except Exception as error:
+                errors.append(error)
+            finally:
+                reset_done.set()
+
+        with patch.object(authentication, "password_hash", side_effect=paused_hash):
+            worker = threading.Thread(target=login)
+            worker.start()
+            self.assertTrue(hashing.wait(5))
+            resetter = threading.Thread(target=reset)
+            resetter.start()
+            worker.join(10)
+            resetter.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(resetter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(tokens), 1)
+        with self.assertRaises(PolicyError): self.auth.actor(tokens[0])
+
 
 class FakeBackend:
     config = {"origin": "https://control.example", "active": True}
@@ -54,6 +150,7 @@ class FakeBackend:
         self.host, self.port = "127.0.0.1", upstream.server_port
         self.lock = threading.RLock()
         self.fresh = True
+        self.quota_keys = []
         self.models = {"account-a": {"claude-test": {}}, "account-b": {"claude-test": {}}}
         with self.store.db() as con:
             state = self.store.snapshot(con)
@@ -66,8 +163,8 @@ class FakeBackend:
 
     def authenticate(self, key):
         self.require_fresh()
-        if key != "test-client": raise PolicyError(401, "fixture invalid")
-        return "client-a"
+        if key not in ("test-client", "test-other"): raise PolicyError(401, "fixture invalid")
+        return "client-a" if key == "test-client" else "client-b"
 
     def allowed(self, identity):
         self.require_fresh()
@@ -81,7 +178,8 @@ class FakeBackend:
     def save(self, data, actor):
         return self.store.save(data, actor)
 
-    def quota(self, allowed):
+    def quota(self, allowed, *, key=None):
+        self.quota_keys.append(key)
         return {"accounts": [{"id": a} for a in sorted(allowed)]}
 
     def account_quota(self):
@@ -161,8 +259,16 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.request('/v1/models')[0], 401)
         q = self.request('/v1/quota', headers={"Authorization": "Bearer test-client"})
         self.assertEqual(json.loads(q[1])["accounts"], [{"id": "account-a"}])
+        self.assertEqual(self.backend.quota_keys, ["test-client"])
         self.backend.fresh = False
         self.assertEqual(self.model()[0], 503)
+
+    def test_public_quota_forwards_current_key_with_its_own_acl(self):
+        for key, accounts in (("test-client", ["account-a"]), ("test-other", ["account-a", "account-b"])):
+            result = self.request('/v1/quota', headers={"Authorization": "Bearer " + key})
+            self.assertEqual(result[0], 200)
+            self.assertEqual(json.loads(result[1])["accounts"], [{"id": a} for a in accounts])
+        self.assertEqual(self.backend.quota_keys, ["test-client", "test-other"])
 
     def test_admin_login_cookie_csrf_and_internal_boundary(self):
         self.assertEqual(self.request('/admin/api/state')[0], 401)

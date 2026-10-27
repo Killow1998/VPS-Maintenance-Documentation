@@ -271,4 +271,4 @@ python3 cpa-tools/api_keys.py web-login
 python3 cpa-tools/api_keys.py admin-password admin
 ```
 
-忘记网页登录用户名或密码时，通过已有 SSH 管理权限运行 `web-login` 获取两分钟一次性链接，或用 `admin-password` 设置新的用户名和密码；不需要旧密码。重设密码会撤销现有网页登录会话。链接只显示给操作者，自行选择浏览器打开。管理权限不交给下游 API Key。
+忘记网页登录用户名或密码时，通过已有 SSH 管理权限运行 `web-login` 获取两分钟一次性链接，或用 `admin-password 新用户名` 替换网页登录管理员。替换成功后只保留新账号，旧用户名、密码、会话和未使用的登录链接全部失效；下游 Key、账号权限和历史用量保留。链接只显示给操作者，自行选择浏览器打开。管理权限不交给下游 API Key。

@@ -129,6 +129,7 @@ def execute(cfg, args):
     if action == "web-login":
         return remote(cfg, "control_ticket")
     if action == "admin-password":
+        print("将替换网页登录管理员；旧用户名、密码、会话和未使用的登录链接会失效。")
         password = getpass.getpass("新管理员密码（至少 14 字符）：")
         if password != getpass.getpass("再次输入密码："):
             raise RuntimeError("两次密码不一致；未修改。")
@@ -188,8 +189,8 @@ def main():
     commands.add_parser("web-login", help="生成两分钟有效的一次性管理员登录链接")
     commands.add_parser("permissions", help="查看网页和 TUI 共用的账号权限")
     commands.add_parser("sync-routes", help="为新增 Claude 账号备份并配置隔离路由，不授予任何 Key 权限")
-    password = commands.add_parser("admin-password", help="设置独立网页登录密码；隐藏输入，不写入 env")
-    password.add_argument("name", type=name_value, help="管理员名称")
+    password = commands.add_parser("admin-password", help="替换网页登录管理员，并撤销旧账号登录；密码隐藏输入")
+    password.add_argument("name", type=name_value, help="新的管理员名称")
     commands.add_parser("normalize-env", help="统一原 env 的 export 写法，不更换 Key")
     add = commands.add_parser("add", help="生成新 Key；部署权限网关后需另外授予账号权限")
     add.add_argument("name", type=name_value)

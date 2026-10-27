@@ -5,7 +5,6 @@ import http.client
 import json
 import os
 from pathlib import Path
-import pwd
 import shutil
 import sqlite3
 import subprocess
@@ -19,7 +18,34 @@ def command(*args):
     return subprocess.run(args, check=True, text=True, capture_output=True, timeout=45).stdout
 
 
+def restricted_client_id(clients, selector):
+    if not isinstance(selector, str) or not selector.strip():
+        raise RuntimeError("Restricted Key selector is required; no policy applied")
+    matched = [c["id"] for c in clients if selector in (c["id"], c["name"])]
+    if len(matched) != 1:
+        raise RuntimeError("Restricted Key not found or ambiguous; use its full ID")
+    return matched[0]
+
+
+def initial_policy(state, selector, email):
+    client_id = restricted_client_id(state["clients"], selector)
+    accounts = [a["id"] for a in state["accounts"] if a["enabled"]]
+    if not accounts or any(a["enabled"] and not a["route_ready"] for a in state["accounts"]):
+        raise RuntimeError("Incomplete account isolation routes; Nginx unchanged")
+    if not isinstance(email, str) or not email.strip():
+        raise RuntimeError("Restricted account identity is required; no policy applied")
+    matched = [a for a in state["accounts"] if a["name"].casefold() == email.casefold()]
+    if len(matched) != 1 or not matched[0]["enabled"]:
+        raise RuntimeError("Restricted account identity not unique or disabled; Nginx unchanged")
+    return {"expected_revision": state["revision"], "clients": [
+        {"id": c["id"], "enabled": True,
+         "account_ids": [matched[0]["id"]] if c["id"] == client_id else list(accounts)}
+        for c in state["clients"]]}
+
+
 def main():
+    import pwd
+
     os.umask(0o077)
     job = json.load(sys.stdin)
     cfg = job["deployment"]
@@ -40,6 +66,9 @@ def main():
     nginx = site.read_text()
     if nginx.count("proxy_pass http://127.0.0.1:8317;") != 1:
         raise RuntimeError("Unexpected Nginx upstream; no changes made")
+    admin = scope["Admin"]({**cfg, "action": "control_sync_routes"})
+    clients = admin.records(admin.keys())
+    restricted_id = restricted_client_id(clients, job["restricted_key"])
     stamp = dt.datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
     backup = Path(resume) if resume else Path("/var/backups/cpa-admin") / (stamp + "-initial")
     if resume:
@@ -116,18 +145,13 @@ def main():
     else:
         raise RuntimeError("Control service did not start; Nginx unchanged")
     # Reuse the same backed-up route provisioning used by the TUI.
-    admin = scope["Admin"]({**cfg, "action": "control_sync_routes"})
     routes = admin.control_operation()
     initial = rpc("/internal/state")
-    accounts = [a["id"] for a in initial["accounts"] if a["enabled"] and a["route_ready"]]
-    if not accounts or len(accounts) != len([a for a in initial["accounts"] if a["enabled"]]):
-        raise RuntimeError("Incomplete account isolation routes; Nginx unchanged")
-    restricted_accounts = [a["id"] for a in initial["accounts"] if a["name"].casefold() == job["restricted_email"].casefold()]
-    if len(restricted_accounts) != 1:
-        raise RuntimeError("Restricted account identity not unique; Nginx unchanged")
-    payload = {"expected_revision": initial["revision"], "clients": [
-        {"id": c["id"], "enabled": True, "account_ids": restricted_accounts if c["name"] == job["restricted_key"] else accounts}
-        for c in initial["clients"]]}
+    if {c["id"] for c in initial["clients"]} != {c["id"] for c in clients}:
+        raise RuntimeError("Key inventory changed during deployment; no policy applied")
+    if restricted_client_id(initial["clients"], job["restricted_key"]) != restricted_id:
+        raise RuntimeError("Restricted Key changed during deployment; no policy applied")
+    payload = initial_policy(initial, restricted_id, job["restricted_email"])
     applied = rpc("/internal/policies", payload)
     keys = admin.keys()
     for key in keys:
@@ -184,7 +208,7 @@ print("Previous routing restored. Current databases, Key and OAuth credentials r
         command("python3", str(rollback))
         raise RuntimeError("Routing change failed; prior Nginx routing restored") from None
     result = {"backup": str(backup), "route_backup": routes.get("backup"), "rollback": str(rollback),
-              "policy_revision": applied["revision"], "keys": len(keys), "accounts": len(accounts),
+              "policy_revision": applied["revision"], "keys": len(keys), "accounts": sum(a["enabled"] for a in initial["accounts"]),
               "restricted_key": job["restricted_key"], "prior_records": records, "original_pids": baseline,
               "current_pids": {u: command("systemctl", "show", u, "-p", "MainPID", "--value").strip() for u in baseline},
               "source_sha256": {name: hashlib.sha256(text.encode()).hexdigest() for name, text in job["files"].items()}}

@@ -38,9 +38,12 @@ class Authentication:
         salt = secrets.token_hex(16)
         hashed = password_hash(password, salt)
         with self.store.db() as con:
-            con.execute("INSERT OR REPLACE INTO administrators VALUES (?,?,?)", (username, salt, hashed))
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("DELETE FROM administrators")
+            con.execute("INSERT INTO administrators VALUES (?,?,?)", (username, salt, hashed))
             con.execute("DELETE FROM sessions")
-        return {"message": "管理员密码已设置；原网页会话已退出。"}
+            con.execute("DELETE FROM tickets")
+        return {"message": "网页登录管理员已替换；旧用户名、密码、会话和未使用的登录链接已失效。"}
 
     def ticket(self):
         token = secrets.token_urlsafe(32)
@@ -61,26 +64,25 @@ class Authentication:
                     raise PolicyError(429, "登录尝试过多，请 10 分钟后再试。")
             for name in ("global", digest(bucket)):
                 con.execute("INSERT INTO login_limits VALUES (?,?,1) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1", (name, now))
-        actor = None
-        if isinstance(body.get("ticket"), str):
-            with self.store.db() as con:
-                con.execute("BEGIN IMMEDIATE")
+        # Serialize login with reset so an in-flight login cannot restore a revoked session.
+        with self.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            actor = None
+            if isinstance(body.get("ticket"), str):
                 token = digest(body["ticket"])
                 row = con.execute("SELECT expires FROM tickets WHERE hash=?", (token,)).fetchone()
                 if row and row[0] > now:
                     con.execute("DELETE FROM tickets WHERE hash=?", (token,))
                     actor = "ssh-admin"
-        elif isinstance(body.get("username"), str) and isinstance(body.get("password"), str) and len(body["password"]) <= 256:
-            with self.store.db() as con:
+            elif isinstance(body.get("username"), str) and isinstance(body.get("password"), str) and len(body["password"]) <= 256:
                 row = con.execute("SELECT salt,password_hash FROM administrators WHERE name=?", (body["username"],)).fetchone()
-            salt, expected = row if row else ("00" * 16, "00" * 64)
-            valid = hmac.compare_digest(password_hash(body["password"], salt), expected)
-            if row and valid:
-                actor = "web:" + body["username"]
-        if actor is None:
-            raise PolicyError(401, "登录信息无效或链接已过期。")
-        session = secrets.token_urlsafe(32)
-        with self.store.db() as con:
+                salt, expected = row if row else ("00" * 16, "00" * 64)
+                valid = hmac.compare_digest(password_hash(body["password"], salt), expected)
+                if row and valid:
+                    actor = "web:" + body["username"]
+            if actor is None:
+                raise PolicyError(401, "登录信息无效或链接已过期。")
+            session = secrets.token_urlsafe(32)
             con.execute("DELETE FROM sessions WHERE expires < ?", (now,))
             con.execute("INSERT INTO sessions VALUES (?,?,?)", (digest(session), actor, now + 8 * 3600))
         return session

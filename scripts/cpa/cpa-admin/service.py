@@ -216,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/quota" and method == "GET":
                 if target.query:
                     raise PolicyError(400, "额度接口不接受账号选择参数。")
-                return self.answer(200, self.backend.quota({a["id"] for a in allowed}))
+                return self.answer(200, self.backend.quota({a["id"] for a in allowed}, key=key))
             if path == "/v1/usage" and method == "GET":
                 return self.forward_observer(key)
             usable = [a for a in allowed if a["enabled"] and a["route_ready"]]
