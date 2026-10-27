@@ -73,7 +73,7 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8335db5d27211d6af37704db85ec8efb0172b5c0/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/f43a9550e42a32f115784865346ae3288ca53941/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
