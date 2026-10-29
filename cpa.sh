@@ -57,11 +57,17 @@ class TerminalUI:
                 curses.curs_set(0)
             except curses.error:
                 pass
+            self.colors = curses.has_colors() and not bool(os.environ.get("NO_COLOR"))
+            self.pairs = {}
             if curses.has_colors():
                 curses.start_color()
-                curses.use_default_colors()
-                for number, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED), 1):
-                    curses.init_pair(number, color, -1)
+                for index, color in enumerate((curses.COLOR_BLACK, curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                                               curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE)):
+                    for code in (30 + index, 90 + index):
+                        pair = len(self.pairs) + 1
+                        curses.init_pair(pair, color, curses.COLOR_BLACK)
+                        self.pairs[code] = pair
+                self.screen.bkgd(" ", curses.color_pair(self.pairs[37]))
             return self
         except (OSError, curses.error):
             self.__exit__(None, None, None)
@@ -93,27 +99,39 @@ class TerminalUI:
         height, width = self.screen.getmaxyx()
         self.screen.erase()
         for row in range(height):
-            attr, text = curses.A_NORMAL, ""
+            text, highlight = "", False
             if row == 0:
-                text, attr = " " + title, curses.A_BOLD
+                text = "\033[96m " + title
             elif row == 1:
-                text = "-" * max(0, width - 1)
+                text = "\033[90m" + "-" * max(0, width - 1)
             elif row == height - 2:
-                text = notice
+                text = "\033[93m" + notice
             elif row == height - 1:
-                text = footer
+                text = "\033[37m" + footer
             elif row - 2 < len(lines):
-                text = lines[row - 2]
-                match = re.search(r"\033\[(32|33|31)m", text)
-                if match and curses.has_colors():
-                    attr = curses.color_pair({"32": 2, "33": 3, "31": 4}[match[1]])
-                if row - 2 == selected:
-                    attr = curses.A_REVERSE
-            text = re.sub(r"\033\[[0-9;]*m", "", text)
-            try:
-                self.screen.addstr(row, 0, cell(text, max(0, width - 1)), attr)
-            except curses.error:
-                pass
+                text, highlight = lines[row - 2], row - 2 == selected
+            column, color = 0, 97
+            for part in re.split(r"(\033\[[0-9;]*m)", text):
+                if re.fullmatch(r"\033\[[0-9;]*m", part):
+                    for code in part[2:-1].split(";"):
+                        color = 97 if code in ("", "0") else int(code) if code.isdigit() else color
+                    continue
+                remaining = max(0, width - 1 - column)
+                if not remaining:
+                    break
+                part_width = sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in part)
+                safe = cell(part, min(remaining, part_width))
+                attr = curses.A_REVERSE if highlight else curses.A_NORMAL
+                if self.colors and not highlight:
+                    if color in self.pairs:
+                        attr |= curses.color_pair(self.pairs[color])
+                    if color >= 90:
+                        attr |= curses.A_BOLD
+                try:
+                    self.screen.addstr(row, column, safe, attr)
+                except curses.error:
+                    pass
+                column += sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in safe)
         self.screen.refresh()
 
     def key(self):
@@ -278,13 +296,13 @@ main() {
   proxy="${selection#*$'\n'}"
   source=$(curl -q -fsS --proxy "$proxy" --noproxy '' --proto '=https' \
     --location --max-redirs 0 --connect-timeout 10 --max-time 60 \
-    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.sh') || {
+    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.sh') || {
     printf '%s\n' 'Client download failed; no direct fallback.' >&2
     return 1
   }
   # Command substitution strips trailing LF bytes; hash that exact representation.
   digest=$(printf '%s' "$source" | "$python" -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-  if [[ "$digest" != '5e28bc7edbed534b0f8a403b52e66dd8215faa068603ca013c534705c52b602e' ]]; then
+  if [[ "$digest" != 'd7dab37c36f9ab450f4e0e340313aa68ce3cc40a046b509a1ea6ac8aa76bd257' ]]; then
     printf '%s\n' 'Client SHA256 mismatch; nothing was executed.' >&2
     return 1
   fi

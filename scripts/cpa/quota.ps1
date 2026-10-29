@@ -27,28 +27,59 @@ function Format-CpaConsoleText([string]$Text, [int]$Width) {
     return $result + (' ' * [Math]::Max(0, $Width - $used))
 }
 
+function Write-CpaConsoleLine([string]$Text, [int]$Width, [bool]$Highlight = $false) {
+    $palette = @{'31'='DarkRed';'32'='DarkGreen';'33'='DarkYellow';'34'='DarkBlue';'35'='DarkMagenta';'36'='DarkCyan';'37'='Gray';'90'='DarkGray';'91'='Red';'92'='Green';'93'='Yellow';'94'='Blue';'95'='Magenta';'96'='Cyan';'97'='White'}
+    [Console]::ForegroundColor = 'White'
+    [Console]::BackgroundColor = if ($Highlight) { 'DarkCyan' } else { 'Black' }
+    $used = 0
+    foreach ($part in [regex]::Split($Text, '(\x1b\[[0-9;]*m)')) {
+        if ($part -match '^\x1b\[([0-9;]*)m$') {
+            if (-not $Highlight -and $script:CpaColors) {
+                foreach ($code in $Matches[1].Split(';')) {
+                    if ($code -in @('', '0')) { [Console]::ForegroundColor = 'White' }
+                    elseif ($palette.ContainsKey($code)) { [Console]::ForegroundColor = $palette[$code] }
+                }
+            }
+            continue
+        }
+        $safe = [regex]::Replace($part, '[\p{Cc}\p{Cf}]', ' ')
+        $chunk = ''
+        foreach ($character in $safe.ToCharArray()) {
+            $step = if ([int]$character -ge 0x2e80) { 2 } else { 1 }
+            if ($used + $step -gt $Width) { break }
+            $chunk += $character; $used += $step
+        }
+        if ($chunk) { [Console]::Write($chunk) }
+        if ($used -ge $Width) { break }
+    }
+    [Console]::ForegroundColor = 'White'
+    [Console]::Write((' ' * [Math]::Max(0, $Width - $used)))
+    [Console]::BackgroundColor = 'Black'
+}
+
 function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer, [int]$Selected = -1, [string]$Notice = '') {
     $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
     $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+    if ($null -eq $script:CpaColors) { $script:CpaColors = -not [bool]$env:NO_COLOR }
+    if (-not $script:CpaFrameCache -or $script:CpaFrameSize -ne "$width,$height") {
+        $script:CpaFrameCache = @{}; $script:CpaFrameSize = "$width,$height"
+    }
     [Console]::CursorVisible = $false
     for ($row = 0; $row -lt $height; $row++) {
+        $text = ''; $highlight = $false
+        if ($row -eq 0) { $text = "$([char]27)[96m " + $Title }
+        elseif ($row -eq 1) { $text = "$([char]27)[90m" + ('-' * $width) }
+        elseif ($row -eq $height - 2) { $text = "$([char]27)[93m" + $Notice }
+        elseif ($row -eq $height - 1) { $text = "$([char]27)[37m" + $Footer }
+        elseif ($row - 2 -lt $Lines.Count) { $text = $Lines[$row - 2]; $highlight = $row - 2 -eq $Selected }
+        $signature = "$highlight|$($script:CpaColors)|$text"
+        if ($script:CpaFrameCache[$row] -eq $signature) { continue }
         if ($row -ge [Console]::BufferHeight) { return }
         try { [Console]::SetCursorPosition(0, $row) }
         catch { if ($_.Exception.InnerException -is [ArgumentOutOfRangeException]) { return }; throw }
-        [Console]::ForegroundColor = 'Gray'; [Console]::BackgroundColor = 'Black'
-        $text = ''
-        if ($row -eq 0) { $text = ' ' + $Title; [Console]::ForegroundColor = 'White' }
-        elseif ($row -eq 1) { $text = '-' * $width }
-        elseif ($row -eq $height - 2) { $text = $Notice; [Console]::ForegroundColor = 'Yellow' }
-        elseif ($row -eq $height - 1) { $text = $Footer; [Console]::ForegroundColor = 'DarkGray' }
-        elseif ($row - 2 -lt $Lines.Count) {
-            $text = $Lines[$row - 2]
-            $color = [regex]::Match($text, '\x1b\[(32|33|31|90)m')
-            if ($color.Success) { [Console]::ForegroundColor = @{'32'='Green'; '33'='Yellow'; '31'='Red'; '90'='DarkGray'}[$color.Groups[1].Value] }
-            if ($row - 2 -eq $Selected) { [Console]::BackgroundColor = 'DarkCyan'; [Console]::ForegroundColor = 'White' }
-        }
         $liveWidth = [Math]::Max(1, [Math]::Min($width, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1))
-        [Console]::Write((Format-CpaConsoleText $text $liveWidth))
+        Write-CpaConsoleLine $text $liveWidth $highlight
+        $script:CpaFrameCache[$row] = $signature
     }
 }
 
@@ -67,6 +98,7 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
         [Console]::TreatControlCAsInput = $true
         [Console]::Clear()
+        $script:CpaFrameCache = @{}
         while ($true) {
             $lines = @()
             $available = [Math]::Max(1, [Console]::WindowWidth - 26)
@@ -511,7 +543,7 @@ function Show-Quota($Data) {
             $percent = if ($null -ne $value) { $value.ToString('0.0', [Globalization.CultureInfo]::InvariantCulture).PadLeft(5) + '%' } else { '  未知' }
             $color = if ($stale -or $null -eq $value) { 'DarkGray' } elseif ($value -gt 50) { 'Green' } elseif ($value -gt 20) { 'Yellow' } else { 'Red' }
             Write-Host ('  ' + (Get-WindowLabel $row.Name) + ' ') -NoNewline
-            if ([Environment]::GetEnvironmentVariable('NO_COLOR') -eq $null) {
+            if (-not [bool]$env:NO_COLOR) {
                 Write-Host "$bar $percent" -ForegroundColor $color -NoNewline
             } else { Write-Host "$bar $percent" -NoNewline }
             Write-Host ('  重置 ' + (Get-ResetLabel $row.Value.resets_at))
@@ -565,32 +597,107 @@ function Read-CpaConnection([string]$Proxy, [string]$Base, [string]$Key = '') {
     return [pscustomobject]@{Proxy=('http://' + $proxyHost + ':' + $form.Values[0]); Base=$form.Values[1]; Key=$form.Values[2]; Remember=[bool]$form.Values[3]}
 }
 
-function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [int]$Page) {
-    $messages = @(& {
-        foreach ($item in $Views) {
-            if ($Failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $Failures[$item]); continue }
-            try {
-                if ($item -eq 'usage') { Show-Usage $Results[$item] $Selected $Page $true } else { Show-Quota $Results[$item] }
-            } catch {
-                $Failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
-                Write-Host ("CPA ${item}：" + $Failures[$item])
-            }
-            Write-Host ''
-        }
-    } 6>&1)
-    $lines = [Collections.Generic.List[string]]::new(); $pending = ''
-    foreach ($message in $messages) {
-        $data = $message.MessageData
-        $color = @{'Green'=32; 'Yellow'=33; 'Red'=31; 'DarkGray'=90}[[string]$data.ForegroundColor]
-        if ($color) { $pending += "$([char]27)[$($color)m" }
-        $parts = ([string]$data.Message) -split "\r?\n"
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            $pending += $parts[$i]
-            if ($i -lt $parts.Count - 1) { $lines.Add($pending); $pending = '' }
-        }
-        if (-not $data.NoNewLine) { $lines.Add($pending); $pending = '' }
+function Get-CpaTint([string]$Text, [int]$Color = 97) {
+    return "$([char]27)[$($Color)m$Text$([char]27)[0m"
+}
+
+function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [int]$Page, [string]$Panel = 'overview', [int]$Width = 100) {
+    $lines = [Collections.Generic.List[string]]::new()
+    $tabs = @()
+    foreach ($tab in @(@('overview','总览'), @('models','模型明细'), @('quota','账号额度'))) {
+        $tabs += if ($tab[0] -eq $Panel) { Get-CpaTint ("[" + $tab[1] + "]") 96 } else { Get-CpaTint (" " + $tab[1] + " ") 90 }
     }
-    if ($pending) { $lines.Add($pending) }
+    $lines.Add(($tabs -join '   ')); $lines.Add('')
+    $usage = $Results['usage']; $quota = $Results['quota']
+    $window = $null
+    if ($usage -and -not $Failures.ContainsKey('usage')) {
+        if ($usage.period -cne 'overview' -or (($usage.windows | ForEach-Object { $_.period }) -join ',') -cne '1h,7d,30d,all') {
+            $Failures['usage'] = '服务未提供多时间段总览，请更新 observer。'
+        } else { $window = $usage.windows | Where-Object { $_.period -eq $Selected } | Select-Object -First 1 }
+    }
+    if ($Panel -ne 'quota') {
+        $lines.Add((Get-CpaTint '── 本 Key 用量' 96) + (Get-CpaTint ('  截止 ' + (Get-Beijing $usage.as_of -Seconds) + ' 北京') 90))
+        if ($Failures.ContainsKey('usage')) { $lines.Add((Get-CpaTint $Failures['usage'] 91)) }
+        elseif ($window) {
+            $lines.Add((Get-CpaTint ('{0} {1} {2} {3} {4}' -f (Format-Cell '期间' 10), (Format-Cell '请求/失败' 12), (Format-Cell 'Tokens' 12), (Format-Cell '缓存' 8), '估算 USD') 90))
+            foreach ($row in $usage.windows) {
+                $label = @{'1h'='1 近1小时';'7d'='2 近7天';'30d'='3 近30天';'all'='4 总历史'}[$row.period]
+                $total = $row.totals
+                $color = if ($row.period -eq $Selected) { 96 } else { 37 }
+                $lines.Add((Get-CpaTint (Format-Cell $label 10) $color) + ' ' +
+                    (Format-Cell ((Format-Compact $total.requests) + '/' + (Format-Compact $total.failed_requests)) 12) + ' ' +
+                    (Get-CpaTint (Format-Cell (Format-Compact $total.total_tokens) 12) 96) + ' ' +
+                    (Get-CpaTint (Format-Cell (Get-CacheLabel $total) 8) 92) + ' ' + (Get-CpaTint (Get-Cost $total) 93))
+            }
+        }
+        $lines.Add('')
+    }
+    if ($Panel -ne 'models') {
+        $accounts = @($quota.accounts)
+        $active = @($accounts | Where-Object { $_.enabled -eq $true }).Count
+        $checked = Get-Beijing $quota.checked_at
+        $lines.Add((Get-CpaTint '── 账号额度' 96) + (Get-CpaTint ("  $active/$($accounts.Count) 启用 · 剩余 · 更新 $checked 北京") 90))
+        if ($Failures.ContainsKey('quota')) { $lines.Add((Get-CpaTint $Failures['quota'] 91)) }
+        elseif (-not $accounts.Count) { $lines.Add((Get-CpaTint '暂无账号额度' 90)) }
+        else {
+            $quotaLines = [Collections.Generic.List[string]]::new(); $index = 0
+            foreach ($account in $accounts) {
+                $index++
+                $stale = $account.enabled -ne $true -or $account.stale -ne $false
+                $state = if ($account.enabled -ne $true) { '禁用' } elseif ($stale) { '旧值' } else { '' }
+                if ($Panel -eq 'quota') {
+                    $identity = if ($account.id -cmatch '^account-[0-9a-f]{12}$') { $account.id } else { 'account-{0:00}' -f $index }
+                    $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}  {2}" -f $index, $identity, $state) 37))
+                }
+                $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
+                if (-not $rows.Count) { $quotaLines.Add((Get-CpaTint ("A{0:00}  暂无额度窗口" -f $index) 90)) }
+                foreach ($row in $rows) {
+                    $value = Get-Remaining $row.Value.remaining_percent
+                    $color = if ($stale -or $null -eq $value) { 90 } elseif ($value -gt 50) { 92 } elseif ($value -gt 20) { 93 } else { 91 }
+                    $size = if ($Width -ge 100) { 24 } else { 16 }
+                    $filled = if ($null -eq $value) { 0 } else { [int][Math]::Floor($size * $value / 100 + .5) }
+                    $bar = (Get-CpaTint ('█' * $filled) $color) + (Get-CpaTint ('░' * ($size - $filled)) 90)
+                    $percent = if ($null -eq $value) { '  未知' } else { $value.ToString('0.0', [Globalization.CultureInfo]::InvariantCulture).PadLeft(5) + '%' }
+                    $label = "A{0:00} {1}" -f $index, (Get-WindowLabel $row.Name)
+                    $quotaLines.Add((Format-Cell $label 15) + ' ' + $bar + ' ' + (Get-CpaTint $percent $color) + ' ' +
+                        (Get-CpaTint ($state + ' ' + (Get-ResetLabel $row.Value.resets_at)) 37))
+                }
+                if ($Panel -eq 'quota') { $quotaLines.Add('') }
+            }
+            $limit = if ($Panel -eq 'overview') { 4 } else { $quotaLines.Count }
+            foreach ($line in ($quotaLines | Select-Object -First $limit)) { $lines.Add($line) }
+            if ($quotaLines.Count -gt $limit) { $lines.Add((Get-CpaTint ("另 {0} 条，Tab 查看账号额度" -f ($quotaLines.Count - $limit)) 90)) }
+        }
+        $lines.Add('')
+    }
+    if ($Panel -ne 'quota' -and $window) {
+        $rows = @($window.models | Sort-Object @{Expression='estimated_cost_usd_high';Descending=$true}, @{Expression='total_tokens';Descending=$true}, model)
+        $size = if ($Panel -eq 'overview') { 3 } else { 5 }
+        $pages = [Math]::Max(1, [int][Math]::Ceiling($rows.Count / [double]$size))
+        $pageIndex = (($Page % $pages) + $pages) % $pages
+        $lines.Add((Get-CpaTint "── 模型 / $Selected" 96) + (Get-CpaTint ("  $($rows.Count) 个 · 第 $($pageIndex + 1)/$pages 页 · USD 降序") 90))
+        if ($null -eq $window.models) { $lines.Add((Get-CpaTint '接口缺少模型明细，请更新 observer' 93)) }
+        elseif (-not $rows.Count) { $lines.Add((Get-CpaTint '选定期间暂无已采集调用' 90)) }
+        else {
+            $nameWidth = if ($Width -ge 100) { 30 } else { 24 }
+            $lines.Add((Get-CpaTint ('{0} {1} {2} {3} 估算 USD' -f (Format-Cell '模型' $nameWidth), (Format-Cell '请求' 7).TrimEnd().PadLeft(5), (Format-Cell 'Tokens' 11).TrimEnd().PadLeft(11), (Format-Cell '缓存' 7).TrimEnd().PadLeft(5)) 90))
+            $index = $pageIndex * $size
+            foreach ($row in ($rows | Select-Object -Skip $index -First $size)) {
+                $color = @(96,92,95,93)[$index % 4]; $index++
+                $lines.Add((Get-CpaTint (Format-Cell ([string]$row.model) $nameWidth) $color) + ' ' +
+                    (Format-Cell (Format-Compact $row.requests) 7).TrimEnd().PadLeft(7) + ' ' + (Format-Cell (Format-Compact $row.total_tokens) 11).TrimEnd().PadLeft(11) + ' ' +
+                    (Get-CpaTint (Format-Cell (Get-CacheLabel $row) 7).TrimEnd().PadLeft(7) 92) + ' ' + (Get-CpaTint (Get-Cost $row) 93))
+            }
+        }
+        if ($Panel -eq 'models') {
+            $lines.Add('')
+            $lines.Add((Get-CpaTint ('输入 {0}  输出 {1}  缓存读 {2}  写 {3}' -f (Format-Compact $window.totals.input_tokens),
+                (Format-Compact $window.totals.output_tokens), (Format-Compact $window.totals.cache_read_tokens), (Format-Compact $window.totals.cache_write_tokens)) 37))
+            $lines.Add((Get-CpaTint ('计价覆盖 ' + (Get-Coverage $window.totals) + ' · * 仅含已计价费用') 90))
+            $lines.Add((Get-CpaTint ('采集至 ' + (Get-Beijing $usage.last_collected_at -Seconds) + ' 北京 · ' +
+                (Format-Cell $usage.collector_status 20).Trim() + ' · 拒收 ' + (Format-Number $usage.rejected_events)) 90))
+        }
+    }
     return $lines.ToArray()
 }
 
@@ -600,6 +707,7 @@ function Read-CpaDashboardAction {
         if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) { return 'q' }
         switch ([string]$key.Key) {
             'Enter' { return 'r' }
+            'Tab' { if ($key.Modifiers -band [ConsoleModifiers]::Shift) { return 'backtab' }; return 'tab' }
             'UpArrow' { return 'up' }
             'DownArrow' { return 'down' }
             'PageUp' { return 'pageup' }
@@ -610,12 +718,13 @@ function Read-CpaDashboardAction {
             'End' { return 'end' }
         }
         $action = ([string]$key.KeyChar).ToLowerInvariant()
-        if ($action -in @('q','r','1','2','3','4','n','p')) { return $action }
+        if ($action -in @('q','r','1','2','3','4','n','p','c')) { return $action }
     }
 }
 
 function Invoke-CpaReport {
     $ErrorActionPreference = 'Stop'
+    $script:CpaColors = -not [bool]$env:NO_COLOR
     if ($Once -and $Tui) { throw 'Once 和 Tui 不能同时使用。' }
     if ($Date -and $Period -notin @('day', 'month')) { throw 'Date 仅支持 day/month。' }
     $interactive = Test-CpaTerminal
@@ -695,13 +804,14 @@ function Invoke-CpaReport {
         if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
-        $refresh = $true; $selected = '1h'; $page = 0; $offset = 0; $notice = ''
+        $refresh = $true; $selected = '1h'; $panel = 'overview'; $page = 0; $offset = 0; $notice = ''
         $offerSave = $interactive -and -not $saved -and -not $connection
         if ($useTui) {
             $consoleState = @([Console]::ForegroundColor, [Console]::BackgroundColor, [Console]::CursorVisible, [Console]::TreatControlCAsInput, [Console]::OutputEncoding)
             [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
             [Console]::TreatControlCAsInput = $true
             [Console]::Clear()
+            $script:CpaFrameCache = @{}
         }
         do {
             if ($refresh) {
@@ -717,7 +827,7 @@ function Invoke-CpaReport {
                 }
             }
             if ($useTui) {
-                $lines = @(Get-CpaDashboardLines $results $failures $views $selected $page)
+                $lines = @(Get-CpaDashboardLines $results $failures $views $selected $page $panel ([Console]::WindowWidth - 1))
             } else {
                 Write-Host 'CPA 只读看板 | VPN 代理'
                 foreach ($item in $views) {
@@ -753,13 +863,18 @@ function Invoke-CpaReport {
             $capacity = [Math]::Max(1, [Console]::WindowHeight - 4)
             $limit = [Math]::Max(0, $lines.Count - $capacity)
             $offset = [Math]::Min($offset, $limit)
-            Show-CpaConsoleFrame ('CPA / 用量与额度  [' + ($offset + 1) + '/' + [Math]::Max(1, $lines.Count) + ']') @($lines | Select-Object -Skip $offset -First $capacity) '1-4 时段  N/P 翻页  ↑↓ 滚动  R/Enter 刷新  Q 退出' -Notice $notice
+            $colorState = if ($script:CpaColors) { '彩色' } else { '单色(C开启)' }
+            $status = if ($failures.Count) { '部分查询失败' } else { '只读 · ' + $colorState }
+            Show-CpaConsoleFrame ('CPA  用量看板 · ' + $status) @($lines | Select-Object -Skip $offset -First $capacity) 'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出' -Notice $notice
             $action = Read-CpaDashboardAction
             $refresh = $action -in @('', 'r')
             if ($action -in @('1', '2', '3', '4')) { $selected = @('1h', '7d', '30d', 'all')[[int]$action - 1]; $page = 0 }
             elseif ($action -eq 'n') { $page++ } elseif ($action -eq 'p') { $page-- }
-            elseif ($action -eq 'left') { $index = [array]::IndexOf(@('1h','7d','30d','all'), $selected); $selected = @('1h','7d','30d','all')[($index + 3) % 4]; $page = 0 }
-            elseif ($action -eq 'right') { $index = [array]::IndexOf(@('1h','7d','30d','all'), $selected); $selected = @('1h','7d','30d','all')[($index + 1) % 4]; $page = 0 }
+            elseif ($action -in @('left','right','tab','backtab')) {
+                $panels = @('overview','models','quota'); $step = if ($action -in @('left','backtab')) { 2 } else { 1 }
+                $panel = $panels[([array]::IndexOf($panels, $panel) + $step) % 3]; $offset = 0; $page = 0
+            }
+            elseif ($action -eq 'c') { $script:CpaColors = -not $script:CpaColors }
             elseif ($action -eq 'up') { $offset = [Math]::Max(0, $offset - 1) }
             elseif ($action -eq 'down') { $offset = [Math]::Min($limit, $offset + 1) }
             elseif ($action -eq 'pageup') { $offset = [Math]::Max(0, $offset - $capacity) }

@@ -520,13 +520,17 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 #### 查看用量
 
-总览显示当前 Key 的近 1 小时、7 天、30 天和历史用量，包括请求与失败次数、token、缓存命中率、估算费用。下方按模型列出明细，默认展示近 1 小时，按估算费用从高到低排列。账户池区域显示共享额度的余量、重置时间和数据更新时间。
+看板分为总览、模型明细、账号额度三个视图。总览同时显示当前 Key 的近 1 小时、7 天、30 天和历史用量，并保留主要额度条与模型费用。模型明细默认展示近 1 小时，按估算费用从高到低排列。账号额度页显示全部匿名账号的余量、重置时间和数据更新时间。
+
+额度条越满，剩余越多。绿色 >50%，黄色 >20%，红色 ≤20%；旧值、禁用和未知额度用灰色。若终端设置了非空的 `NO_COLOR`，默认使用单色，按 `C` 可在本次运行中切换。
 
 | 操作 | 按键 |
 | --- | --- |
+| 切换总览、模型明细、账号额度 | `Tab` / `Shift+Tab` 或 `←` / `→` |
 | 查看近 1 小时 / 7 天 / 30 天 / 历史的模型明细 | `1` / `2` / `3` / `4` |
-| 翻页，每页最多 5 个模型 | `N` / `P` |
+| 翻页，总览每页 3 个模型，明细每页 5 个 | `N` / `P` |
 | 滚动内容 | `↑` / `↓`、`PgUp` / `PgDn`；`Home` / `End` 到顶部 / 底部 |
+| 切换彩色 / 单色 | `C` |
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
 
@@ -564,7 +568,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -576,7 +580,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```
