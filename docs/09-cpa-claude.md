@@ -578,7 +578,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/ff3b1679ca14dad131732e8a680302bd33cd74e0/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -590,7 +590,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/ff3b1679ca14dad131732e8a680302bd33cd74e0/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```
