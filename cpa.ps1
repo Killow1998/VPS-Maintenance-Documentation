@@ -67,6 +67,17 @@ function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer,
     }
 }
 
+function Read-CpaConsoleKey {
+    # ReadKey blocks on input; observe window changes before waiting for a key.
+    while ($true) {
+        $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
+        $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+        if ($script:CpaFrameSize -ne "$width,$height") { return $null }
+        if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this tool in an interactive terminal.'
@@ -106,7 +117,8 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
                     [Console]::CursorVisible = $true
                 }
             }
-            $key = [Console]::ReadKey($true)
+            $key = Read-CpaConsoleKey
+            if ($null -eq $key) { continue }
             if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
                 throw [OperationCanceledException]::new('Cancelled.')
             }
@@ -262,14 +274,14 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/ff3b1679ca14dad131732e8a680302bd33cd74e0/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    if ($digest -cne '35944259dfa571c44d486dff611dc532ed0d477b2a229b81ba7f61d9aad3f87d') {
+    if ($digest -cne '33bdb9b89f99fd829b0a7a320f1f18b57c9677b818db0ca0fe9767a3599d4ed5') {
         throw 'Client SHA256 mismatch; nothing was executed.'
     }
     $source = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)

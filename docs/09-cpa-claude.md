@@ -536,6 +536,16 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 看板按键即时生效。切换、翻页和滚动使用已取得的数据。手动刷新分别查询一次用量和账户池接口，不自动轮询。窗口较小时可滚动查看，缩放不会触发查询。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
 
+#### 已有查询端检查与更新
+
+PR #6 更新个人查询端：根目录 `cpa.sh` / `cpa.ps1` 是下载启动器，`scripts/cpa/quota.sh` / `quota.ps1` 是查询程序。它们与管理员的 `cpa-tools/api_keys.py`、VPS 上的 `cpa-admin` / `cpa-observer` 独立更新。记录最新 main 的完整 commit，再核对实际运行路径、解释器、源码与接口；仓库有新提交不代表 VPS 需要升级。
+
+先用已有 Key 经指定代理检查 `/v1/usage?period=overview` 和 `/v1/quota`：总览需含 1h、7d、30d、all 四窗口及各自 `models`；号池保留 `scope=shared_pool`、`visibility=authorized_accounts` 和调用者白名单过滤。接口满足要求时，只更新查询源码，保留 `~/.cpa/query.json` 的内容、所有者和权限，不部署或重启 VPS，不替换管理员工具。若缺少接口能力，先报告证据、最小修复与源码回滚方式，取得确认后再按 [admin 既有服务修复](../scripts/cpa/cpa-admin/README.md#既有服务修复)和 [observer 维护说明](../scripts/cpa/cpa-observer/README.md#operation)处理。
+
+验收使用隔离配置与合成 Key，检查三个视图、四个时段、模型费用、缓存命中率、彩色及灰色额度条。真实终端中验证 Tab、C、隐藏输入、取消和保存。缩小再放大窗口后，应在**不按任何键**时重绘；切换和缩放不得增加 API 请求，R/回车刷新只增加两次请求。Windows 启动器和表单也需验证空闲缩放。使用现有账户做公网只读查询，不调用付费模型；未实测的平台单独说明。
+
+客户端源码变更后，先提交客户端，再把两个启动器与本文固定链接更新到该完整 commit，重算各自 SHA256。Bash 校验去除末尾换行后的下载内容，PowerShell 校验原始字节。回滚只需从此前记录的 Git commit 恢复启动器和对应查询源码，保留连接配置；不恢复 VPS 数据库或重启服务。
+
 #### 代理设置
 
 首页启动器的首次下载使用当前网络。输入端口后，脚本通过指定代理下载固定版本客户端、校验 SHA256，并查询 API。
@@ -568,7 +578,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/ff3b1679ca14dad131732e8a680302bd33cd74e0/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -580,7 +590,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/ff3b1679ca14dad131732e8a680302bd33cd74e0/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```

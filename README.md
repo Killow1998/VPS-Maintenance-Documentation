@@ -43,7 +43,9 @@ irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/m
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
 
-看板按键即时生效。切换、翻页和滚动使用已有数据，刷新才查询接口。
+看板按键即时生效。切换、翻页、配色和缩放使用已有数据；缩放无需额外按键，刷新才查询接口。
+
+已有部署先检查[查询端与服务端兼容性](docs/09-cpa-claude.md#已有查询端检查与更新)。PR #6 是查询端更新；接口已兼容时，只更新本机查询脚本。
 
 若终端设置了 `NO_COLOR`，看板默认使用单色，按 `C` 可在本次运行中开启颜色。布局与配色参考 [Tokscale](https://github.com/junhoyeo/tokscale)。
 
