@@ -11,28 +11,59 @@ function Format-CpaConsoleText([string]$Text, [int]$Width) {
     return $result + (' ' * [Math]::Max(0, $Width - $used))
 }
 
+function Write-CpaConsoleLine([string]$Text, [int]$Width, [bool]$Highlight = $false) {
+    $palette = @{'31'='DarkRed';'32'='DarkGreen';'33'='DarkYellow';'34'='DarkBlue';'35'='DarkMagenta';'36'='DarkCyan';'37'='Gray';'90'='DarkGray';'91'='Red';'92'='Green';'93'='Yellow';'94'='Blue';'95'='Magenta';'96'='Cyan';'97'='White'}
+    [Console]::ForegroundColor = 'White'
+    [Console]::BackgroundColor = if ($Highlight) { 'DarkCyan' } else { 'Black' }
+    $used = 0
+    foreach ($part in [regex]::Split($Text, '(\x1b\[[0-9;]*m)')) {
+        if ($part -match '^\x1b\[([0-9;]*)m$') {
+            if (-not $Highlight -and $script:CpaColors) {
+                foreach ($code in $Matches[1].Split(';')) {
+                    if ($code -in @('', '0')) { [Console]::ForegroundColor = 'White' }
+                    elseif ($palette.ContainsKey($code)) { [Console]::ForegroundColor = $palette[$code] }
+                }
+            }
+            continue
+        }
+        $safe = [regex]::Replace($part, '[\p{Cc}\p{Cf}]', ' ')
+        $chunk = ''
+        foreach ($character in $safe.ToCharArray()) {
+            $step = if ([int]$character -ge 0x2e80) { 2 } else { 1 }
+            if ($used + $step -gt $Width) { break }
+            $chunk += $character; $used += $step
+        }
+        if ($chunk) { [Console]::Write($chunk) }
+        if ($used -ge $Width) { break }
+    }
+    [Console]::ForegroundColor = 'White'
+    [Console]::Write((' ' * [Math]::Max(0, $Width - $used)))
+    [Console]::BackgroundColor = 'Black'
+}
+
 function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer, [int]$Selected = -1, [string]$Notice = '') {
     $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
     $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+    if ($null -eq $script:CpaColors) { $script:CpaColors = -not [bool]$env:NO_COLOR }
+    if (-not $script:CpaFrameCache -or $script:CpaFrameSize -ne "$width,$height") {
+        $script:CpaFrameCache = @{}; $script:CpaFrameSize = "$width,$height"
+    }
     [Console]::CursorVisible = $false
     for ($row = 0; $row -lt $height; $row++) {
+        $text = ''; $highlight = $false
+        if ($row -eq 0) { $text = "$([char]27)[96m " + $Title }
+        elseif ($row -eq 1) { $text = "$([char]27)[90m" + ('-' * $width) }
+        elseif ($row -eq $height - 2) { $text = "$([char]27)[93m" + $Notice }
+        elseif ($row -eq $height - 1) { $text = "$([char]27)[37m" + $Footer }
+        elseif ($row - 2 -lt $Lines.Count) { $text = $Lines[$row - 2]; $highlight = $row - 2 -eq $Selected }
+        $signature = "$highlight|$($script:CpaColors)|$text"
+        if ($script:CpaFrameCache[$row] -eq $signature) { continue }
         if ($row -ge [Console]::BufferHeight) { return }
         try { [Console]::SetCursorPosition(0, $row) }
         catch { if ($_.Exception.InnerException -is [ArgumentOutOfRangeException]) { return }; throw }
-        [Console]::ForegroundColor = 'Gray'; [Console]::BackgroundColor = 'Black'
-        $text = ''
-        if ($row -eq 0) { $text = ' ' + $Title; [Console]::ForegroundColor = 'White' }
-        elseif ($row -eq 1) { $text = '-' * $width }
-        elseif ($row -eq $height - 2) { $text = $Notice; [Console]::ForegroundColor = 'Yellow' }
-        elseif ($row -eq $height - 1) { $text = $Footer; [Console]::ForegroundColor = 'DarkGray' }
-        elseif ($row - 2 -lt $Lines.Count) {
-            $text = $Lines[$row - 2]
-            $color = [regex]::Match($text, '\x1b\[(32|33|31|90)m')
-            if ($color.Success) { [Console]::ForegroundColor = @{'32'='Green'; '33'='Yellow'; '31'='Red'; '90'='DarkGray'}[$color.Groups[1].Value] }
-            if ($row - 2 -eq $Selected) { [Console]::BackgroundColor = 'DarkCyan'; [Console]::ForegroundColor = 'White' }
-        }
         $liveWidth = [Math]::Max(1, [Math]::Min($width, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1))
-        [Console]::Write((Format-CpaConsoleText $text $liveWidth))
+        Write-CpaConsoleLine $text $liveWidth $highlight
+        $script:CpaFrameCache[$row] = $signature
     }
 }
 
@@ -51,6 +82,7 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
         [Console]::TreatControlCAsInput = $true
         [Console]::Clear()
+        $script:CpaFrameCache = @{}
         while ($true) {
             $lines = @()
             $available = [Math]::Max(1, [Console]::WindowWidth - 26)
@@ -220,6 +252,7 @@ function Read-CpaSavedProxy {
 
 function Start-CpaQuota {
     $ErrorActionPreference = 'Stop'
+    $script:CpaColors = -not [bool]$env:NO_COLOR
     $ProgressPreference = 'SilentlyContinue'
     try {
     $proxy = Read-CpaSavedProxy
@@ -229,14 +262,14 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    if ($digest -cne '4e11117fdb3cf13a31addbdf4f4c7f247dc7f6f20be33e310dbae744329108fd') {
+    if ($digest -cne '35944259dfa571c44d486dff611dc532ed0d477b2a229b81ba7f61d9aad3f87d') {
         throw 'Client SHA256 mismatch; nothing was executed.'
     }
     $source = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)

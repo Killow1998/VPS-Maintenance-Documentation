@@ -29,17 +29,23 @@ c=$(curl -qfsS --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Ma
 irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/main/cpa.ps1 -TimeoutSec 60 -ErrorAction Stop | iex
 ```
 
-看板显示当前 Key 的近 1 小时、7 天、30 天和历史用量，并按模型列出请求数、token、缓存命中率和美元估算费用。账户池区域显示共享额度的余量与重置时间。
+看板分为总览、模型明细、账号额度三个视图。首页显示四个时间段的用量、主要额度条和模型费用；明细页可查看完整列表。
+
+额度条越满，剩余越多：绿色 >50%，黄色 >20%，红色 ≤20%。灰色表示旧值或未知，百分比和重置时间仍会保留。
 
 | 操作 | 按键 |
 | --- | --- |
+| 切换总览、模型明细、账号额度 | `Tab` / `Shift+Tab` 或 `←` / `→` |
 | 切换模型明细的时间范围 | `1` / `2` / `3` / `4` |
 | 翻页 | `N` / `P` |
 | 滚动内容 | `↑` / `↓`、`PgUp` / `PgDn` |
+| 切换彩色 / 单色 | `C` |
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
 
 看板按键即时生效。切换、翻页和滚动使用已有数据，刷新才查询接口。
+
+若终端设置了 `NO_COLOR`，看板默认使用单色，按 `C` 可在本次运行中开启颜色。布局与配色参考 [Tokscale](https://github.com/junhoyeo/tokscale)。
 
 缓存命中率表示输入中有多少内容复用了缓存。例如，100 个输入 token 中有 80 个来自缓存，命中率就是 80%。美元金额按 API 公开价格估算；实际支出以服务商账单为准。详细含义见[用量与费用说明](docs/09-cpa-claude.md#94-用量与费用口径)。
 
