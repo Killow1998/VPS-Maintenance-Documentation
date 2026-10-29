@@ -682,6 +682,8 @@ sudo journalctl -u cliproxyapi --since '30 minutes ago' --no-pager
 
 ### 11.2 升级与回滚
 
+仓库发布、管理员电脑脚本和 VPS 运行服务是三个独立版本。先按[同步边界与只读验收](../scripts/cpa/cpa-admin/README.md#仓库本机与-vps-的同步边界)记录完整 commit，逐文件核对实际运行路径。源码已一致时无需重启；不要重跑首次部署来更新既有网关。网页入口使用 `/admin/`，Base URL 保持域名根路径。
+
 1. 记录版本、路径和状态，备份二进制、配置、unit、Nginx、必要凭据。SQLite 用 backup API，不单拷活动 WAL 主文件。
 2. 阅读目标 Release 迁移说明，确认管理接口和 observer 兼容性。
 3. 替换匹配文件，按受影响范围重启；Nginx 只在 `nginx -t` 通过后 reload。

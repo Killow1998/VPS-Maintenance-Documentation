@@ -10,6 +10,8 @@
 
 网页部署在原 HTTPS 域名的 `/admin/`。独立管理员密码和 SSH 短时链接均可使用。
 
+浏览器打开 `https://CPA_HOST/admin/`；Claude Code 的 Base URL 仍为 `https://CPA_HOST`。根路径 `/` 是 API 入口，未带 Key 返回 401 是正常鉴权结果。排查“网页打不开”时分别检查 `/admin/`、带 Key 的 `/v1/models` 和本机健康接口；不要把根路径 401 当成服务故障，也不要为此重置登录或绕过网关。
+
 ```bash
 # 设置或替换网页登录管理员；密码隐藏输入两次
 python3 cpa-tools/api_keys.py admin-password admin
@@ -74,7 +76,7 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 2. 安装 `/opt/cpa-admin/`、`/etc/cpa-admin/config.json`、`/var/lib/cpa-admin/control.sqlite` 与 `cpa-admin.service`。服务使用现有 `cpa-observer` 用户，只监听回环 8319。配置目录须显式设 750，不能依赖受 umask 影响的 mkdir 参数。
 3. 设置账号前缀，核对所有账号模型目录，导入初始策略。先通过回环预检。
 4. Nginx 原模型、quota、usage 路由指向 8319，增加 `/admin/` 和禁止公开的管理路由。保留 128M 请求体上限、流式转发、原 TLS/ACME。`nginx -t` 通过后只 reload Nginx。
-5. 运行 `verify_remote.py` 验收四个滚动/历史窗口、旧日/月接口、每 Key 号池范围、401、管理隔离、短时链接单次使用、CSRF、历史保留和原服务 PID。该脚本不发送有效的模型生成请求。
+5. 运行下方只读检查，并分别完成公网代理验收、历史保留和服务 PID 核对。短时链接单次使用与 CSRF 在隔离测试中验证；生产登录由管理员本人完成，不在只读检查中创建会话。
 
 密码设置需要操作者亲自输入；自动部署不生成或展示密码。服务源码升级前先备份，替换必要文件后仅重启 `cpa-admin`。读接口和 UI 不要求重启 CPA、observer 或 XBoard。
 
@@ -94,9 +96,34 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 先按 [observer Operation 与修复 Prompt](../cpa-observer/README.md#repair-prompt)核对运行源码、Python、路由和备份。若额度返回 HTTP 200 但客户端报“数据范围错误”，检查 `/v1/quota` 的 `scope`；网关应返回 `shared_pool` 并保留白名单过滤。若总览缺少每窗口 `models`，更新至包含模型分项的 observer。两种问题分别核对源码，按需替换 `backend.py` 或 `observer.py`，分别只重启对应服务。
 
-备份两个源码、配置、unit、实际 Nginx 路由以及两份一致 SQLite 快照。快照连接用数据库所属服务用户打开，避免以 root 在 live WAL 目录创建 sidecar。记录策略版本、原历史行数和 CPA/XBoard/Nginx PID。验收四窗口、模型分项合计、旧接口、全部 Key 的额度范围与未授权 401，运行未改造的公开客户端；HTTP 200 本身不足以证明客户端可用。
+备份所有受影响源码、配置、unit、实际 Nginx 路由以及两份一致 SQLite 快照。快照连接用数据库所属服务用户打开，避免以 root 在 live WAL 目录创建 sidecar。记录策略版本、原历史行数和 CPA/XBoard/Nginx PID。验收四窗口、模型分项合计、旧接口、全部 Key 的额度范围与未授权 401，运行未改造的公开客户端；HTTP 200 本身不足以证明客户端可用。
 
 源码回滚只恢复备份的源码并重启相应服务，保留当前 `usage.sqlite`、`control.sqlite`、配置、Key 和 OAuth。不得用快照覆盖当前数据库而丢弃修复后的调用记录。只有初次引入网关才需要下面的路由回滚；日常源码修复不应绕过权限网关。
+
+### 只读接口验收
+
+在 VPS 上执行经过审查的脚本，`--config` 指向实际管理服务配置：
+
+```bash
+sudo python3 /PATH/TO/REVIEWED/cpa-admin/verify_remote.py --config /etc/cpa-admin/config.json
+```
+
+脚本只向配置指定的回环 HTTP 服务发 GET。它从现有管理配置读取 Key，并检查全部 Key 的模型目录、白名单内匿名额度和重算汇总、overview 与 1h/7d/30d/all/day/month、模型合计、当前 Key 标签、采集心跳、401 和管理隔离。端口从现有配置读取；不依赖某个固定模型名。报告只使用 Key 序号，不输出凭据、邮箱或原始响应。任一检查失败返回退出码 1；策略在检查期间改变也会报失败，重新读取现状后再验收，不回写旧策略。
+
+该脚本不连接公网，不创建票据或登录会话，不直接打开数据库，不消费 usage queue，也不请求模型生成。输出 `ok=true` 只证明本轮回环读接口检查通过；`not_verified` 列出需要另外验证的项目：
+
+- **公网链路**：在使用者电脑通过指定代理运行发布的 `quota.sh` / `quota.ps1`，以及带 Key 的 `/v1/models`。代理失败立即停止，不改成直连；另核对 HTTPS `/admin/`、无 Key 401 和公网管理路径 404。
+- **历史与身份**：用备份与现库逐行比较已有记录、Key 身份、白名单、HMAC、账号绑定和历史计价。活动 SQLite 的读取和 backup 连接均使用数据库所属服务用户，不能让 root 在 live WAL 目录新建 sidecar。只读接口的总条数不能证明逐行保留。
+- **自然新增事件**：等待已有调用后核对新增记录。采集心跳正常不等于已验证新事件入库；没有自然调用时明确标为未验证，零记录不代表没有实际调用。
+- **进程与源码**：核对 systemd ExecStart、`/proc/PID/cmdline`、解释器和实际源码路径；源码相同不能单独证明运行进程已加载它。记录原 PID、服务启动时间、源码校验值和接口结果。
+
+### 仓库、本机与 VPS 的同步边界
+
+记录本次审查的完整 Git commit，再逐文件比较实际执行源码的 SHA256。分别检查本机 `cpa-tools` / `cpa-auth`（经 SSH 执行的源码也属于本机工具）、VPS `cpa-admin` / `cpa-observer`，以及 systemd、Nginx 的实际配置。不要把本机旧副本覆盖到已修复的 VPS。
+
+相同源码不重启。发现差异先区分通用修复、现场定制和运行数据：通用修复通过 PR 汇入仓库；现场路径、端口、配置、价格文件、凭据与数据库保留私有，不能整目录覆盖。源码修复按前述备份和原子替换流程执行，只重启受影响服务。`deploy_remote.py` 仍只用于首次部署，不是更新器。
+
+本机同步前备份将被替换的工具文件，保留原 `.deployment.private.json` 和 `.cpa-env`。按仓库要求选择已安装的 Python 3.10+；例如系统 `python3` 为 3.9 而已有 `python3.11` 时，使用后者，不修改系统 Python。
 
 ### 回滚
 
