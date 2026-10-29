@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 
-from test_quota_clients import overview
+from test_quota_clients import overview, quota
 
 
 ROOT = Path(__file__).resolve().parent
@@ -118,13 +118,17 @@ class TerminalIntegrationTests(unittest.TestCase):
         else:
             cls.shells = ['python']
 
-    def start(self, directory, shell, rows=24, columns=80):
+    def start(self, directory, shell, rows=24, columns=80, preview=None, colors=True):
         home = Path(directory)
         env = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
         env.update(CPA_PROXY='', CPA_BASEURL='', CPA_QUERY_CHOICE='2', TERM='xterm-256color',
                    CPA_TEST_HOME=str(home), CPA_TEST_SOURCE=str(ROOT / 'quota.ps1'),
                    CPA_TEST_EVENTS=str(home / 'events'), CPA_TEST_DATA=str(home / 'data.json'))
+        env.pop('NO_COLOR', None)
+        if not colors:
+            env['NO_COLOR'] = '1'
         (home / 'data.json').write_text(json.dumps(overview()), encoding='utf-8')
+        (home / 'quota.json').write_text(json.dumps(quota()), encoding='utf-8')
         if os.name == 'nt':
             code = r'''
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
@@ -136,16 +140,19 @@ function Invoke-RestMethod {
     if($Headers.Authorization -ne 'Bearer synthetic-ui-key' -or [string]$Proxy -ne 'http://127.0.0.1:7897/' -or $MaximumRedirection -ne 0){throw 'unsafe request'}
     [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"request`n")
     if($Uri -like '*/v1/usage?period=overview'){return ([IO.File]::ReadAllText($env:CPA_TEST_DATA)|ConvertFrom-Json)}
-    if($Uri -like '*/v1/quota'){return ('{"scope":"shared_pool","accounts":[]}'|ConvertFrom-Json)}
+    if($Uri -like '*/v1/quota'){return ([IO.File]::ReadAllText((Join-Path $env:CPA_TEST_HOME 'quota.json'))|ConvertFrom-Json)}
     throw 'unexpected request'
 }
 $script:originalLines=${function:Get-CpaDashboardLines}
-function Get-CpaDashboardLines($Results,$Failures,$Views,$Selected,$Page) {
+function Get-CpaDashboardLines($Results,$Failures,$Views,$Selected,$Page,$Panel,$Width) {
     [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}`n")
-    & $script:originalLines $Results $Failures $Views $Selected $Page
+    & $script:originalLines $Results $Failures $Views $Selected $Page $Panel $Width
 }
 Invoke-CpaReport
 '''
+            if preview:
+                hook = str(preview).replace("'", "''")
+                code = code.rsplit('\nInvoke-CpaReport', 1)[0] + "\n. ([scriptblock]::Create([IO.File]::ReadAllText('" + hook + "')))\nInvoke-CpaReport\n"
             command = [shell, '-NoProfile', '-EncodedCommand', base64.b64encode(code.encode('utf-16-le')).decode()]
         else:
             source = (ROOT / 'quota.sh').read_text(encoding='utf-8').split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
@@ -160,11 +167,12 @@ def fetch(base, key, path, scope, opener):
     assert key == 'synthetic-ui-key'
     assert base == 'https://cpa.example.invalid'
     event('request')
-    return json.loads(Path(os.environ['CPA_TEST_DATA']).read_text()) if scope == 'own_key' else {'scope': scope, 'accounts': []}
-original_render = render_overview
-def render_overview(data, selected, page, paged):
+    path = Path(os.environ['CPA_TEST_DATA']) if scope == 'own_key' else Path(os.environ['CPA_TEST_HOME']) / 'quota.json'
+    return json.loads(path.read_text())
+original_render = dashboard_lines
+def dashboard_lines(results, errors, selected, page, panel, width):
     event(f'view:{selected}:{page}')
-    original_render(data, selected, page, paged)
+    return original_render(results, errors, selected, page, panel, width)
 main()
 '''
             path = home / 'terminal_test.py'
@@ -263,9 +271,15 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t \t\r')
                         self.wait_for(terminal, lambda: history().count('view:') >= 1)
                         self.assertEqual(history().count('request'), 2)
-                        for index, key in enumerate(('2', 'n', 'p', '4'), 2):
+                        for key in ('\t', '\t', 'c', 'c', '\t'):
+                            before = history().count('view:')
                             terminal.send(key)
-                            self.wait_for(terminal, lambda: history().count('view:') >= index)
+                            self.wait_for(terminal, lambda: history().count('view:') > before)
+                        self.assertEqual(history().count('request'), 2)
+                        for key in ('2', 'n', 'p', '4'):
+                            before = history().count('view:')
+                            terminal.send(key)
+                            self.wait_for(terminal, lambda: history().count('view:') > before)
                         self.assertEqual(history().count('request'), 2)
                         terminal.resize(28, 90)
                         terminal.send('r')
@@ -273,6 +287,8 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         terminal.send('q')
                         self.wait_for(terminal, lambda: not terminal.alive())
                         self.assertNotIn(SECRET, terminal.output)
+                        for codes in ('32|92|38;5;(?:2|10)', '33|93|38;5;(?:3|11|14)', '31|91|38;5;(?:1|9|12)'):
+                            self.assertRegex(terminal.output, r'\x1b\[(?:' + codes + r')m')
                         for view in ('view:1h:0', 'view:7d:0', 'view:7d:1', 'view:all:0'):
                             self.assertIn(view, history())
                         saved = json.loads((Path(directory) / '.cpa/query.json').read_text(encoding='utf-8'))
@@ -281,6 +297,29 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         self.assertEqual(saved['proxy_url'].rstrip('/'), 'http://127.0.0.1:7897')
                     finally:
                         terminal.close()
+
+    def test_no_color_can_be_overridden_without_requests(self):
+        pattern = r'\x1b\[(?:31|91|38;5;(?:1|9|12))m'
+        for shell in self.shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as directory:
+                terminal = self.start(directory, shell, colors=False)
+                events = Path(directory) / 'events'
+                history = lambda: events.read_text(encoding='utf-8') if events.exists() else ''
+                try:
+                    self.wait_for(terminal, lambda: 'API Key' in terminal.output)
+                    terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t\t\r')
+                    self.wait_for(terminal, lambda: history().count('view:') >= 1)
+                    terminal.pump()
+                    self.assertNotRegex(terminal.output, pattern)
+                    terminal.send('c')
+                    self.wait_for(terminal, lambda: re.search(pattern, terminal.output))
+                    self.assertEqual(history().count('request'), 2)
+                    terminal.send('q')
+                    self.wait_for(terminal, lambda: not terminal.alive())
+                    self.assertNotIn(SECRET, terminal.output)
+                    self.assertFalse((Path(directory) / '.cpa/query.json').exists())
+                finally:
+                    terminal.close()
 
     def test_escape_leaves_without_requests_or_profile(self):
         for shell in self.shells:

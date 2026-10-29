@@ -39,7 +39,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 WINDOW = re.compile(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?")
-COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+COLOR = sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
 
 
 class TerminalUI:
@@ -68,11 +68,17 @@ class TerminalUI:
                 curses.curs_set(0)
             except curses.error:
                 pass
+            self.colors = curses.has_colors() and not bool(os.environ.get("NO_COLOR"))
+            self.pairs = {}
             if curses.has_colors():
                 curses.start_color()
-                curses.use_default_colors()
-                for number, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED), 1):
-                    curses.init_pair(number, color, -1)
+                for index, color in enumerate((curses.COLOR_BLACK, curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                                               curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE)):
+                    for code in (30 + index, 90 + index):
+                        pair = len(self.pairs) + 1
+                        curses.init_pair(pair, color, curses.COLOR_BLACK)
+                        self.pairs[code] = pair
+                self.screen.bkgd(" ", curses.color_pair(self.pairs[37]))
             return self
         except (OSError, curses.error):
             self.__exit__(None, None, None)
@@ -104,27 +110,39 @@ class TerminalUI:
         height, width = self.screen.getmaxyx()
         self.screen.erase()
         for row in range(height):
-            attr, text = curses.A_NORMAL, ""
+            text, highlight = "", False
             if row == 0:
-                text, attr = " " + title, curses.A_BOLD
+                text = "\033[96m " + title
             elif row == 1:
-                text = "-" * max(0, width - 1)
+                text = "\033[90m" + "-" * max(0, width - 1)
             elif row == height - 2:
-                text = notice
+                text = "\033[93m" + notice
             elif row == height - 1:
-                text = footer
+                text = "\033[37m" + footer
             elif row - 2 < len(lines):
-                text = lines[row - 2]
-                match = re.search(r"\033\[(32|33|31)m", text)
-                if match and curses.has_colors():
-                    attr = curses.color_pair({"32": 2, "33": 3, "31": 4}[match[1]])
-                if row - 2 == selected:
-                    attr = curses.A_REVERSE
-            text = re.sub(r"\033\[[0-9;]*m", "", text)
-            try:
-                self.screen.addstr(row, 0, cell(text, max(0, width - 1)), attr)
-            except curses.error:
-                pass
+                text, highlight = lines[row - 2], row - 2 == selected
+            column, color = 0, 97
+            for part in re.split(r"(\033\[[0-9;]*m)", text):
+                if re.fullmatch(r"\033\[[0-9;]*m", part):
+                    for code in part[2:-1].split(";"):
+                        color = 97 if code in ("", "0") else int(code) if code.isdigit() else color
+                    continue
+                remaining = max(0, width - 1 - column)
+                if not remaining:
+                    break
+                part_width = sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in part)
+                safe = cell(part, min(remaining, part_width))
+                attr = curses.A_REVERSE if highlight else curses.A_NORMAL
+                if self.colors and not highlight:
+                    if color in self.pairs:
+                        attr |= curses.color_pair(self.pairs[color])
+                    if color >= 90:
+                        attr |= curses.A_BOLD
+                try:
+                    self.screen.addstr(row, column, safe, attr)
+                except curses.error:
+                    pass
+                column += sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in safe)
         self.screen.refresh()
 
     def key(self):
@@ -646,6 +664,104 @@ def render_quota(data):
     print("\n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加")
 
 
+def tint(text, color=97):
+    return f"\033[{color}m{text}\033[0m"
+
+
+def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", width=100):
+    lines = ["   ".join(tint("[" + title + "]", 96) if key == panel else tint(" " + title + " ", 90)
+                        for key, title in (("overview", "总览"), ("models", "模型明细"), ("quota", "账号额度"))), ""]
+    usage, quota = results.get("usage", {}), results.get("quota", {})
+    windows = usage.get("windows", [])
+    window = None
+    if usage and "usage" not in errors:
+        if usage.get("period") != "overview" or [row.get("period") for row in windows] != ["1h", "7d", "30d", "all"]:
+            errors["usage"] = "服务未提供多时间段总览，请更新 observer。"
+        else:
+            window = next(row for row in windows if row["period"] == selected)
+    if panel != "quota":
+        lines.append(tint("── 本 Key 用量", 96) + tint(f"  截止 {beijing(usage.get('as_of'), True)} 北京", 90))
+        if "usage" in errors:
+            lines.append(tint(errors["usage"], 91))
+        elif window:
+            lines.append(tint(f"{cell('期间', 10)} {cell('请求/失败', 12)} {cell('Tokens', 12)} {cell('缓存', 8)} 估算 USD", 90))
+            labels = {"1h": "1 近1小时", "7d": "2 近7天", "30d": "3 近30天", "all": "4 总历史"}
+            for row in windows:
+                total = row["totals"]
+                requests = compact(total.get("requests")) + "/" + compact(total.get("failed_requests"))
+                lines.append(tint(cell(labels[row["period"]], 10), 96 if row["period"] == selected else 37) + " " +
+                             cell(requests, 12) + " " + tint(cell(compact(total.get("total_tokens")), 12), 96) + " " +
+                             tint(cell(cache_label(total), 8), 92) + " " + tint(cost(total), 93))
+        lines.append("")
+    if panel != "models":
+        accounts = [row for row in quota.get("accounts", []) if isinstance(row, dict)]
+        active = sum(row.get("enabled") is True for row in accounts)
+        lines.append(tint("── 账号额度", 96) + tint(f"  {active}/{len(accounts)} 启用 · 剩余 · 更新 {beijing(quota.get('checked_at'))} 北京", 90))
+        if "quota" in errors:
+            lines.append(tint(errors["quota"], 91))
+        elif not accounts:
+            lines.append(tint("暂无账号额度", 90))
+        else:
+            quota_lines = []
+            for index, account in enumerate(accounts, 1):
+                stale = account.get("enabled") is not True or account.get("stale") is not False
+                state = "禁用" if account.get("enabled") is not True else "旧值" if stale else ""
+                if panel == "quota":
+                    identity = account.get("id", "")
+                    if not isinstance(identity, str) or not re.fullmatch(r"account-[0-9a-f]{12}", identity):
+                        identity = f"account-{index:02d}"
+                    quota_lines.append(tint(f"A{index:02d}  {identity}  {state}", 37))
+                account_windows = account.get("windows")
+                rows = [(name, row) for name, row in (account_windows if isinstance(account_windows, dict) else {}).items()
+                        if WINDOW.fullmatch(name) and isinstance(row, dict)]
+                if not rows:
+                    quota_lines.append(tint(f"A{index:02d}  暂无额度窗口", 90))
+                for name, row in rows:
+                    value = row.get("remaining_percent")
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
+                        value = None
+                    color = 90 if stale or value is None else 92 if value > 50 else 93 if value > 20 else 91
+                    size = 24 if width >= 100 else 16
+                    filled = int(size * value / 100 + .5) if value is not None else 0
+                    bar = tint("█" * filled, color) + tint("░" * (size - filled), 90)
+                    percent = f"{value:5.1f}%" if value is not None else "  未知"
+                    quota_lines.append(cell(f"A{index:02d} {label(name)}", 15) + " " + bar + " " +
+                                       tint(percent, color) + " " + tint(state + " " + reset_label(row.get("resets_at")), 37))
+                if panel == "quota":
+                    quota_lines.append("")
+            limit = 4 if panel == "overview" else len(quota_lines)
+            lines.extend(quota_lines[:limit])
+            if len(quota_lines) > limit:
+                lines.append(tint(f"另 {len(quota_lines) - limit} 条，Tab 查看账号额度", 90))
+        lines.append("")
+    if panel != "quota" and window:
+        models = window.get("models")
+        rows = sorted(models or [], key=lambda row: (-(row.get("estimated_cost_usd_high") or 0), -(row.get("total_tokens") or 0), row.get("model", "")))
+        size = 3 if panel == "overview" else 5
+        pages = max(1, math.ceil(len(rows) / size))
+        page %= pages
+        lines.append(tint(f"── 模型 / {selected}", 96) + tint(f"  {len(rows)} 个 · 第 {page + 1}/{pages} 页 · USD 降序", 90))
+        if models is None:
+            lines.append(tint("接口缺少模型明细，请更新 observer", 93))
+        elif not rows:
+            lines.append(tint("选定期间暂无已采集调用", 90))
+        else:
+            name_width = 30 if width >= 100 else 24
+            lines.append(tint(f"{cell('模型', name_width)} {'请求':>5} {'Tokens':>11} {'缓存':>5} 估算 USD", 90))
+            for index, row in enumerate(rows[page * size:(page + 1) * size], page * size):
+                lines.append(tint(cell(row.get("model", ""), name_width), (96, 92, 95, 93)[index % 4]) + " " +
+                             cell(compact(row.get("requests")), 7).strip().rjust(7) + " " + cell(compact(row.get("total_tokens")), 11).strip().rjust(11) + " " +
+                             tint(cell(cache_label(row), 7).strip().rjust(7), 92) + " " + tint(cost(row), 93))
+        if panel == "models":
+            total = window["totals"]
+            lines.extend(["", tint(f"输入 {compact(total.get('input_tokens'))}  输出 {compact(total.get('output_tokens'))}  "
+                                   f"缓存读 {compact(total.get('cache_read_tokens'))}  写 {compact(total.get('cache_write_tokens'))}", 37),
+                          tint(f"计价覆盖 {coverage(total)} · * 仅含已计价费用", 90),
+                          tint(f"采集至 {beijing(usage.get('last_collected_at'), True)} 北京 · {cell(usage.get('collector_status', '未知'), 20).strip()} · "
+                               f"拒收 {number(usage.get('rejected_events'))}", 90)])
+    return lines
+
+
 def connection_form(proxy, base, key_env):
     port, host = '7890', '127.0.0.1'
     if proxy:
@@ -723,7 +839,7 @@ def main():
         key = saved["api_key"] if saved else connection_key if connection_key is not None else read_key(args.key_env)
         connection_key = None
         offer_save = sys.stdout.isatty() and not saved and not args.tui
-        refresh, selected, page, offset, notice = True, "1h", 0, 0, ''
+        refresh, selected, page, offset, notice, panel = True, "1h", 0, 0, '', 'overview'
         while True:
             if refresh:
                 if terminal:
@@ -737,11 +853,14 @@ def main():
                     except RuntimeError as error:
                         errors[view] = str(error)
             failed = bool(errors)
+            if args.tui:
+                lines = dashboard_lines(results, errors, selected, page, panel, terminal.size()[0])
+                failed = bool(errors)
             output = io.StringIO() if args.tui else sys.stdout
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output if args.tui else sys.stderr):
                 if not args.tui:
                     print("CPA 只读看板 | VPN 代理")
-                for view in views:
+                for view in ([] if args.tui else views):
                     try:
                         if view in errors:
                             raise RuntimeError(errors[view])
@@ -766,12 +885,13 @@ def main():
                     print(f"已保存：{config_path()}")
             if not args.tui:
                 break
-            lines = output.getvalue().splitlines()
             capacity = terminal.size()[1]
             limit = max(0, len(lines) - capacity)
             offset = min(offset, limit)
-            terminal.draw(f'CPA / 用量与额度 [{offset + 1}/{max(1, len(lines))}]', lines[offset:offset + capacity],
-                          '1-4 时段  N/P 翻页  ↑↓ 滚动  R/Enter 刷新  Q 退出', notice=notice)
+            color_state = '彩色' if terminal.colors else '单色(C开启)'
+            status = '部分查询失败' if failed else '只读 · ' + color_state
+            terminal.draw('CPA  用量看板 · ' + status, lines[offset:offset + capacity],
+                          'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出', notice=notice)
             action = terminal.key()
             if action in ('q', 'Q', 'escape'):
                 break
@@ -781,9 +901,12 @@ def main():
                 selected, page = ("1h", "7d", "30d", "all")[int(action) - 1], 0
             elif action in ("n", "p"):
                 page += 1 if action == "n" else -1
-            elif action in ('left', 'right'):
-                windows = ('1h', '7d', '30d', 'all')
-                selected, page = windows[(windows.index(selected) + (1 if action == 'right' else -1)) % 4], 0
+            elif action in ('left', 'right', 'tab', 'backtab'):
+                panels = ('overview', 'models', 'quota')
+                panel = panels[(panels.index(panel) + (1 if action in ('right', 'tab') else -1)) % 3]
+                offset, page = 0, 0
+            elif action == 'c':
+                terminal.colors = not terminal.colors and terminal.curses.has_colors()
             elif action == 'up':
                 offset = max(0, offset - 1)
             elif action == 'down':

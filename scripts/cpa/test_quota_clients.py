@@ -36,6 +36,16 @@ def overview():
     return result
 
 
+def quota():
+    now = CLIENT['dt'].datetime.now(CLIENT['dt'].timezone.utc)
+    resets = (now + CLIENT['dt'].timedelta(hours=3)).isoformat()
+    return {'scope': 'shared_pool', 'checked_at': now.isoformat(), 'accounts': [
+        {'id': 'account-' + f'{index:012x}', 'enabled': True, 'stale': index == 3,
+         'windows': {name: {'remaining_percent': value, 'resets_at': resets}
+                     for name, value in zip(('five_hour', 'seven_day'), values)}}
+        for index, values in enumerate(((82.4, 46.0), (12.5, 0), (65, None)), 1)]}
+
+
 class RejectTunnel(socketserver.BaseRequestHandler):
     def handle(self):
         self.request.settimeout(3)
@@ -126,6 +136,7 @@ class PythonClientTests(unittest.TestCase):
         output.isatty = lambda: True
 
         class SyntheticTerminal:
+            colors = True
             def __enter__(self):
                 return self
 
@@ -154,16 +165,16 @@ class PythonClientTests(unittest.TestCase):
             calls.append(path)
             return overview() if scope == "own_key" else {"scope": "shared_pool", "accounts": []}
 
-        render = CLIENT["render_overview"]
+        render = CLIENT["dashboard_lines"]
 
-        def observed_render(data, selected, page, paged):
+        def observed_render(results, errors, selected, page, panel, width):
             selections.append((selected, page))
-            render(data, selected, page, paged)
+            return render(results, errors, selected, page, panel, width)
 
         with patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), patch("sys.argv", ["quota"]), \
                 patch.dict(CLIENT, {"TerminalUI": SyntheticTerminal, "connection_form": connection, "fetch": fetch,
                                    "config_path": lambda: ROOT / 'fixtures' / 'absent-profile.json',
-                                                                        "render_overview": observed_render}), \
+                                                                        "dashboard_lines": observed_render}), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             CLIENT["main"]()
         self.assertEqual(events, ['setup', 'request', 'request', 'request', 'request'])
