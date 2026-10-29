@@ -1,36 +1,188 @@
-﻿# Public bootstrap only. The client download and all API calls require a proxy.
+# Public bootstrap only. The client download and all API calls require a proxy.
+function Format-CpaConsoleText([string]$Text, [int]$Width) {
+    $Text = [regex]::Replace($Text, '\x1b\[[0-9;]*m', '')
+    $Text = [regex]::Replace($Text, '[\p{Cc}\p{Cf}]', ' ')
+    $result = ''; $used = 0
+    foreach ($character in $Text.ToCharArray()) {
+        $step = if ([int]$character -ge 0x2e80) { 2 } else { 1 }
+        if ($used + $step -gt $Width) { break }
+        $result += $character; $used += $step
+    }
+    return $result + (' ' * [Math]::Max(0, $Width - $used))
+}
+
+function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer, [int]$Selected = -1, [string]$Notice = '') {
+    $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
+    $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+    [Console]::CursorVisible = $false
+    for ($row = 0; $row -lt $height; $row++) {
+        if ($row -ge [Console]::BufferHeight) { return }
+        try { [Console]::SetCursorPosition(0, $row) }
+        catch { if ($_.Exception.InnerException -is [ArgumentOutOfRangeException]) { return }; throw }
+        [Console]::ForegroundColor = 'Gray'; [Console]::BackgroundColor = 'Black'
+        $text = ''
+        if ($row -eq 0) { $text = ' ' + $Title; [Console]::ForegroundColor = 'White' }
+        elseif ($row -eq 1) { $text = '-' * $width }
+        elseif ($row -eq $height - 2) { $text = $Notice; [Console]::ForegroundColor = 'Yellow' }
+        elseif ($row -eq $height - 1) { $text = $Footer; [Console]::ForegroundColor = 'DarkGray' }
+        elseif ($row - 2 -lt $Lines.Count) {
+            $text = $Lines[$row - 2]
+            $color = [regex]::Match($text, '\x1b\[(32|33|31|90)m')
+            if ($color.Success) { [Console]::ForegroundColor = @{'32'='Green'; '33'='Yellow'; '31'='Red'; '90'='DarkGray'}[$color.Groups[1].Value] }
+            if ($row - 2 -eq $Selected) { [Console]::BackgroundColor = 'DarkCyan'; [Console]::ForegroundColor = 'White' }
+        }
+        $liveWidth = [Math]::Max(1, [Math]::Min($width, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1))
+        [Console]::Write((Format-CpaConsoleText $text $liveWidth))
+    }
+}
+
+function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
+    if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        throw 'Run this tool in an interactive terminal.'
+    }
+    $foreground = [Console]::ForegroundColor; $background = [Console]::BackgroundColor
+    $visible = [Console]::CursorVisible; $controlC = [Console]::TreatControlCAsInput
+    $encoding = [Console]::OutputEncoding
+    $values = @($Fields | ForEach-Object { $_.Value })
+    $positions = @($values | ForEach-Object { ([string]$_).Length })
+    $replace = @($Fields | ForEach-Object { $true })
+    $selected = $Initial; $notice = ''
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        [Console]::TreatControlCAsInput = $true
+        [Console]::Clear()
+        while ($true) {
+            $lines = @()
+            $available = [Math]::Max(1, [Console]::WindowWidth - 26)
+            for ($i = 0; $i -lt $Fields.Count; $i++) {
+                $field = $Fields[$i]
+                $text = [string]$values[$i]
+                if ($field.Secret) { $text = '*' * $text.Length }
+                if ($field.Toggle) { $text = if ($values[$i]) { '[x]' } else { '[ ]' } }
+                $start = if ($i -eq $selected -and -not $field.Toggle) { [Math]::Max(0, $positions[$i] - $available + 1) } else { 0 }
+                $text = $text.Substring([Math]::Min($start, $text.Length))
+                $lines += ('  ' + (Format-CpaConsoleText $field.Label 21) + ' ' + $text)
+            }
+            foreach ($action in $Actions) { $lines += '  ' + $action }
+            Show-CpaConsoleFrame $Title $lines 'Tab / arrows: move   Enter: select   Space: toggle   Esc: exit' $selected $notice
+            if ([Console]::WindowWidth -lt 52 -or [Console]::WindowHeight -lt $lines.Count + 4) {
+                $notice = 'Enlarge the terminal to continue. Esc exits.'
+            } else {
+                if ($selected -lt $Fields.Count -and -not $Fields[$selected].Toggle) {
+                    $offset = [Math]::Max(0, $positions[$selected] - $available + 1)
+                    [Console]::SetCursorPosition([Math]::Min([Console]::WindowWidth - 2, 24 + $positions[$selected] - $offset), $selected + 2)
+                    [Console]::CursorVisible = $true
+                }
+            }
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
+                throw [OperationCanceledException]::new('Cancelled.')
+            }
+            if ([Console]::WindowWidth -lt 52 -or [Console]::WindowHeight -lt $lines.Count + 4) { continue }
+            $count = $Fields.Count + $Actions.Count
+            if ($key.Key -in @('Tab', 'DownArrow', 'UpArrow')) {
+                $step = if ($key.Key -eq 'UpArrow' -or ($key.Key -eq 'Tab' -and ($key.Modifiers -band [ConsoleModifiers]::Shift))) { -1 } else { 1 }
+                $selected = ($selected + $step + $count) % $count
+                continue
+            }
+            if ($key.Key -eq 'Enter') {
+                if ($selected -ge $Fields.Count) {
+                    $action = $selected - $Fields.Count
+                    if ($action -ne 0) { return [pscustomobject]@{Action=$action; Values=$values} }
+                    $valid = $true
+                    for ($i = 0; $i -lt $Fields.Count; $i++) {
+                        try { if ($Fields[$i].Validate) { $values[$i] = & $Fields[$i].Validate $values[$i] } }
+                        catch { $selected = $i; $notice = $_.Exception.Message; $valid = $false; break }
+                    }
+                    if ($valid) { return [pscustomobject]@{Action=$action; Values=$values} }
+                } else {
+                    try {
+                        if ($Fields[$selected].Validate) { $values[$selected] = & $Fields[$selected].Validate $values[$selected] }
+                        $positions[$selected] = ([string]$values[$selected]).Length
+                        $selected = ($selected + 1) % $count; $notice = ''
+                    } catch { $notice = $_.Exception.Message }
+                }
+                continue
+            }
+            if ($selected -ge $Fields.Count) { continue }
+            $field = $Fields[$selected]
+            if ($field.Toggle) {
+                if ($key.Key -in @('Spacebar', 'LeftArrow', 'RightArrow')) { $values[$selected] = -not $values[$selected] }
+                continue
+            }
+            $value = [string]$values[$selected]; $position = $positions[$selected]
+            if ($key.Modifiers -band [ConsoleModifiers]::Control) {
+                if ($key.Key -eq 'U') { $values[$selected] = ''; $positions[$selected] = 0 }
+                elseif ($key.Key -eq 'A') { $replace[$selected] = $true }
+                continue
+            }
+            switch ([string]$key.Key) {
+                'LeftArrow' { $positions[$selected] = [Math]::Max(0, $position - 1); $replace[$selected] = $false }
+                'RightArrow' { $positions[$selected] = [Math]::Min($value.Length, $position + 1); $replace[$selected] = $false }
+                'Home' { $positions[$selected] = 0; $replace[$selected] = $false }
+                'End' { $positions[$selected] = $value.Length; $replace[$selected] = $false }
+                'Backspace' {
+                    if ($replace[$selected]) { $values[$selected] = ''; $positions[$selected] = 0 }
+                    elseif ($position -gt 0) { $values[$selected] = $value.Remove($position - 1, 1); $positions[$selected]-- }
+                    $replace[$selected] = $false
+                }
+                'Delete' {
+                    if ($position -lt $value.Length) { $values[$selected] = $value.Remove($position, 1) }
+                    $replace[$selected] = $false
+                }
+                default {
+                    if (-not [char]::IsControl($key.KeyChar)) {
+                        if ($replace[$selected]) { $value = ''; $position = 0 }
+                        $limit = if ($field.MaxLength) { $field.MaxLength } else { 2048 }
+                        if ($value.Length -lt $limit) {
+                            $values[$selected] = $value.Insert($position, [string]$key.KeyChar)
+                            $positions[$selected] = $position + 1
+                        }
+                        $replace[$selected] = $false; $notice = ''
+                    }
+                }
+            }
+        }
+    } finally {
+        [Console]::ForegroundColor = $foreground; [Console]::BackgroundColor = $background
+        [Console]::CursorVisible = $visible; [Console]::TreatControlCAsInput = $controlC
+        [Console]::OutputEncoding = $encoding
+    }
+}
+
 function Read-CpaProxyPort {
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this launcher in an interactive terminal.'
     }
-    while ($true) {
-        $port = Read-Host 'Local HTTP/mixed proxy port (e.g. 7890)'
-        if ($null -eq $port) { throw 'Input cancelled.' }
-        if ($port -cmatch '^[1-9][0-9]{0,4}$' -and [int]$port -le 65535) { return [int]$port }
-        Write-Host 'Enter an integer from 1 to 65535.'
-    }
+    $form = Read-CpaConsoleForm 'CPA / VPN connection' @(@{Label='VPN proxy port'; Value='7890'; MaxLength=5; Validate={
+        param($value)
+        if ($value -cnotmatch '^[1-9][0-9]{0,4}$' -or [int]$value -gt 65535) { throw 'Enter a port from 1 to 65535.' }
+        return [int]$value
+    }})
+    if ($form.Action -ne 0) { throw [OperationCanceledException]::new('Cancelled.') }
+    return [int]$form.Values[0]
 }
 
 function Test-CpaPrivatePath([string]$Path, [bool]$Directory = $false) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer -ne $Directory) {
-        throw '配置路径必须是普通目录或文件，不能是链接。'
+        throw 'The configuration path must be a regular file or directory, not a link.'
     }
     if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
         $acl = Get-Acl -LiteralPath $Path
-        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw '配置不归当前用户所有。' }
+        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'The configuration must belong to the current user.' }
         foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
             if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -ne $sid.Value) {
-                throw '配置允许其他用户访问。'
+                throw 'Other users can access the configuration.'
             }
         }
     } else {
         $isMac = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
         $info = if ($isMac) { & stat -f '%u %Lp' $Path } else { & stat -c '%u %a' -- $Path }
-        if ($LASTEXITCODE -ne 0) { throw '无法核对配置权限。' }
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot verify configuration permissions.' }
         $parts = $info.Trim() -split ' '
-        if ($parts[0] -ne (& id -u) -or ([Convert]::ToInt32($parts[1], 8) -band 63)) { throw '配置需要当前用户独占权限。' }
+        if ($parts[0] -ne (& id -u) -or ([Convert]::ToInt32($parts[1], 8) -band 63)) { throw 'The configuration requires owner-only permissions.' }
     }
 }
 
@@ -40,19 +192,22 @@ function ConvertTo-CpaProxy([string]$Value) {
         $proxy.Host -notin @('127.0.0.1', '[::1]') -or $proxy.Port -le 0 -or
         $proxy.Authority -notmatch ':\d+$' -or $proxy.AbsolutePath -ne '/' -or
         $proxy.UserInfo -or $proxy.Query -or $proxy.Fragment -or $Value -match '\s') {
-        throw '必须用 -ProxyUrl 或 CPA_PROXY 指定本机 HTTP/mixed 代理，例如 http://127.0.0.1:7890；禁止直连。'
+        throw 'Use a loopback HTTP/mixed proxy such as http://127.0.0.1:7890. Direct access is disabled.'
     }
     return $proxy
 }
 
+function Get-CpaBootstrapConfigPath { return (Join-Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cpa') 'query.json') }
+
 function Read-CpaSavedProxy {
-    $path = Join-Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cpa') 'query.json'
+    $path = Get-CpaBootstrapConfigPath
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this launcher in an interactive terminal.'
     }
-    do { $choice = Read-Host '1 载入已有配置  2 重新输入' } while ($choice -notin @('1','2'))
-    if ($choice -eq '2') { return $null }
+    $selection = Read-CpaConsoleForm 'CPA / Saved connection' @() @('Load saved connection', 'Set up a connection', 'Exit')
+    if ($selection.Action -eq 2) { throw [OperationCanceledException]::new('Cancelled.') }
+    if ($selection.Action -eq 1) { return $null }
     try {
         Test-CpaPrivatePath (Split-Path $path) $true
         Test-CpaPrivatePath $path
@@ -60,12 +215,13 @@ function Read-CpaSavedProxy {
         $data = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
         if ($data.version -ne 1) { throw 'version' }
         return ([string](ConvertTo-CpaProxy $data.proxy_url))
-    } catch { Write-Host '已存配置无法读取、权限不安全或内容无效；请重新输入。'; return $null }
+    } catch { return $null }
 }
 
 function Start-CpaQuota {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
+    try {
     $proxy = Read-CpaSavedProxy
     $choice = '1'
     if (-not $proxy) {
@@ -73,14 +229,14 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/177b9b2cb2111a91fde2ba8ca11eed19856f61dd/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    if ($digest -cne '0e2ceb52a22b9329ddf0a14ca9168e5f5355686d81a13ca083962006c26a380d') {
+    if ($digest -cne '4e11117fdb3cf13a31addbdf4f4c7f247dc7f6f20be33e310dbae744329108fd') {
         throw 'Client SHA256 mismatch; nothing was executed.'
     }
     $source = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
@@ -89,6 +245,7 @@ function Start-CpaQuota {
         $env:CPA_QUERY_CHOICE = $choice
         & ([scriptblock]::Create($source)) -ProxyUrl $proxy -BaseUrl ''
     } finally { $env:CPA_QUERY_CHOICE = $previousChoice }
+    } catch [OperationCanceledException] { return }
 }
 
 Start-CpaQuota
