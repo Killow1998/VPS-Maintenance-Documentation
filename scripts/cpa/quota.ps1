@@ -83,6 +83,17 @@ function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer,
     }
 }
 
+function Read-CpaConsoleKey {
+    # ReadKey blocks on input; observe window changes before waiting for a key.
+    while ($true) {
+        $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
+        $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+        if ($script:CpaFrameSize -ne "$width,$height") { return $null }
+        if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this tool in an interactive terminal.'
@@ -122,7 +133,8 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
                     [Console]::CursorVisible = $true
                 }
             }
-            $key = [Console]::ReadKey($true)
+            $key = Read-CpaConsoleKey
+            if ($null -eq $key) { continue }
             if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
                 throw [OperationCanceledException]::new('Cancelled.')
             }
@@ -703,7 +715,8 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
 
 function Read-CpaDashboardAction {
     while ($true) {
-        $key = [Console]::ReadKey($true)
+        $key = Read-CpaConsoleKey
+        if ($null -eq $key) { return 'resize' }
         if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) { return 'q' }
         switch ([string]$key.Key) {
             'Enter' { return 'r' }
