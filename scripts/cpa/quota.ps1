@@ -83,6 +83,19 @@ function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer,
     }
 }
 
+function Get-CpaConsoleSize {
+    return "{0},{1},{2},{3}" -f [Console]::WindowWidth, [Console]::WindowHeight, [Console]::BufferWidth, [Console]::BufferHeight
+}
+
+function Read-CpaConsoleKey([string]$Size) {
+    # ReadKey blocks on input; observe window changes before waiting for a key.
+    while ($true) {
+        if ((Get-CpaConsoleSize) -ne $Size) { return $null }
+        if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this tool in an interactive terminal.'
@@ -100,6 +113,7 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
         [Console]::Clear()
         $script:CpaFrameCache = @{}
         while ($true) {
+            $layoutSize = Get-CpaConsoleSize
             $lines = @()
             $available = [Math]::Max(1, [Console]::WindowWidth - 26)
             for ($i = 0; $i -lt $Fields.Count; $i++) {
@@ -122,7 +136,8 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
                     [Console]::CursorVisible = $true
                 }
             }
-            $key = [Console]::ReadKey($true)
+            $key = Read-CpaConsoleKey $layoutSize
+            if ($null -eq $key) { continue }
             if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
                 throw [OperationCanceledException]::new('Cancelled.')
             }
@@ -701,9 +716,10 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
     return $lines.ToArray()
 }
 
-function Read-CpaDashboardAction {
+function Read-CpaDashboardAction([string]$Size) {
     while ($true) {
-        $key = [Console]::ReadKey($true)
+        $key = Read-CpaConsoleKey $Size
+        if ($null -eq $key) { return 'resize' }
         if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) { return 'q' }
         switch ([string]$key.Key) {
             'Enter' { return 'r' }
@@ -827,6 +843,7 @@ function Invoke-CpaReport {
                 }
             }
             if ($useTui) {
+                $layoutSize = Get-CpaConsoleSize
                 $lines = @(Get-CpaDashboardLines $results $failures $views $selected $page $panel ([Console]::WindowWidth - 1))
             } else {
                 Write-Host 'CPA 只读看板 | VPN 代理'
@@ -866,7 +883,7 @@ function Invoke-CpaReport {
             $colorState = if ($script:CpaColors) { '彩色' } else { '单色(C开启)' }
             $status = if ($failures.Count) { '部分查询失败' } else { '只读 · ' + $colorState }
             Show-CpaConsoleFrame ('CPA  用量看板 · ' + $status) @($lines | Select-Object -Skip $offset -First $capacity) 'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出' -Notice $notice
-            $action = Read-CpaDashboardAction
+            $action = Read-CpaDashboardAction $layoutSize
             $refresh = $action -in @('', 'r')
             if ($action -in @('1', '2', '3', '4')) { $selected = @('1h', '7d', '30d', 'all')[[int]$action - 1]; $page = 0 }
             elseif ($action -eq 'n') { $page++ } elseif ($action -eq 'p') { $page-- }

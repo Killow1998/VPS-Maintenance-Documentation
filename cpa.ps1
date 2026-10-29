@@ -67,6 +67,19 @@ function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer,
     }
 }
 
+function Get-CpaConsoleSize {
+    return "{0},{1},{2},{3}" -f [Console]::WindowWidth, [Console]::WindowHeight, [Console]::BufferWidth, [Console]::BufferHeight
+}
+
+function Read-CpaConsoleKey([string]$Size) {
+    # ReadKey blocks on input; observe window changes before waiting for a key.
+    while ($true) {
+        if ((Get-CpaConsoleSize) -ne $Size) { return $null }
+        if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw 'Run this tool in an interactive terminal.'
@@ -84,6 +97,7 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
         [Console]::Clear()
         $script:CpaFrameCache = @{}
         while ($true) {
+            $layoutSize = Get-CpaConsoleSize
             $lines = @()
             $available = [Math]::Max(1, [Console]::WindowWidth - 26)
             for ($i = 0; $i -lt $Fields.Count; $i++) {
@@ -106,7 +120,8 @@ function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actio
                     [Console]::CursorVisible = $true
                 }
             }
-            $key = [Console]::ReadKey($true)
+            $key = Read-CpaConsoleKey $layoutSize
+            if ($null -eq $key) { continue }
             if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
                 throw [OperationCanceledException]::new('Cancelled.')
             }
@@ -262,14 +277,14 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/829cb0dfd634f177a7a553e9eaf7a6b477c4a9bc/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    if ($digest -cne '35944259dfa571c44d486dff611dc532ed0d477b2a229b81ba7f61d9aad3f87d') {
+    if ($digest -cne 'f01c1b1d1a0584f3684db1f166392ca7440ac64a46adc986a7308d2255987f22') {
         throw 'Client SHA256 mismatch; nothing was executed.'
     }
     $source = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)

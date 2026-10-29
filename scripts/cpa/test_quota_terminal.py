@@ -145,8 +145,13 @@ function Invoke-RestMethod {
 }
 $script:originalLines=${function:Get-CpaDashboardLines}
 function Get-CpaDashboardLines($Results,$Failures,$Views,$Selected,$Page,$Panel,$Width) {
-    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}`n")
+    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}:${Panel}:${Width}`n")
     & $script:originalLines $Results $Failures $Views $Selected $Page $Panel $Width
+}
+$script:originalFrame=${function:Show-CpaConsoleFrame}
+function Show-CpaConsoleFrame($Title,$Lines,$Footer,$Selected=-1,$Notice='') {
+    & $script:originalFrame $Title $Lines $Footer $Selected $Notice
+    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"frame:$([Console]::WindowWidth):$([Console]::WindowHeight)`n")
 }
 Invoke-CpaReport
 '''
@@ -163,6 +168,12 @@ config_path = lambda: Path(os.environ['CPA_TEST_HOME']) / '.cpa' / 'query.json'
 def event(value):
     with open(os.environ['CPA_TEST_EVENTS'], 'a', encoding='utf-8') as output:
         output.write(value + '\\n')
+original_draw = TerminalUI.draw
+def observed_draw(self, *args, **kwargs):
+    original_draw(self, *args, **kwargs)
+    height, width = self.screen.getmaxyx()
+    event(f'frame:{width}:{height}')
+TerminalUI.draw = observed_draw
 def fetch(base, key, path, scope, opener):
     assert key == 'synthetic-ui-key'
     assert base == 'https://cpa.example.invalid'
@@ -171,7 +182,7 @@ def fetch(base, key, path, scope, opener):
     return json.loads(path.read_text())
 original_render = dashboard_lines
 def dashboard_lines(results, errors, selected, page, panel, width):
-    event(f'view:{selected}:{page}')
+    event(f'view:{selected}:{page}:{panel}:{width}')
     return original_render(results, errors, selected, page, panel, width)
 main()
 '''
@@ -189,9 +200,10 @@ main()
             if not terminal.alive():
                 if os.name == 'nt':
                     terminal.reader.join(timeout=.5)
-                    terminal.pump()
-                    if condition():
-                        return
+                terminal.pump()
+                # Exit may occur between the condition check and alive().
+                if condition():
+                    return
                 self.fail('Terminal exited early: ' + terminal.output[-2500:])
             time.sleep(.03)
         self.fail('Terminal timed out: ' + terminal.output[-2500:])
@@ -200,7 +212,8 @@ main()
         home = Path(directory)
         env = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
         env.update(HOME=str(home), TERM='xterm-256color', CPA_TEST_HOME=str(home), CPA_TEST_LOAD=str(int(loaded)),
-                   CPA_TEST_SOURCE=str(ROOT.parents[1] / 'cpa.ps1'), CPA_TEST_CLIENT=str(ROOT / 'quota.ps1'))
+                   CPA_TEST_SOURCE=str(ROOT.parents[1] / 'cpa.ps1'), CPA_TEST_CLIENT=str(ROOT / 'quota.ps1'),
+                   CPA_TEST_EVENTS=str(home / 'events'))
         if os.name == 'nt':
             code = r'''
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
@@ -218,6 +231,11 @@ try {$digest=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-',''
 $launcher=[regex]::Replace($launcher,"'[0-9a-f]{64}'",("'"+$digest+"'"))
 $hooks=@'
 function Get-CpaBootstrapConfigPath { return (Join-Path (Join-Path $env:CPA_TEST_HOME '.cpa') 'query.json') }
+$script:originalBootstrapFrame=${function:Show-CpaConsoleFrame}
+function Show-CpaConsoleFrame($Title,$Lines,$Footer,$Selected=-1,$Notice='') {
+    & $script:originalBootstrapFrame $Title $Lines $Footer $Selected $Notice
+    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"frame:$([Console]::WindowWidth):$([Console]::WindowHeight)`n")
+}
 function Invoke-WebRequest {
     param($Uri,$Proxy,[switch]$UseBasicParsing,$MaximumRedirection,$TimeoutSec)
     if($Proxy.TrimEnd('/') -ne 'http://127.0.0.1:7897' -or $MaximumRedirection -ne 0){throw 'unsafe download'}
@@ -238,6 +256,10 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                 path.chmod(0o600)
             payload = '[[ "${CPA_PROXY%/}" == http://127.0.0.1:7897 && -z "$CPA_BASEURL" ]] || exit 98\nprintf "BOOTSTRAP_STARTED\\n"'
             source = (ROOT.parents[1] / 'cpa.sh').read_text(encoding='utf-8').rsplit('\nmain\n', 1)[0]
+            source = source.replace('        self.screen.refresh()\n',
+                                    '        self.screen.refresh()\n'
+                                    '        with open(os.environ["CPA_TEST_EVENTS"], "a") as log:\n'
+                                    '            log.write(f"frame:{width}:{height}\\n")\n', 1)
             source = re.sub("'[0-9a-f]{64}'", "'" + hashlib.sha256(payload.encode()).hexdigest() + "'", source)
             source += '\ncurl() { printf "%s" "$CPA_TEST_PAYLOAD"; }\nmain\n'
             env['CPA_TEST_PAYLOAD'] = payload
@@ -251,6 +273,9 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                     terminal = self.start_bootstrap(directory, shell, loaded)
                     try:
                         self.wait_for(terminal, lambda: ('Load saved connection' if loaded else 'VPN proxy port') in terminal.output)
+                        events = Path(directory) / 'events'
+                        terminal.resize(28, 90)
+                        self.wait_for(terminal, lambda: events.exists() and 'frame:90:28' in events.read_text())
                         terminal.send('\r' if loaded else '7897\t\r')
                         self.wait_for(terminal, lambda: 'BOOTSTRAP_STARTED' in terminal.output)
                         self.wait_for(terminal, lambda: not terminal.alive())
@@ -268,6 +293,11 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                     try:
                         self.wait_for(terminal, lambda: 'API Key' in terminal.output)
                         self.assertIn('连接设置', terminal.output)
+                        terminal.resize(12, 40)
+                        self.wait_for(terminal, lambda: 'frame:40:12' in history())
+                        terminal.resize(rows + 2, columns + 2)
+                        self.wait_for(terminal, lambda: f'frame:{columns + 2}:{rows + 2}' in history())
+                        self.assertEqual(history().count('request'), 0)
                         terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t \t\r')
                         self.wait_for(terminal, lambda: history().count('view:') >= 1)
                         self.assertEqual(history().count('request'), 2)
@@ -276,12 +306,16 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                             terminal.send(key)
                             self.wait_for(terminal, lambda: history().count('view:') > before)
                         self.assertEqual(history().count('request'), 2)
-                        for key in ('2', 'n', 'p', '4'):
+                        for key in ('2', 'n', 'p', '3', '4'):
                             before = history().count('view:')
                             terminal.send(key)
                             self.wait_for(terminal, lambda: history().count('view:') > before)
                         self.assertEqual(history().count('request'), 2)
+                        before = history().count('view:')
                         terminal.resize(28, 90)
+                        self.wait_for(terminal, lambda: history().count('view:') > before)
+                        self.assertIn('view:all:0:overview:89', history())
+                        self.assertEqual(history().count('request'), 2)
                         terminal.send('r')
                         self.wait_for(terminal, lambda: history().count('request') == 4)
                         terminal.send('q')
@@ -289,7 +323,8 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         self.assertNotIn(SECRET, terminal.output)
                         for codes in ('32|92|38;5;(?:2|10)', '33|93|38;5;(?:3|11|14)', '31|91|38;5;(?:1|9|12)'):
                             self.assertRegex(terminal.output, r'\x1b\[(?:' + codes + r')m')
-                        for view in ('view:1h:0', 'view:7d:0', 'view:7d:1', 'view:all:0'):
+                        for view in ('view:1h:0:overview:', 'view:1h:0:models:', 'view:1h:0:quota:',
+                                     'view:7d:0', 'view:7d:1', 'view:30d:0', 'view:all:0'):
                             self.assertIn(view, history())
                         saved = json.loads((Path(directory) / '.cpa/query.json').read_text(encoding='utf-8'))
                         self.assertEqual(saved['api_key'], SECRET)
@@ -329,7 +364,8 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                     self.wait_for(terminal, lambda: 'API Key' in terminal.output)
                     terminal.send('\x1b')
                     self.wait_for(terminal, lambda: not terminal.alive())
-                    self.assertFalse((Path(directory) / 'events').exists())
+                    events = Path(directory) / 'events'
+                    self.assertNotIn('request', events.read_text() if events.exists() else '')
                     self.assertFalse((Path(directory) / '.cpa/query.json').exists())
                 finally:
                     terminal.close()
