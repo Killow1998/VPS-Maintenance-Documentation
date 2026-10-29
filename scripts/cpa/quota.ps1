@@ -15,6 +15,157 @@ param(
 $explicitTui = $PSBoundParameters.ContainsKey('Tui')
 $noArguments = $PSBoundParameters.Count -eq 0
 
+function Format-CpaConsoleText([string]$Text, [int]$Width) {
+    $Text = [regex]::Replace($Text, '\x1b\[[0-9;]*m', '')
+    $Text = [regex]::Replace($Text, '[\p{Cc}\p{Cf}]', ' ')
+    $result = ''; $used = 0
+    foreach ($character in $Text.ToCharArray()) {
+        $step = if ([int]$character -ge 0x2e80) { 2 } else { 1 }
+        if ($used + $step -gt $Width) { break }
+        $result += $character; $used += $step
+    }
+    return $result + (' ' * [Math]::Max(0, $Width - $used))
+}
+
+function Show-CpaConsoleFrame([string]$Title, [string[]]$Lines, [string]$Footer, [int]$Selected = -1, [string]$Notice = '') {
+    $width = [Math]::Max(1, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1)
+    $height = [Math]::Max(1, [Math]::Min([Console]::WindowHeight, [Console]::BufferHeight))
+    [Console]::CursorVisible = $false
+    for ($row = 0; $row -lt $height; $row++) {
+        if ($row -ge [Console]::BufferHeight) { return }
+        try { [Console]::SetCursorPosition(0, $row) }
+        catch { if ($_.Exception.InnerException -is [ArgumentOutOfRangeException]) { return }; throw }
+        [Console]::ForegroundColor = 'Gray'; [Console]::BackgroundColor = 'Black'
+        $text = ''
+        if ($row -eq 0) { $text = ' ' + $Title; [Console]::ForegroundColor = 'White' }
+        elseif ($row -eq 1) { $text = '-' * $width }
+        elseif ($row -eq $height - 2) { $text = $Notice; [Console]::ForegroundColor = 'Yellow' }
+        elseif ($row -eq $height - 1) { $text = $Footer; [Console]::ForegroundColor = 'DarkGray' }
+        elseif ($row - 2 -lt $Lines.Count) {
+            $text = $Lines[$row - 2]
+            $color = [regex]::Match($text, '\x1b\[(32|33|31|90)m')
+            if ($color.Success) { [Console]::ForegroundColor = @{'32'='Green'; '33'='Yellow'; '31'='Red'; '90'='DarkGray'}[$color.Groups[1].Value] }
+            if ($row - 2 -eq $Selected) { [Console]::BackgroundColor = 'DarkCyan'; [Console]::ForegroundColor = 'White' }
+        }
+        $liveWidth = [Math]::Max(1, [Math]::Min($width, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1))
+        [Console]::Write((Format-CpaConsoleText $text $liveWidth))
+    }
+}
+
+function Read-CpaConsoleForm([string]$Title, [object[]]$Fields, [string[]]$Actions = @('Continue', 'Cancel'), [int]$Initial = 0) {
+    if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        throw 'Run this tool in an interactive terminal.'
+    }
+    $foreground = [Console]::ForegroundColor; $background = [Console]::BackgroundColor
+    $visible = [Console]::CursorVisible; $controlC = [Console]::TreatControlCAsInput
+    $encoding = [Console]::OutputEncoding
+    $values = @($Fields | ForEach-Object { $_.Value })
+    $positions = @($values | ForEach-Object { ([string]$_).Length })
+    $replace = @($Fields | ForEach-Object { $true })
+    $selected = $Initial; $notice = ''
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        [Console]::TreatControlCAsInput = $true
+        [Console]::Clear()
+        while ($true) {
+            $lines = @()
+            $available = [Math]::Max(1, [Console]::WindowWidth - 26)
+            for ($i = 0; $i -lt $Fields.Count; $i++) {
+                $field = $Fields[$i]
+                $text = [string]$values[$i]
+                if ($field.Secret) { $text = '*' * $text.Length }
+                if ($field.Toggle) { $text = if ($values[$i]) { '[x]' } else { '[ ]' } }
+                $start = if ($i -eq $selected -and -not $field.Toggle) { [Math]::Max(0, $positions[$i] - $available + 1) } else { 0 }
+                $text = $text.Substring([Math]::Min($start, $text.Length))
+                $lines += ('  ' + (Format-CpaConsoleText $field.Label 21) + ' ' + $text)
+            }
+            foreach ($action in $Actions) { $lines += '  ' + $action }
+            Show-CpaConsoleFrame $Title $lines 'Tab / arrows: move   Enter: select   Space: toggle   Esc: exit' $selected $notice
+            if ([Console]::WindowWidth -lt 52 -or [Console]::WindowHeight -lt $lines.Count + 4) {
+                $notice = 'Enlarge the terminal to continue. Esc exits.'
+            } else {
+                if ($selected -lt $Fields.Count -and -not $Fields[$selected].Toggle) {
+                    $offset = [Math]::Max(0, $positions[$selected] - $available + 1)
+                    [Console]::SetCursorPosition([Math]::Min([Console]::WindowWidth - 2, 24 + $positions[$selected] - $offset), $selected + 2)
+                    [Console]::CursorVisible = $true
+                }
+            }
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
+                throw [OperationCanceledException]::new('Cancelled.')
+            }
+            if ([Console]::WindowWidth -lt 52 -or [Console]::WindowHeight -lt $lines.Count + 4) { continue }
+            $count = $Fields.Count + $Actions.Count
+            if ($key.Key -in @('Tab', 'DownArrow', 'UpArrow')) {
+                $step = if ($key.Key -eq 'UpArrow' -or ($key.Key -eq 'Tab' -and ($key.Modifiers -band [ConsoleModifiers]::Shift))) { -1 } else { 1 }
+                $selected = ($selected + $step + $count) % $count
+                continue
+            }
+            if ($key.Key -eq 'Enter') {
+                if ($selected -ge $Fields.Count) {
+                    $action = $selected - $Fields.Count
+                    if ($action -ne 0) { return [pscustomobject]@{Action=$action; Values=$values} }
+                    $valid = $true
+                    for ($i = 0; $i -lt $Fields.Count; $i++) {
+                        try { if ($Fields[$i].Validate) { $values[$i] = & $Fields[$i].Validate $values[$i] } }
+                        catch { $selected = $i; $notice = $_.Exception.Message; $valid = $false; break }
+                    }
+                    if ($valid) { return [pscustomobject]@{Action=$action; Values=$values} }
+                } else {
+                    try {
+                        if ($Fields[$selected].Validate) { $values[$selected] = & $Fields[$selected].Validate $values[$selected] }
+                        $positions[$selected] = ([string]$values[$selected]).Length
+                        $selected = ($selected + 1) % $count; $notice = ''
+                    } catch { $notice = $_.Exception.Message }
+                }
+                continue
+            }
+            if ($selected -ge $Fields.Count) { continue }
+            $field = $Fields[$selected]
+            if ($field.Toggle) {
+                if ($key.Key -in @('Spacebar', 'LeftArrow', 'RightArrow')) { $values[$selected] = -not $values[$selected] }
+                continue
+            }
+            $value = [string]$values[$selected]; $position = $positions[$selected]
+            if ($key.Modifiers -band [ConsoleModifiers]::Control) {
+                if ($key.Key -eq 'U') { $values[$selected] = ''; $positions[$selected] = 0 }
+                elseif ($key.Key -eq 'A') { $replace[$selected] = $true }
+                continue
+            }
+            switch ([string]$key.Key) {
+                'LeftArrow' { $positions[$selected] = [Math]::Max(0, $position - 1); $replace[$selected] = $false }
+                'RightArrow' { $positions[$selected] = [Math]::Min($value.Length, $position + 1); $replace[$selected] = $false }
+                'Home' { $positions[$selected] = 0; $replace[$selected] = $false }
+                'End' { $positions[$selected] = $value.Length; $replace[$selected] = $false }
+                'Backspace' {
+                    if ($replace[$selected]) { $values[$selected] = ''; $positions[$selected] = 0 }
+                    elseif ($position -gt 0) { $values[$selected] = $value.Remove($position - 1, 1); $positions[$selected]-- }
+                    $replace[$selected] = $false
+                }
+                'Delete' {
+                    if ($position -lt $value.Length) { $values[$selected] = $value.Remove($position, 1) }
+                    $replace[$selected] = $false
+                }
+                default {
+                    if (-not [char]::IsControl($key.KeyChar)) {
+                        if ($replace[$selected]) { $value = ''; $position = 0 }
+                        $limit = if ($field.MaxLength) { $field.MaxLength } else { 2048 }
+                        if ($value.Length -lt $limit) {
+                            $values[$selected] = $value.Insert($position, [string]$key.KeyChar)
+                            $positions[$selected] = $position + 1
+                        }
+                        $replace[$selected] = $false; $notice = ''
+                    }
+                }
+            }
+        }
+    } finally {
+        [Console]::ForegroundColor = $foreground; [Console]::BackgroundColor = $background
+        [Console]::CursorVisible = $visible; [Console]::TreatControlCAsInput = $controlC
+        [Console]::OutputEncoding = $encoding
+    }
+}
+
 function Test-CpaTerminal {
     return ($Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected -and
         -not [Console]::IsOutputRedirected)
@@ -391,6 +542,78 @@ function Get-CpaData($Base, $Headers, $Path, $Scope, $Proxy) {
     return $data
 }
 
+function Read-CpaConnection([string]$Proxy, [string]$Base, [string]$Key = '') {
+    $port = '7890'; $proxyHost = '127.0.0.1'
+    if ($Proxy) { $uri = ConvertTo-CpaProxy $Proxy; $port = [string]$uri.Port; $proxyHost = $uri.Host }
+    $fields = @(
+        @{Label='VPN 代理端口'; Value=$port; MaxLength=5; Validate={
+            param($value)
+            if ($value -cnotmatch '^[1-9][0-9]{0,4}$' -or [int]$value -gt 65535) { throw '代理端口必须为 1–65535。' }
+            return [string][int]$value
+        }},
+        @{Label='HTTPS Base URL'; Value=$Base; Validate={param($value) ConvertTo-CpaBase $value}},
+        @{Label='API Key'; Value=$Key; Secret=$true; MaxLength=1024; Validate={
+            param($value)
+            if ($value -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw '请输入有效的 API Key。' }
+            return $value
+        }},
+        @{Label='记住连接（含 Key）'; Value=$false; Toggle=$true}
+    )
+    $initial = if ($Proxy) { 1 } else { 0 }
+    $form = Read-CpaConsoleForm 'CPA / 连接设置' $fields @('连接', '退出') -Initial $initial
+    if ($form.Action -ne 0) { throw [OperationCanceledException]::new('Cancelled.') }
+    return [pscustomobject]@{Proxy=('http://' + $proxyHost + ':' + $form.Values[0]); Base=$form.Values[1]; Key=$form.Values[2]; Remember=[bool]$form.Values[3]}
+}
+
+function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [int]$Page) {
+    $messages = @(& {
+        foreach ($item in $Views) {
+            if ($Failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $Failures[$item]); continue }
+            try {
+                if ($item -eq 'usage') { Show-Usage $Results[$item] $Selected $Page $true } else { Show-Quota $Results[$item] }
+            } catch {
+                $Failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
+                Write-Host ("CPA ${item}：" + $Failures[$item])
+            }
+            Write-Host ''
+        }
+    } 6>&1)
+    $lines = [Collections.Generic.List[string]]::new(); $pending = ''
+    foreach ($message in $messages) {
+        $data = $message.MessageData
+        $color = @{'Green'=32; 'Yellow'=33; 'Red'=31; 'DarkGray'=90}[[string]$data.ForegroundColor]
+        if ($color) { $pending += "$([char]27)[$($color)m" }
+        $parts = ([string]$data.Message) -split "\r?\n"
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $pending += $parts[$i]
+            if ($i -lt $parts.Count - 1) { $lines.Add($pending); $pending = '' }
+        }
+        if (-not $data.NoNewLine) { $lines.Add($pending); $pending = '' }
+    }
+    if ($pending) { $lines.Add($pending) }
+    return $lines.ToArray()
+}
+
+function Read-CpaDashboardAction {
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) { return 'q' }
+        switch ([string]$key.Key) {
+            'Enter' { return 'r' }
+            'UpArrow' { return 'up' }
+            'DownArrow' { return 'down' }
+            'PageUp' { return 'pageup' }
+            'PageDown' { return 'pagedown' }
+            'LeftArrow' { return 'left' }
+            'RightArrow' { return 'right' }
+            'Home' { return 'home' }
+            'End' { return 'end' }
+        }
+        $action = ([string]$key.KeyChar).ToLowerInvariant()
+        if ($action -in @('q','r','1','2','3','4','n','p')) { return $action }
+    }
+}
+
 function Invoke-CpaReport {
     $ErrorActionPreference = 'Stop'
     if ($Once -and $Tui) { throw 'Once 和 Tui 不能同时使用。' }
@@ -399,12 +622,20 @@ function Invoke-CpaReport {
     if ($Tui -and ($View -ne 'all' -or $Period -ne 'overview' -or -not $interactive)) {
         throw 'TUI 需要交互终端且使用默认 all/overview；单次查询请用 -Once。'
     }
+    $wantTui = $interactive -and -not $Once -and (-not $explicitTui -or $Tui) -and $View -eq 'all' -and $Period -eq 'overview'
     $saved = $null
     if ($interactive) {
         $choice = $env:CPA_QUERY_CHOICE
         if (-not $choice -and -not ($BaseUrl -or $ProxyUrl -or $KeyEnv) -and (Test-Path -LiteralPath (Get-CpaConfigPath))) {
-            $choice = Read-CpaSetting '1 载入已有配置  2 重新输入' {
-                param($Value) if ($Value -notin @('1','2')) { throw '请输入 1 或 2。' }; return $Value
+            if ($wantTui) {
+                try { $menu = Read-CpaConsoleForm 'CPA / 已保存的连接' @() @('载入已有配置', '重新配置', '退出') }
+                catch [OperationCanceledException] { return }
+                if ($menu.Action -eq 2) { return }
+                $choice = [string]($menu.Action + 1)
+            } else {
+                $choice = Read-CpaSetting '1 载入已有配置  2 重新输入' {
+                    param($Value) if ($Value -notin @('1','2')) { throw '请输入 1 或 2。' }; return $Value
+                }
             }
         }
         if ($choice -eq '1') {
@@ -413,6 +644,18 @@ function Invoke-CpaReport {
         }
     }
     $prompted = $null -ne $saved -or -not $ProxyUrl -or -not $BaseUrl
+    $connection = $null; $remember = $false
+    if ($wantTui -and -not $saved -and ($prompted -or $noArguments -or $Tui)) {
+        $initialKey = ''
+        if ($KeyEnv) {
+            if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
+            $initialKey = [Environment]::GetEnvironmentVariable($KeyEnv)
+        }
+        try { $connection = Read-CpaConnection $ProxyUrl $BaseUrl $initialKey }
+        catch [OperationCanceledException] { return }
+        $initialKey = $null
+        $ProxyUrl = $connection.Proxy; $BaseUrl = $connection.Base; $remember = $connection.Remember
+    }
     if (-not $ProxyUrl) {
         $ProxyUrl = Read-CpaSetting '本机 HTTP/mixed 代理端口（如 7890）' {
             param($Value)
@@ -434,11 +677,12 @@ function Invoke-CpaReport {
     $useTui = if ($Once) { $false } elseif ($explicitTui) { [bool]$Tui } else {
         ($prompted -or $noArguments) -and $View -eq 'all' -and $Period -eq 'overview' -and $interactive
     }
-    $key = $null; $secret = $null; $headers = $null
+    $key = $null; $secret = $null; $headers = $null; $consoleState = $null
     $protocol = [Net.ServicePointManager]::SecurityProtocol
     $views = if ($View -eq 'all') { @('usage', 'quota') } else { @($View) }
     try {
         if ($saved) { $key = $saved.api_key }
+        elseif ($connection) { $key = $connection.Key; $connection.Key = $null }
         elseif ($KeyEnv) {
             if ($KeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Key 环境变量名称无效。' }
             $key = [Environment]::GetEnvironmentVariable($KeyEnv)
@@ -451,9 +695,17 @@ function Invoke-CpaReport {
         if ($key -cnotmatch '^[\x21-\x7e]{1,1024}$') { throw 'API Key 格式无效。' }
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
-        $refresh = $true; $selected = '1h'; $page = 0; $offerSave = $interactive -and -not $saved
+        $refresh = $true; $selected = '1h'; $page = 0; $offset = 0; $notice = ''
+        $offerSave = $interactive -and -not $saved -and -not $connection
+        if ($useTui) {
+            $consoleState = @([Console]::ForegroundColor, [Console]::BackgroundColor, [Console]::CursorVisible, [Console]::TreatControlCAsInput, [Console]::OutputEncoding)
+            [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+            [Console]::TreatControlCAsInput = $true
+            [Console]::Clear()
+        }
         do {
             if ($refresh) {
+                if ($useTui) { Show-CpaConsoleFrame 'CPA / 用量与额度' @('正在通过 VPN 查询…') '查询中' }
                 $results = @{}; $failures = @{}
                 foreach ($item in $views) {
                     $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
@@ -464,37 +716,65 @@ function Invoke-CpaReport {
                     catch { $failures[$item] = $_.Exception.Message }
                 }
             }
-            if ($useTui) { Clear-Host }
-            Write-Host 'CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点'
-            foreach ($item in $views) {
-                if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
-                try {
-                    if ($item -eq 'usage') { Show-Usage $results[$item] $selected $page $useTui } else { Show-Quota $results[$item] }
-                } catch {
-                    $failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
-                    Write-Host ("CPA ${item}：" + $failures[$item])
+            if ($useTui) {
+                $lines = @(Get-CpaDashboardLines $results $failures $views $selected $page)
+            } else {
+                Write-Host 'CPA 只读看板 | VPN 代理'
+                foreach ($item in $views) {
+                    if ($failures.ContainsKey($item)) { Write-Host ("CPA ${item}：" + $failures[$item]); continue }
+                    try {
+                        if ($item -eq 'usage') { Show-Usage $results[$item] $selected $page $useTui } else { Show-Quota $results[$item] }
+                    } catch {
+                        $failures[$item] = '响应缺少所需字段，请更新 observer 或检查接口。'
+                        Write-Host ("CPA ${item}：" + $failures[$item])
+                    }
+                    Write-Host ''
                 }
-                Write-Host ''
+            }
+            if (-not $failures.Count -and $remember) {
+                Save-CpaConfig $base ([string]$proxy) $key
+                $remember = $false; $notice = '已保存连接配置。'
             }
             if (-not $failures.Count -and $offerSave) {
                 $offerSave = $false
-                $answer = Read-CpaSetting ('保存代理、Base URL 和 API Key 到 ' + (Get-CpaConfigPath) + '？[y/N]') { param($Value) return $Value.ToLowerInvariant() }
+                if ($useTui) {
+                    try { $menu = Read-CpaConsoleForm 'CPA / 保存连接（含 API Key）？' @() @('不保存', '保存') }
+                    catch [OperationCanceledException] { break }
+                    $answer = if ($menu.Action -eq 1) { 'y' } else { 'n' }
+                } else {
+                    $answer = Read-CpaSetting ('保存代理、Base URL 和 API Key 到 ' + (Get-CpaConfigPath) + '？[y/N]') { param($Value) return $Value.ToLowerInvariant() }
+                }
                 if ($answer -in @('y','yes')) {
                     Save-CpaConfig $base ([string]$proxy) $key
-                    Write-Host ('已保存：' + (Get-CpaConfigPath))
+                    if ($useTui) { $notice = '已保存连接配置。' } else { Write-Host ('已保存：' + (Get-CpaConfigPath)) }
                 }
             }
             if (-not $useTui) { break }
-            do { $action = Read-Host '1/2/3/4: 1h/7d/30d/全部 · N/P 模型翻页 · R/Enter 刷新 · Q 退出' }
-            while ($null -ne $action -and $action.Trim().ToLowerInvariant() -notin @('', 'r', 'q', '1', '2', '3', '4', 'n', 'p'))
-            if ($null -eq $action) { break }
-            $action = $action.Trim().ToLowerInvariant()
+            $capacity = [Math]::Max(1, [Console]::WindowHeight - 4)
+            $limit = [Math]::Max(0, $lines.Count - $capacity)
+            $offset = [Math]::Min($offset, $limit)
+            Show-CpaConsoleFrame ('CPA / 用量与额度  [' + ($offset + 1) + '/' + [Math]::Max(1, $lines.Count) + ']') @($lines | Select-Object -Skip $offset -First $capacity) '1-4 时段  N/P 翻页  ↑↓ 滚动  R/Enter 刷新  Q 退出' -Notice $notice
+            $action = Read-CpaDashboardAction
             $refresh = $action -in @('', 'r')
             if ($action -in @('1', '2', '3', '4')) { $selected = @('1h', '7d', '30d', 'all')[[int]$action - 1]; $page = 0 }
             elseif ($action -eq 'n') { $page++ } elseif ($action -eq 'p') { $page-- }
+            elseif ($action -eq 'left') { $index = [array]::IndexOf(@('1h','7d','30d','all'), $selected); $selected = @('1h','7d','30d','all')[($index + 3) % 4]; $page = 0 }
+            elseif ($action -eq 'right') { $index = [array]::IndexOf(@('1h','7d','30d','all'), $selected); $selected = @('1h','7d','30d','all')[($index + 1) % 4]; $page = 0 }
+            elseif ($action -eq 'up') { $offset = [Math]::Max(0, $offset - 1) }
+            elseif ($action -eq 'down') { $offset = [Math]::Min($limit, $offset + 1) }
+            elseif ($action -eq 'pageup') { $offset = [Math]::Max(0, $offset - $capacity) }
+            elseif ($action -eq 'pagedown') { $offset = [Math]::Min($limit, $offset + $capacity) }
+            elseif ($action -eq 'home') { $offset = 0 }
+            elseif ($action -eq 'end') { $offset = $limit }
         } while ($action -ne 'q')
         if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
     } finally {
+        if ($consoleState) {
+            [Console]::ForegroundColor = $consoleState[0]; [Console]::BackgroundColor = $consoleState[1]
+            [Console]::CursorVisible = $consoleState[2]; [Console]::TreatControlCAsInput = $consoleState[3]
+            [Console]::OutputEncoding = $consoleState[4]
+            [Console]::Clear()
+        }
         $key = $null
         if ($headers) { $headers.Clear() }
         if ($secret) { $secret.Dispose() }

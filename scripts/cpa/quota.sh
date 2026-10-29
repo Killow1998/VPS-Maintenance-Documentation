@@ -19,8 +19,10 @@ if sys.version_info < (3, 10):
     raise SystemExit("Python 3.10+ is required. No connection or configuration changes were made.")
 
 import argparse
+import contextlib
 import datetime as dt
 import getpass
+import io
 import json
 import math
 import os
@@ -38,6 +40,202 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 WINDOW = re.compile(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?")
 COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+class TerminalUI:
+    def __enter__(self):
+        try:
+            import curses
+        except ImportError:
+            raise RuntimeError('This Python installation needs its standard curses module for TUI mode.') from None
+        self.curses = curses
+        self.screen = None
+        self.saved_fds = []
+        self.tty = None
+        try:
+            self.tty = open("/dev/tty", "r+b", buffering=0)
+            sys.stdout.flush()
+            self.saved_fds = [os.dup(0), os.dup(1)]
+            # The embedded Python source occupies stdin; curses needs the real TTY.
+            os.dup2(self.tty.fileno(), 0)
+            os.dup2(self.tty.fileno(), 1)
+            self.screen = curses.initscr()
+            curses.noecho()
+            curses.cbreak()
+            self.screen.keypad(True)
+            curses.set_escdelay(30)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                for number, color in enumerate((curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED), 1):
+                    curses.init_pair(number, color, -1)
+            return self
+        except (OSError, curses.error):
+            self.__exit__(None, None, None)
+            raise RuntimeError("TUI requires an interactive terminal with TERM configured.") from None
+
+    def __exit__(self, *args):
+        if self.screen is not None:
+            try:
+                self.screen.keypad(False)
+                self.curses.nocbreak()
+                self.curses.echo()
+                self.curses.endwin()
+            except self.curses.error:
+                pass
+        if self.saved_fds:
+            sys.stdout.flush()
+            for target, saved in enumerate(self.saved_fds):
+                os.dup2(saved, target)
+                os.close(saved)
+        if self.tty:
+            self.tty.close()
+
+    def size(self):
+        height, width = self.screen.getmaxyx()
+        return max(1, width - 1), max(1, height - 4)
+
+    def draw(self, title, lines, footer, selected=-1, notice=""):
+        curses = self.curses
+        height, width = self.screen.getmaxyx()
+        self.screen.erase()
+        for row in range(height):
+            attr, text = curses.A_NORMAL, ""
+            if row == 0:
+                text, attr = " " + title, curses.A_BOLD
+            elif row == 1:
+                text = "-" * max(0, width - 1)
+            elif row == height - 2:
+                text = notice
+            elif row == height - 1:
+                text = footer
+            elif row - 2 < len(lines):
+                text = lines[row - 2]
+                match = re.search(r"\033\[(32|33|31)m", text)
+                if match and curses.has_colors():
+                    attr = curses.color_pair({"32": 2, "33": 3, "31": 4}[match[1]])
+                if row - 2 == selected:
+                    attr = curses.A_REVERSE
+            text = re.sub(r"\033\[[0-9;]*m", "", text)
+            try:
+                self.screen.addstr(row, 0, cell(text, max(0, width - 1)), attr)
+            except curses.error:
+                pass
+        self.screen.refresh()
+
+    def key(self):
+        curses = self.curses
+        value = self.screen.get_wch()
+        if value == "\x03":
+            raise KeyboardInterrupt
+        names = {curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_LEFT: "left",
+                 curses.KEY_RIGHT: "right", curses.KEY_HOME: "home", curses.KEY_END: "end",
+                 curses.KEY_PPAGE: "pageup", curses.KEY_NPAGE: "pagedown",
+                 curses.KEY_BACKSPACE: "backspace", curses.KEY_DC: "delete",
+                 curses.KEY_BTAB: "backtab", curses.KEY_RESIZE: "resize",
+                 curses.KEY_ENTER: "enter", "\n": "enter", "\r": "enter",
+                 "\t": "tab", "\x1b": "escape", "\x7f": "backspace", "\x08": "backspace"}
+        return names.get(value, value)
+
+    def form(self, title, fields, actions=("Continue", "Cancel"), initial=0):
+        values = [field.get("value", "") for field in fields]
+        positions = [len(str(value)) for value in values]
+        replace = [True] * len(fields)
+        selected, notice = initial, ""
+        while True:
+            width, capacity = self.size()
+            available = max(1, width - 24)
+            lines = []
+            for index, field in enumerate(fields):
+                text = str(values[index])
+                if field.get("secret"):
+                    text = "*" * len(text)
+                if field.get("toggle"):
+                    text = "[x]" if values[index] else "[ ]"
+                start = max(0, positions[index] - available + 1) if index == selected and not field.get("toggle") else 0
+                lines.append("  " + cell(field["label"], 21) + " " + text[start:])
+            lines.extend("  " + action for action in actions)
+            self.draw(title, lines, "Tab / arrows: move   Enter: select   Space: toggle   Esc: exit", selected, notice)
+            try:
+                editable = selected < len(fields) and not fields[selected].get('toggle')
+                self.curses.curs_set(1 if editable else 0)
+                if editable and selected < capacity and width >= 51:
+                    start = max(0, positions[selected] - available + 1)
+                    self.screen.move(selected + 2, min(width - 1, 24 + positions[selected] - start))
+                    self.screen.refresh()
+            except self.curses.error:
+                pass
+            key = self.key()
+            if key == "escape":
+                raise EOFError
+            if width < 51 or capacity < len(lines):
+                notice = "Enlarge the terminal to continue. Esc exits."
+                continue
+            count = len(fields) + len(actions)
+            if key in ("up", "down", "tab", "backtab"):
+                selected = (selected + (-1 if key in ("up", "backtab") else 1)) % count
+                continue
+            if key == "enter":
+                if selected >= len(fields):
+                    action = selected - len(fields)
+                    if action:
+                        return action, values
+                    valid = True
+                    for index, field in enumerate(fields):
+                        try:
+                            if field.get("validate"):
+                                values[index] = field["validate"](values[index])
+                        except RuntimeError as error:
+                            selected, notice, valid = index, str(error), False
+                            break
+                    if valid:
+                        return action, values
+                else:
+                    try:
+                        if fields[selected].get("validate"):
+                            values[selected] = fields[selected]["validate"](values[selected])
+                        positions[selected] = len(str(values[selected]))
+                        selected, notice = (selected + 1) % count, ""
+                    except RuntimeError as error:
+                        notice = str(error)
+                continue
+            if selected >= len(fields):
+                continue
+            field = fields[selected]
+            if field.get("toggle"):
+                if key in (" ", "left", "right"):
+                    values[selected] = not values[selected]
+                continue
+            value, position = str(values[selected]), positions[selected]
+            if key == "\x01":
+                replace[selected] = True
+            elif key == "\x15":
+                values[selected], positions[selected], replace[selected] = "", 0, False
+            elif key in ("left", "right", "home", "end"):
+                positions[selected] = (max(0, position - 1) if key == "left" else min(len(value), position + 1)
+                                       if key == "right" else 0 if key == "home" else len(value))
+                replace[selected] = False
+            elif key == "backspace":
+                if replace[selected]:
+                    values[selected], positions[selected] = "", 0
+                elif position:
+                    values[selected] = value[:position - 1] + value[position:]
+                    positions[selected] -= 1
+                replace[selected] = False
+            elif key == "delete":
+                values[selected] = value[:position] + value[position + 1:]
+                replace[selected] = False
+            elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+                if replace[selected]:
+                    value, position = "", 0
+                if len(value) < field.get("max_length", 2048):
+                    values[selected] = value[:position] + key + value[position:]
+                    positions[selected] = position + 1
+                replace[selected], notice = False, ""
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -237,7 +435,14 @@ def select_config(args):
         return None
     choice = os.environ.get("CPA_QUERY_CHOICE")
     if choice is None and not (args.base_url or args.proxy or args.key_env) and config_path().exists():
-        choice = prompt_setting("1 载入已有配置  2 重新输入：", config_choice)
+        if args.tui is not False and args.view == 'all' and args.period == 'overview':
+            with TerminalUI() as terminal:
+                selected, _ = terminal.form('CPA / 已保存的连接', [], ('载入已有配置', '重新配置', '退出'))
+            if selected == 2:
+                raise EOFError
+            choice = str(selected + 1)
+        else:
+            choice = prompt_setting("1 载入已有配置  2 重新输入：", config_choice)
     if choice == "1":
         try:
             return load_config()
@@ -441,6 +646,31 @@ def render_quota(data):
     print("\n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加")
 
 
+def connection_form(proxy, base, key_env):
+    port, host = '7890', '127.0.0.1'
+    if proxy:
+        RequiredProxy(proxy)
+        parsed = urlsplit(proxy)
+        port, host = str(parsed.port), '[::1]' if parsed.hostname == '::1' else '127.0.0.1'
+    key = read_key(key_env) if key_env else ''
+    def validate_key(value):
+        if not re.fullmatch(r'[\x21-\x7e]{1,1024}', value):
+            raise RuntimeError('请输入有效的 API Key。')
+        return value
+    def validate_port(value):
+        return str(urlsplit(proxy_from_port(value)).port)
+    with TerminalUI() as terminal:
+        action, values = terminal.form('CPA / 连接设置', [
+            {'label': 'VPN 代理端口', 'value': port, 'max_length': 5, 'validate': validate_port},
+            {'label': 'HTTPS Base URL', 'value': base or '', 'validate': normalize_base},
+            {'label': 'API Key', 'value': key, 'secret': True, 'max_length': 1024, 'validate': validate_key},
+            {'label': '记住连接（含 Key）', 'value': False, 'toggle': True},
+        ], ('连接', '退出'), initial=1 if proxy else 0)
+    if action:
+        raise EOFError
+    return 'http://' + host + ':' + values[0], values[1], values[2], values[3]
+
+
 def main():
     parser = argparse.ArgumentParser(description="本 Key 用量、近期调用与匿名号池余量；只需 Base URL + 自己的 CPA API Key。")
     parser.add_argument("base_url", nargs="?", default=os.environ.get("CPA_BASEURL", ""), help="HTTPS 根地址；默认 CPA_BASEURL；未提供则交互输入")
@@ -466,6 +696,10 @@ def main():
     if saved:
         args.base_url, args.proxy = saved["base_url"], saved["proxy_url"]
     prompted = bool(saved) or not args.proxy or not args.base_url
+    connection_key, remember = None, False
+    if (args.tui is not False and sys.stdout.isatty() and not saved and
+            (prompted or not sys.argv[1:] or args.tui) and args.view == 'all' and args.period == 'overview'):
+        args.proxy, args.base_url, connection_key, remember = connection_form(args.proxy, args.base_url, args.key_env)
     if not args.proxy:
         args.proxy = prompt_setting("本机 HTTP/mixed 代理端口（如 7890）：", proxy_from_port)
     try:
@@ -482,17 +716,18 @@ def main():
         params["date"] = args.date
     views = ["usage", "quota"] if args.view == "all" else [args.view]
     terminal = None
+    key = None
     try:
         if args.tui:
-            try:
-                terminal = open("/dev/tty", "r", encoding="utf-8")
-            except OSError:
-                raise RuntimeError("TUI 需要交互终端。") from None
-        key = saved["api_key"] if saved else read_key(args.key_env)
-        offer_save = sys.stdout.isatty() and not saved
-        refresh, selected, page = True, "1h", 0
+            terminal = TerminalUI().__enter__()
+        key = saved["api_key"] if saved else connection_key if connection_key is not None else read_key(args.key_env)
+        connection_key = None
+        offer_save = sys.stdout.isatty() and not saved and not args.tui
+        refresh, selected, page, offset, notice = True, "1h", 0, 0, ''
         while True:
             if refresh:
+                if terminal:
+                    terminal.draw('CPA / 用量与额度', ['正在通过 VPN 查询…'], '查询中')
                 results, errors = {}, {}
                 for view in views:
                     path = "/v1/usage?" + urlencode(params) if view == "usage" else "/v1/quota"
@@ -501,24 +736,28 @@ def main():
                         results[view] = fetch(base, key, path, scope, opener)
                     except RuntimeError as error:
                         errors[view] = str(error)
-            if args.tui:
-                print("\033[2J\033[H", end="", flush=True)
-            print("CPA 只读看板 | 强制本机代理 | Clash 出站仍须选择真实节点")
             failed = bool(errors)
-            for view in views:
-                try:
-                    if view in errors:
-                        raise RuntimeError(errors[view])
-                    if view == "quota":
-                        render_quota(results[view])
-                    elif args.period == "overview":
-                        render_overview(results[view], selected, page, args.tui)
-                    else:
-                        render_usage(results[view])
-                    print()
-                except RuntimeError as error:
-                    print(f"CPA {view}：{error}", file=sys.stderr)
-                    failed = True
+            output = io.StringIO() if args.tui else sys.stdout
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output if args.tui else sys.stderr):
+                if not args.tui:
+                    print("CPA 只读看板 | VPN 代理")
+                for view in views:
+                    try:
+                        if view in errors:
+                            raise RuntimeError(errors[view])
+                        if view == "quota":
+                            render_quota(results[view])
+                        elif args.period == "overview":
+                            render_overview(results[view], selected, page, args.tui)
+                        else:
+                            render_usage(results[view])
+                        print()
+                    except RuntimeError as error:
+                        print(f"CPA {view}：{error}", file=sys.stderr)
+                        failed = True
+            if not failed and remember:
+                save_config(base, args.proxy, key)
+                remember, notice = False, '已保存连接配置。'
             if not failed and offer_save:
                 offer_save = False
                 answer = prompt_setting(f"保存代理、Base URL 和 API Key 到 {config_path()}？[y/N]：", str.lower)
@@ -527,23 +766,40 @@ def main():
                     print(f"已保存：{config_path()}")
             if not args.tui:
                 break
-            while True:
-                print("1/2/3/4: 1h/7d/30d/全部 · N/P 模型翻页 · R/Enter 刷新 · Q 退出: ", end="", flush=True)
-                action = terminal.readline()
-                if not action or action.strip().lower() in ("", "r", "q", "1", "2", "3", "4", "n", "p"):
-                    break
-            if not action or action.strip().lower() == "q":
+            lines = output.getvalue().splitlines()
+            capacity = terminal.size()[1]
+            limit = max(0, len(lines) - capacity)
+            offset = min(offset, limit)
+            terminal.draw(f'CPA / 用量与额度 [{offset + 1}/{max(1, len(lines))}]', lines[offset:offset + capacity],
+                          '1-4 时段  N/P 翻页  ↑↓ 滚动  R/Enter 刷新  Q 退出', notice=notice)
+            action = terminal.key()
+            if action in ('q', 'Q', 'escape'):
                 break
-            action = action.strip().lower()
-            refresh = action in ("", "r")
+            action = action.lower() if isinstance(action, str) else ''
+            refresh = action in ('enter', 'r')
             if action in ("1", "2", "3", "4"):
                 selected, page = ("1h", "7d", "30d", "all")[int(action) - 1], 0
             elif action in ("n", "p"):
                 page += 1 if action == "n" else -1
+            elif action in ('left', 'right'):
+                windows = ('1h', '7d', '30d', 'all')
+                selected, page = windows[(windows.index(selected) + (1 if action == 'right' else -1)) % 4], 0
+            elif action == 'up':
+                offset = max(0, offset - 1)
+            elif action == 'down':
+                offset = min(limit, offset + 1)
+            elif action == 'pageup':
+                offset = max(0, offset - capacity)
+            elif action == 'pagedown':
+                offset = min(limit, offset + capacity)
+            elif action == 'home':
+                offset = 0
+            elif action == 'end':
+                offset = limit
     finally:
         key = None
         if terminal:
-            terminal.close()
+            terminal.__exit__(None, None, None)
     if failed:
         sys.exit(1)
 

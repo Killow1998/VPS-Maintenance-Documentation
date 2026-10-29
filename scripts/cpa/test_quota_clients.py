@@ -120,21 +120,30 @@ class PythonClientTests(unittest.TestCase):
         self.assertEqual(CLIENT["proxy_from_port"]("65535"), "http://127.0.0.1:65535")
 
     def test_no_args_interactive_setup_refresh_and_quit(self):
-        streams = iter((io.StringIO("0\n7897\n"),
-                        io.StringIO("http://cpa.example.invalid\nhttps://cpa.example.invalid/v1/\n"),
-                        io.StringIO("2\nn\np\n4\nr\nq\n"), io.StringIO("n\n")))
+        actions = iter(('2', 'n', 'p', '4', 'r', 'q'))
         calls, events, selections = [], [], []
         output = io.StringIO()
         output.isatty = lambda: True
 
-        def terminal(path, mode, encoding):
-            self.assertEqual((path, mode, encoding), ("/dev/tty", "r", "utf-8"))
-            events.append("terminal")
-            return next(streams)
+        class SyntheticTerminal:
+            def __enter__(self):
+                return self
 
-        def hidden_key(prompt):
-            events.append("key")
-            return "synthetic-key"
+            def __exit__(self, *args):
+                pass
+
+            def size(self):
+                return 99, 28
+
+            def draw(self, *args, **kwargs):
+                pass
+
+            def key(self):
+                return next(actions)
+
+        def connection(*args):
+            events.append('setup')
+            return 'http://127.0.0.1:7897', 'https://cpa.example.invalid', 'synthetic-key', False
 
         def fetch(base, key, path, scope, opener):
             events.append("request")
@@ -152,11 +161,12 @@ class PythonClientTests(unittest.TestCase):
             render(data, selected, page, paged)
 
         with patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), patch("sys.argv", ["quota"]), \
-                patch("getpass.getpass", hidden_key), patch.dict(CLIENT, {"open": terminal, "fetch": fetch,
+                patch.dict(CLIENT, {"TerminalUI": SyntheticTerminal, "connection_form": connection, "fetch": fetch,
+                                   "config_path": lambda: ROOT / 'fixtures' / 'absent-profile.json',
                                                                         "render_overview": observed_render}), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             CLIENT["main"]()
-        self.assertEqual(events, ["terminal", "terminal", "terminal", "key", "request", "request", "terminal", "request", "request"])
+        self.assertEqual(events, ['setup', 'request', 'request', 'request', 'request'])
         self.assertEqual(calls, ["/v1/usage?period=overview", "/v1/quota"] * 2)
         self.assertEqual(selections, [("1h", 0), ("7d", 0), ("7d", 1), ("7d", 0), ("all", 0), ("all", 0)])
         self.assertNotIn("synthetic-key", output.getvalue())
@@ -184,7 +194,7 @@ class PythonClientTests(unittest.TestCase):
         for fault, expected in ((lambda *a, **kw: io.StringIO(""), EOFError),
                                 (unittest.mock.Mock(side_effect=OSError), RuntimeError)):
             with self.subTest(error=expected), patch.dict(os.environ, {"CPA_BASEURL": "", "CPA_PROXY": ""}), \
-                    patch("sys.argv", ["quota"]), contextlib.redirect_stdout(output), \
+                    patch("sys.argv", ["quota", "--once"]), contextlib.redirect_stdout(output), \
                     patch.dict(CLIENT, {"open": fault, "read_key": lambda _: self.fail("must not read a key")}), \
                     self.assertRaises(expected):
                 CLIENT["main"]()
@@ -327,7 +337,7 @@ if (-not $rejected -or $script:calls) { throw 'missing proxy accepted' }
             with self.subTest(shell=shell):
                 self.run_ps(shell, code)
 
-    def test_prompted_setup_default_tui_and_once(self):
+    def test_once_interactive_setup(self):
         code = r"""
 $script:reads=0; $script:calls=0; $script:clears=0
 function Read-Host {
@@ -367,12 +377,12 @@ function Invoke-RestMethod {
     throw 'unexpected query'
 }
 # Simulate a terminal for the input-flow test; transport tests use real loopback sockets.
-$scriptSource = $scriptSource.Insert($scriptSource.LastIndexOf('Invoke-CpaReport'), "function Test-CpaTerminal { return `$true }`n")
+$scriptSource = $scriptSource.Insert($scriptSource.LastIndexOf('Invoke-CpaReport'), "function Test-CpaTerminal { return `$true }`nfunction Get-CpaConfigPath { return ([IO.Path]::Combine([IO.Path]::GetTempPath(), 'cpa-absent-'+[guid]::NewGuid())) }`n")
 & ([scriptblock]::Create($scriptSource)) ARGUMENTS
 if ($script:calls -ne CALLS -or $script:reads -ne READS -or $script:clears -ne CLEARS) { throw 'wrong interaction count' }
 """.replace("DATA", json.dumps(overview()))
         for shell in self.shells:
-            for args, calls, reads, clears in (("", 4, 12, 6), ("-Once", 2, 6, 0)):
+            for args, calls, reads, clears in (("-Once", 2, 6, 0),):
                 with self.subTest(shell=shell, args=args):
                     self.run_ps(shell, code.replace("ARGUMENTS", args).replace("CALLS", str(calls))
                                 .replace("READS", str(reads)).replace("CLEARS", str(clears)))
