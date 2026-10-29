@@ -506,13 +506,13 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 
 ### 9.3 使用者只用 Base URL + Key 查询
 
-**在使用者本机运行。** 准备自己的 HTTPS Base URL、API Key，并打开本机 Clash/FlClash。查询脚本使用 HTTP/mixed 代理端口，例如 `7890`。
+**在使用者本机运行。** 准备自己的 HTTPS Base URL、API Key，并打开本机 VPN。查询脚本使用 HTTP/mixed 代理端口，例如 `7890`。
 
-运行[首页一键命令](../README.md#cpa-一键查询)，依次输入 **代理端口、Base URL、API Key**，即可进入看板。Key 隐藏输入。首次成功查询后询问是否保存到 `~/.cpa/query.json`，默认不保存。Base URL 须为 HTTPS；末尾的 `/v1` 由脚本自动处理。
+运行[首页一键命令](../README.md#cpa-一键查询)，在终端表单填写 **代理端口、Base URL、API Key**。Windows 和 Linux/macOS 的操作相同：Tab 或方向键切换字段，回车确认，空格切换复选框，Esc 退出。Key 隐藏输入。Base URL 须为 HTTPS；末尾的 `/v1` 由脚本自动处理。
 
 #### 保存连接配置
 
-同意保存后，下次启动先显示 `1 载入已有配置`、`2 重新输入`。选择载入时，启动器用保存的代理下载已校验的客户端，再读取已存 Base URL 和 Key；不重复询问端口。重新输入后，成功查询可确认替换旧配置。Key 失效或代理端口改变时选 `2`。
+表单中的“记住连接（含 Key）”默认不勾选。勾选后，首次查询成功才保存到 `~/.cpa/query.json`。下次启动可用方向键选择“载入已有配置”或“重新配置”。选择载入时，启动器用保存的代理下载已校验的客户端，再读取已存 Base URL 和 Key；不重复询问端口。Key 失效或代理端口改变时，选择重新配置。
 
 配置目录为 `~/.cpa`，Windows 对应 `%USERPROFILE%\.cpa`。文件只保存版本、代理地址（含端口）、Base URL、API Key。Key 以明文存入本机私密文件：Linux/macOS 目录权限为 `700`、文件为 `600`；Windows ACL 仅允许当前用户。不要上传或分享该目录。保存失败保留旧配置；不读取符号链接或允许其他用户访问的配置。删除 `query.json` 可清除已存连接信息，不撤销服务器上的 Key。
 
@@ -526,10 +526,11 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 | --- | --- |
 | 查看近 1 小时 / 7 天 / 30 天 / 历史的模型明细 | `1` / `2` / `3` / `4` |
 | 翻页，每页最多 5 个模型 | `N` / `P` |
+| 滚动内容 | `↑` / `↓`、`PgUp` / `PgDn`；`Home` / `End` 到顶部 / 底部 |
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
 
-切换和翻页使用已取得的数据。手动刷新分别查询一次用量和账户池接口。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
+看板按键即时生效。切换、翻页和滚动使用已取得的数据。手动刷新分别查询一次用量和账户池接口，不自动轮询。窗口较小时可滚动查看，缩放不会触发查询。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
 
 #### 代理设置
 
@@ -563,7 +564,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8335db5d27211d6af37704db85ec8efb0172b5c0/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -575,7 +576,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8335db5d27211d6af37704db85ec8efb0172b5c0/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/a6cdcc5cd0fee9324145d6c455600364bd878f45/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```

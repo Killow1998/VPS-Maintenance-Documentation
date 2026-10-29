@@ -78,11 +78,16 @@ class PrivateConfigTests(unittest.TestCase):
 
     def test_bootstrap_selects_saved_proxy_without_printing_key(self):
         source = (ROOT.parents[1] / 'cpa.sh').read_text().split("<<'PY'\n", 1)[1].split('\nPY', 1)[0]
+        source = source.replace("path = Path.home()", "TerminalUI = SyntheticTerminal\npath = Path.home()", 1)
+        class SyntheticTerminal:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def form(self, *args): return 0, []
         self.seed()
         output = io.StringIO()
         with patch('pathlib.Path.home', return_value=Path(self.home.name)), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            exec(compile(source, 'bootstrap', 'exec'), {'open': lambda *a, **k: io.StringIO('1\n')})
+            exec(compile(source, 'bootstrap', 'exec'), {'SyntheticTerminal': SyntheticTerminal})
         self.assertEqual(output.getvalue(), '1\nhttp://127.0.0.1:7897\n')
         self.assertNotIn('synthetic-key', output.getvalue())
 

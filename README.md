@@ -13,9 +13,11 @@
 
 ## CPA 一键查询
 
-先打开本机 VPN，再运行对应命令。启动后依次输入 **代理端口、HTTPS Base URL、API Key**。API Key 输入时隐藏。首次成功查询后，可选择把连接配置保存到 `~/.cpa/query.json`；下次启动选择 `1 载入已有配置` 或 `2 重新输入`。
+先打开本机 VPN，再运行对应命令。Windows 和 Linux/macOS 都使用终端界面：填写 **代理端口、HTTPS Base URL、API Key**，按 Tab 或方向键切换，回车确认。API Key 隐藏输入。
 
-**Linux / macOS**：Bash、curl、Python 3.10+。
+勾选“记住连接（含 Key）”后，首次查询成功才保存到 `~/.cpa/query.json`。下次可在菜单中载入或重新配置。Key 以明文保存，文件只允许当前用户读取。
+
+**Linux / macOS**：Bash、curl、Python 3.10+（含标准库 curses）。
 
 ```bash
 c=$(curl -qfsS --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/main/cpa.sh) && bash -c "$c"
@@ -33,8 +35,11 @@ irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/m
 | --- | --- |
 | 切换模型明细的时间范围 | `1` / `2` / `3` / `4` |
 | 翻页 | `N` / `P` |
+| 滚动内容 | `↑` / `↓`、`PgUp` / `PgDn` |
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
+
+看板按键即时生效。切换、翻页和滚动使用已有数据，刷新才查询接口。
 
 缓存命中率表示输入中有多少内容复用了缓存。例如，100 个输入 token 中有 80 个来自缓存，命中率就是 80%。美元金额按 API 公开价格估算；实际支出以服务商账单为准。详细含义见[用量与费用说明](docs/09-cpa-claude.md#94-用量与费用口径)。
 
