@@ -25,6 +25,7 @@ Bash 入口会查找本机已有的 Python 3.10+（包括版本化命令），�
 | [cpa-observer](cpa-observer/README.md) | 采集用量、保存 SQLite 记录、提供查询接口 |
 | [cpa-admin](cpa-admin/README.md) | 可选的网页/TUI 管理与权限网关，限制每个 Key 可使用的 Claude 账号，保留官方 CPA |
 | [cpa-auth](cpa-auth/README.md) | 授权流程的底层工具 |
+| [verify_remote.py](cpa-admin/verify_remote.py) | 在 VPS 验证全部 Key 的回环读接口；不登录、不生成、不打开数据库；公网与历史验收另做 |
 | [cpa_verify.py](cpa_verify.py) | 验证鉴权和模型生成；生成测试会消耗用量 |
 
 ## 查询看板

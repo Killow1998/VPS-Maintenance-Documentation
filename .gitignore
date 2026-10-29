@@ -114,3 +114,4 @@ scripts/cpa/cpa-admin/web/*
 !scripts/cpa/test_quota_config.py
 !.github/workflows/cpa-tools.yml
 !scripts/cpa/cpa-tools/test_backup.py
+!scripts/cpa/cpa-admin/test_verify.py

@@ -6,14 +6,14 @@
 
 | 方案 | 用途 | 文档 |
 | --- | --- | --- |
-| XBoard | 为 Clash Verge Rev、FlClash 提供订阅；管理用户、流量配额和分流规则 | [部署指南](docs/02-xboard-deploy.md) · [运维工具](docs/08-terminal-tool.md) |
+| XBoard | 提供 VPN 订阅；管理用户、流量配额和分流规则 | [部署指南](docs/02-xboard-deploy.md) · [运维工具](docs/08-terminal-tool.md) |
 | CPA/Claude | 为 Claude Code 提供 API；管理 API Key，查看模型用量和账户池剩余额度 | [部署指南](docs/09-cpa-claude.md) · [运维工具](scripts/cpa/cpa-tools/README.md) |
 
 两套服务可独立部署。已有服务器需要修复 PHP 时，使用[现有 VPS 修复指南](docs/07-existing-vps-security-repair.md)。
 
 ## CPA 一键查询
 
-先打开本机 Clash/FlClash，再运行对应命令。启动后依次输入 **代理端口、HTTPS Base URL、API Key**。API Key 输入时隐藏。首次成功查询后，可选择把连接配置保存到 `~/.cpa/query.json`；下次启动选择 `1 载入已有配置` 或 `2 重新输入`。
+先打开本机 VPN，再运行对应命令。启动后依次输入 **代理端口、HTTPS Base URL、API Key**。API Key 输入时隐藏。首次成功查询后，可选择把连接配置保存到 `~/.cpa/query.json`；下次启动选择 `1 载入已有配置` 或 `2 重新输入`。
 
 **Linux / macOS**：Bash、curl、Python 3.10+。
 
@@ -38,7 +38,7 @@ irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/m
 
 缓存命中率表示输入中有多少内容复用了缓存。例如，100 个输入 token 中有 80 个来自缓存，命中率就是 80%。美元金额按 API 公开价格估算；实际支出以服务商账单为准。详细含义见[用量与费用说明](docs/09-cpa-claude.md#94-用量与费用口径)。
 
-首次下载启动器使用当前网络；输入端口后，后续下载和 API 查询均通过指定代理，代理失败即停止。请在 Clash 中确认 CPA 域名使用了代理节点。需要下载全程使用代理时，见[完整启动命令](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)。
+首次下载启动器使用当前网络；输入端口后，后续下载和 API 查询均通过指定代理，代理失败即停止。请在 VPN 中确认 CPA 域名使用了代理节点。需要下载全程使用代理时，见[完整启动命令](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)。
 
 遇到“查询参数不受支持”或缺少模型明细时，请管理员按[observer 更新说明](scripts/cpa/cpa-observer/README.md#repair-prompt)检查服务器版本。
 
