@@ -145,7 +145,7 @@ function Invoke-RestMethod {
 }
 $script:originalLines=${function:Get-CpaDashboardLines}
 function Get-CpaDashboardLines($Results,$Failures,$Views,$Selected,$Page,$Panel,$Width) {
-    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}`n")
+    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}:${Panel}:${Width}`n")
     & $script:originalLines $Results $Failures $Views $Selected $Page $Panel $Width
 }
 Invoke-CpaReport
@@ -171,7 +171,7 @@ def fetch(base, key, path, scope, opener):
     return json.loads(path.read_text())
 original_render = dashboard_lines
 def dashboard_lines(results, errors, selected, page, panel, width):
-    event(f'view:{selected}:{page}')
+    event(f'view:{selected}:{page}:{panel}:{width}')
     return original_render(results, errors, selected, page, panel, width)
 main()
 '''
@@ -276,12 +276,16 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                             terminal.send(key)
                             self.wait_for(terminal, lambda: history().count('view:') > before)
                         self.assertEqual(history().count('request'), 2)
-                        for key in ('2', 'n', 'p', '4'):
+                        for key in ('2', 'n', 'p', '3', '4'):
                             before = history().count('view:')
                             terminal.send(key)
                             self.wait_for(terminal, lambda: history().count('view:') > before)
                         self.assertEqual(history().count('request'), 2)
+                        before = history().count('view:')
                         terminal.resize(28, 90)
+                        self.wait_for(terminal, lambda: history().count('view:') > before)
+                        self.assertIn('view:all:0:overview:89', history())
+                        self.assertEqual(history().count('request'), 2)
                         terminal.send('r')
                         self.wait_for(terminal, lambda: history().count('request') == 4)
                         terminal.send('q')
@@ -289,7 +293,8 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         self.assertNotIn(SECRET, terminal.output)
                         for codes in ('32|92|38;5;(?:2|10)', '33|93|38;5;(?:3|11|14)', '31|91|38;5;(?:1|9|12)'):
                             self.assertRegex(terminal.output, r'\x1b\[(?:' + codes + r')m')
-                        for view in ('view:1h:0', 'view:7d:0', 'view:7d:1', 'view:all:0'):
+                        for view in ('view:1h:0:overview:', 'view:1h:0:models:', 'view:1h:0:quota:',
+                                     'view:7d:0', 'view:7d:1', 'view:30d:0', 'view:all:0'):
                             self.assertIn(view, history())
                         saved = json.loads((Path(directory) / '.cpa/query.json').read_text(encoding='utf-8'))
                         self.assertEqual(saved['api_key'], SECRET)
