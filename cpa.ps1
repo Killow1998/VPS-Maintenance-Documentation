@@ -277,14 +277,14 @@ function Start-CpaQuota {
         $port = Read-CpaProxyPort
         $proxy = "http://127.0.0.1:$port"
     }
-    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.ps1'
+    $url = 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/87571c98f4e533d2d28caef4fdfc7b74f12408a2/scripts/cpa/quota.ps1'
     $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60
     if ($response.StatusCode -ne 200) { throw 'Client download failed; no direct fallback.' }
     $bytes = $response.RawContentStream.ToArray()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    if ($digest -cne 'f01c1b1d1a0584f3684db1f166392ca7440ac64a46adc986a7308d2255987f22') {
+    if ($digest -cne '533acbb5b6364e4de6df0465403d62b14b727ed02226df49b819ab07c8397cee') {
         throw 'Client SHA256 mismatch; nothing was executed.'
     }
     $source = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
