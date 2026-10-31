@@ -65,7 +65,9 @@ class TerminalUI:
                                                curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE)):
                     for code in (30 + index, 90 + index):
                         pair = len(self.pairs) + 1
-                        curses.init_pair(pair, color, curses.COLOR_BLACK)
+                        # Bold black is still black on terminals that do not brighten bold text.
+                        foreground = (250 if curses.COLORS >= 256 else curses.COLOR_WHITE) if code == 90 else color
+                        curses.init_pair(pair, foreground, curses.COLOR_BLACK)
                         self.pairs[code] = pair
                 self.screen.bkgd(" ", curses.color_pair(self.pairs[37]))
             return self
@@ -125,7 +127,7 @@ class TerminalUI:
                 if self.colors and not highlight:
                     if color in self.pairs:
                         attr |= curses.color_pair(self.pairs[color])
-                    if color >= 90:
+                    if color >= 90 and color != 90:
                         attr |= curses.A_BOLD
                 try:
                     self.screen.addstr(row, column, safe, attr)
@@ -296,13 +298,13 @@ main() {
   proxy="${selection#*$'\n'}"
   source=$(curl -q -fsS --proxy "$proxy" --noproxy '' --proto '=https' \
     --location --max-redirs 0 --connect-timeout 10 --max-time 60 \
-    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.sh') || {
+    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.sh') || {
     printf '%s\n' 'Client download failed; no direct fallback.' >&2
     return 1
   }
   # Command substitution strips trailing LF bytes; hash that exact representation.
   digest=$(printf '%s' "$source" | "$python" -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-  if [[ "$digest" != 'd7dab37c36f9ab450f4e0e340313aa68ce3cc40a046b509a1ea6ac8aa76bd257' ]]; then
+  if [[ "$digest" != '0f44c15c4d96e34f4359c076e7b0c3cddbe217fa00a396f37394b017b6b6ffed' ]]; then
     printf '%s\n' 'Client SHA256 mismatch; nothing was executed.' >&2
     return 1
   fi

@@ -398,6 +398,23 @@ $env:ANTHROPIC_AUTH_TOKEN = [System.Net.NetworkCredential]::new('', $secureKey).
 
 环境变量影响当前终端和子进程。验证后再合并到个人 `~/.claude/settings.json` 的 `env`；Windows 为 `%USERPROFILE%\.claude\settings.json`。保留现有设置，不放进共享项目配置。`ANTHROPIC_AUTH_TOKEN` 使用 Bearer 鉴权；`/status` 核对实际来源。[网关配置](https://code.claude.com/docs/en/llm-gateway)。
 
+### 7.1 推荐 1 小时提示词缓存
+
+经常暂停 5–60 分钟再继续的长会话，推荐主会话使用 `1h`；持续密集运行的短子任务保留 `5m`。子任务也会长时间等待时，再把第二项改为 `1h`。Claude Code **v2.1.242+** 可将下面两项合并到个人 `~/.claude/settings.json` 顶层；保留原有 `env`、Key 和其他设置，不整份覆盖。Windows 路径见上节。[官方配置说明](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself)
+
+```json
+{
+  "promptCacheTtl": "1h",
+  "subagentPromptCacheTtl": "5m"
+}
+```
+
+设置被忽略时，先检查环境中的 `FORCE_PROMPT_CACHING_5M=1` 和更高优先级配置。经 CPA 转发时，网关还需保留 `anthropic-beta` 请求头及缓存参数；本节不改写服务器或既有客户端配置。[Claude Code 缓存与网关](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself)
+
+5 分钟缓存不是每隔 5 分钟固定清空：命中会刷新有效期。`1h` 缓存写入价格比 `5m` 高 60%，适合减少长停顿后的重写；持续高频使用通常选 `5m`。更换模型、上游账号或提示词前缀仍可能未命中。[缓存时长与费用](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
+
+用一次原本就要进行的调用观察 `usage.cache_creation.ephemeral_1h_input_tokens`；非零表示发生过 1 小时缓存写入。已经命中时，写入数可为零，结合缓存读取量判断，不额外发付费探测请求。当前费用估算保留 `5m` / `1h` 写入区间，不根据推荐值重算历史账目。[缓存用量字段](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
+
 ## 8. 验证鉴权、模型与真实生成
 
 **位置：已设置第 7 节环境变量的本机终端。前提：HTTPS 和上游就绪。完成：无 Key 401、有效 Key 200、真实生成含文本且退出码 0。**
@@ -578,7 +595,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -590,7 +607,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e0b7d07386c0681a4c42e50dc7b23e623e3e2a35/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```

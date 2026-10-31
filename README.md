@@ -49,6 +49,8 @@ irm https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/m
 
 若终端设置了 `NO_COLOR`，看板默认使用单色，按 `C` 可在本次运行中开启颜色。布局与配色参考 [Tokscale](https://github.com/junhoyeo/tokscale)。
 
+Linux/macOS 的次要文字使用浅灰色；8/16 色终端回退为普通白色，保持可读。Claude Code 间歇使用的长会话推荐[主会话使用 1 小时缓存，子任务按使用频率选择](docs/09-cpa-claude.md#71-推荐-1-小时提示词缓存)。
+
 缓存命中率表示输入中有多少内容复用了缓存。例如，100 个输入 token 中有 80 个来自缓存，命中率就是 80%。美元金额按 API 公开价格估算；实际支出以服务商账单为准。详细含义见[用量与费用说明](docs/09-cpa-claude.md#94-用量与费用口径)。
 
 首次下载启动器使用当前网络；输入端口后，后续下载和 API 查询均通过指定代理，代理失败即停止。请在 VPN 中确认 CPA 域名使用了代理节点。需要下载全程使用代理时，见[完整启动命令](docs/09-cpa-claude.md#93-使用者只用-base-url--key-查询)。

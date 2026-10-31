@@ -76,7 +76,9 @@ class TerminalUI:
                                                curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE)):
                     for code in (30 + index, 90 + index):
                         pair = len(self.pairs) + 1
-                        curses.init_pair(pair, color, curses.COLOR_BLACK)
+                        # Bold black is still black on terminals that do not brighten bold text.
+                        foreground = (250 if curses.COLORS >= 256 else curses.COLOR_WHITE) if code == 90 else color
+                        curses.init_pair(pair, foreground, curses.COLOR_BLACK)
                         self.pairs[code] = pair
                 self.screen.bkgd(" ", curses.color_pair(self.pairs[37]))
             return self
@@ -136,7 +138,7 @@ class TerminalUI:
                 if self.colors and not highlight:
                     if color in self.pairs:
                         attr |= curses.color_pair(self.pairs[color])
-                    if color >= 90:
+                    if color >= 90 and color != 90:
                         attr |= curses.A_BOLD
                 try:
                     self.screen.addstr(row, column, safe, attr)
