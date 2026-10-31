@@ -10,6 +10,8 @@ observer 新增缓存时长附表，保留原用量表和历史记录，按上�
 
 Windows PowerShell 5.1/7 与 Linux 原生终端使用合成 API 验证自动刷新、连续 R、查询期间切换、失败恢复及查询中退出；测试加速刷新间隔，发行默认值仍为 300 秒。observer 的 25 项离线测试通过，包括混合 TTL、去重、旧库和旧版写入兼容。未调用付费模型或读取生产 Key。
 
+后续 [PR #10](https://github.com/Killow1998/VPS-Maintenance-Documentation/pull/10) 修复队列测试对 `json.RawMessage` 的错误类型断言，补充普通响应的混合 TTL 与缺失字段测试，并将 CI 运行器更新为 macOS 15。贡献者在固定 CPA 基线上完成 Go 三个包测试和 Linux amd64 静态交叉构建；Point 已审阅差异并核对 [Windows、Linux、macOS CI 全部通过](https://github.com/Killow1998/VPS-Maintenance-Documentation/actions/runs/41218218180)，本轮未独立重跑 Go 构建。部署仍需维护 Agent 检查实际版本，在维护窗口执行并验收生产采集。
+
 ## 2026-10-31 Linux 文字对比度与 Claude 缓存建议（America/Los_Angeles）
 
 Linux/macOS 查询程序及 Bash 启动器不再用“黑色加粗”模拟灰色：支持 256 色时直接使用浅灰色，不足 256 色时回退白色。管理员工具共用的次要文字样式同步移除 `A_DIM`，避免状态、时间和旧额度在黑底上难以辨认。保留旧值/未知标签、额度绿黄红含义、NO_COLOR 和缓存导航。
