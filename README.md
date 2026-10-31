@@ -11,6 +11,8 @@
 
 两套服务可独立部署。已有服务器需要修复 PHP 时，使用[现有 VPS 修复指南](docs/07-existing-vps-security-repair.md)。
 
+Linux TCP 内核漏洞 CVE-2026-98432 的检查、应急缓解与内核更新见[安全维护指南](docs/10-linux-tcp-security.md)。关闭 MPTCP 不等于内核已修复。
+
 ## CPA 一键查询
 
 先打开本机 VPN，再运行对应命令。Windows 和 Linux/macOS 都使用终端界面：填写 **代理端口、HTTPS Base URL、API Key**，按 Tab 或方向键切换，回车确认。API Key 隐藏输入。
@@ -85,6 +87,7 @@ XBoard 工具通过 SSH 密钥登录，首页显示全部用户，选中用户�
 | 修复已有服务器 | [PHP 更新与加固](docs/07-existing-vps-security-repair.md) |
 | 管理 XBoard | [终端工具](docs/08-terminal-tool.md) |
 | 部署 CPA/Claude | [网关部署与使用](docs/09-cpa-claude.md) |
+| 处理 Linux TCP 内核漏洞 | [MPTCP、过滤与更新验收](docs/10-linux-tcp-security.md) |
 
 ## 参考方案
 

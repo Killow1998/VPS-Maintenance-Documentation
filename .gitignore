@@ -50,6 +50,7 @@ scripts/*
 
 # Reviewed CPA documentation and source only.
 !docs/09-cpa-claude.md
+!docs/10-linux-tcp-security.md
 !scripts/cpa/
 scripts/cpa/*
 !scripts/cpa/cpa-tools/
