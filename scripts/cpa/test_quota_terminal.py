@@ -187,7 +187,7 @@ def observed_draw(self, *args, **kwargs):
                     attributes = self.screen.inch(y, x)
                     foreground, background = curses.pair_content(curses.pair_number(attributes))
                     cells[x] = {'foreground': foreground, 'dim': bool(attributes & curses.A_DIM),
-                                'rgb': curses.color_content(foreground)}
+                                'bold': bool(attributes & curses.A_BOLD)}
                 x += 2 if unicodedata.east_asian_width(char) in 'WF' else 1
             snapshot['rows'].append({'text': text, 'cells': cells})
         path = Path(os.environ['CPA_TEST_HOME']) / 'screen.tmp'
