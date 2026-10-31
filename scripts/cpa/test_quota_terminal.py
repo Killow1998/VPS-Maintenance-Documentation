@@ -118,12 +118,13 @@ class TerminalIntegrationTests(unittest.TestCase):
         else:
             cls.shells = ['python']
 
-    def start(self, directory, shell, rows=24, columns=80, preview=None, colors=True):
+    def start(self, directory, shell, rows=24, columns=80, preview=None, colors=True, term='xterm-256color', capture=False):
         home = Path(directory)
         env = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
-        env.update(CPA_PROXY='', CPA_BASEURL='', CPA_QUERY_CHOICE='2', TERM='xterm-256color',
+        env.update(CPA_PROXY='', CPA_BASEURL='', CPA_QUERY_CHOICE='2', TERM=term,
                    CPA_TEST_HOME=str(home), CPA_TEST_SOURCE=str(ROOT / 'quota.ps1'),
-                   CPA_TEST_EVENTS=str(home / 'events'), CPA_TEST_DATA=str(home / 'data.json'))
+                   CPA_TEST_EVENTS=str(home / 'events'), CPA_TEST_DATA=str(home / 'data.json'),
+                   CPA_TEST_CAPTURE='1' if capture else '')
         env.pop('NO_COLOR', None)
         if not colors:
             env['NO_COLOR'] = '1'
@@ -171,7 +172,27 @@ def event(value):
 original_draw = TerminalUI.draw
 def observed_draw(self, *args, **kwargs):
     original_draw(self, *args, **kwargs)
+    curses = self.curses
     height, width = self.screen.getmaxyx()
+    if os.environ.get('CPA_TEST_CAPTURE') and args[0].startswith('CPA  用量看板'):
+        snapshot = {'colors': curses.COLORS, 'rows': []}
+        for y in range(height):
+            text = self.screen.instr(y, 0).decode('utf-8', 'replace')
+            cells, x = [None] * width, 0
+            for char in text:
+                if x >= width:
+                    break
+                # inch() cannot separate wide glyph bits from attributes; sample ASCII cells.
+                if char.isascii() and not char.isspace():
+                    attributes = self.screen.inch(y, x)
+                    foreground, background = curses.pair_content(curses.pair_number(attributes))
+                    cells[x] = {'foreground': foreground, 'dim': bool(attributes & curses.A_DIM),
+                                'rgb': curses.color_content(foreground)}
+                x += 2 if unicodedata.east_asian_width(char) in 'WF' else 1
+            snapshot['rows'].append({'text': text, 'cells': cells})
+        path = Path(os.environ['CPA_TEST_HOME']) / 'screen.tmp'
+        path.write_text(json.dumps(snapshot), encoding='utf-8')
+        path.replace(path.with_name('screen.json'))
     event(f'frame:{width}:{height}')
 TerminalUI.draw = observed_draw
 def fetch(base, key, path, scope, opener):
@@ -332,6 +353,28 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         self.assertEqual(saved['proxy_url'].rstrip('/'), 'http://127.0.0.1:7897')
                     finally:
                         terminal.close()
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX curses color fallback')
+    def test_secondary_text_uses_readable_foreground(self):
+        for term in ('xterm', 'xterm-256color'):
+            with self.subTest(term=term), tempfile.TemporaryDirectory() as directory:
+                terminal = self.start(directory, 'python', term=term, capture=True)
+                screen = Path(directory) / 'screen.json'
+                try:
+                    self.wait_for(terminal, lambda: 'API Key' in terminal.output)
+                    terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t\t\r')
+                    self.wait_for(terminal, screen.exists)
+                    snapshot = json.loads(screen.read_text())
+                    expected = 250 if snapshot['colors'] >= 256 else 7
+                    cells = [cell for row in snapshot['rows'] for cell in row['cells'] if cell]
+                    self.assertTrue(any(cell['foreground'] == expected for cell in cells))
+                    self.assertFalse(any(cell['foreground'] == 0 or cell['dim'] for cell in cells))
+                    self.assertEqual((Path(directory) / 'events').read_text().count('request'), 2)
+                    terminal.send('q')
+                    self.wait_for(terminal, lambda: not terminal.alive())
+                    self.assertNotIn(SECRET, terminal.output)
+                finally:
+                    terminal.close()
 
     def test_no_color_can_be_overridden_without_requests(self):
         pattern = r'\x1b\[(?:31|91|38;5;(?:1|9|12))m'
