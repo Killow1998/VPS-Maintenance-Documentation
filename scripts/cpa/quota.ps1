@@ -87,9 +87,10 @@ function Get-CpaConsoleSize {
     return "{0},{1},{2},{3}" -f [Console]::WindowWidth, [Console]::WindowHeight, [Console]::BufferWidth, [Console]::BufferHeight
 }
 
-function Read-CpaConsoleKey([string]$Size) {
+function Read-CpaConsoleKey([string]$Size, [scriptblock]$Wake = $null) {
     # ReadKey blocks on input; observe window changes before waiting for a key.
     while ($true) {
+        if ($Wake -and (& $Wake)) { return $null }
         if ((Get-CpaConsoleSize) -ne $Size) { return $null }
         if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
         Start-Sleep -Milliseconds 50
@@ -396,15 +397,13 @@ function Get-Beijing($Value, [switch]$Seconds) {
 
 function Get-Cost($Row) {
     $low = $Row.estimated_cost_usd_low; $high = $Row.estimated_cost_usd_high
-    foreach ($value in @($low, $high)) {
-        if ($null -eq $value -or $value -is [bool] -or $value -is [string]) { return '未知' }
-        if ([double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return '未知' }
-    }
-    if ($low -lt 0 -or $high -lt $low) { return '未知' }
-    $format = if (($low -gt 0 -and $low -lt .0001) -or ($high -gt 0 -and $high -lt .0001)) { 'F8' } else { 'F4' }
-    $left = '$' + $low.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
-    $right = '$' + $high.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
-    if ($left -ne $right) { $left += '–' + $right }
+    $modern = $null -ne $Row.PSObject.Properties['estimated_cost_usd']
+    $value = if ($modern) { $Row.estimated_cost_usd } else { $high }
+    if ($null -eq $value -or $value -is [bool] -or $value -is [string] -or $value -lt 0 -or
+        [double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return '未知' }
+    $format = if ($value -gt 0 -and $value -lt .0001) { 'F8' } else { 'F4' }
+    $left = '$' + $value.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
+    if ($Row.cache_ttl_unknown_requests -gt 0 -or (-not $modern -and $low -ne $high)) { $left = '~' + $left }
     if ($null -ne $Row.priced_requests -and $null -ne $Row.requests -and
         $Row.priced_requests -ge 0 -and $Row.priced_requests -lt $Row.requests) { $left = '*' + $left }
     return $left
@@ -589,6 +588,40 @@ function Get-CpaData($Base, $Headers, $Path, $Scope, $Proxy) {
     return $data
 }
 
+function Get-CpaSnapshot($Base, $Headers, $Views, $Period, $Date, $Recent, $Proxy) {
+    $results = @{}; $failures = @{}
+    foreach ($item in $Views) {
+        $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
+        $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period } else { '/v1/quota' }
+        if ($item -eq 'usage' -and $Period -ne 'overview') { $path += '&recent=' + $Recent }
+        if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
+        try { $results[$item] = Get-CpaData $Base $Headers $path $scope $Proxy }
+        catch { $failures[$item] = $_.Exception.Message }
+    }
+    return [pscustomobject]@{ Results=$results; Failures=$failures }
+}
+
+function Start-CpaRefresh($Base, $Headers, $Views, $Period, $Date, $Recent, $Proxy) {
+    $pipeline = [powershell]::Create()
+    try {
+        foreach ($name in @('Get-CpaData', 'Get-CpaSnapshot', 'Invoke-RestMethod')) {
+            $command = Get-Command $name
+            if ($command.CommandType -eq 'Function') {
+                $null = $pipeline.AddScript("function $name {`n$($command.Definition)`n}")
+            }
+        }
+        $null = $pipeline.AddScript({
+            param($Base, $Headers, $Views, $Period, $Date, $Recent, $Proxy)
+            $ErrorActionPreference = 'Stop'
+            Get-CpaSnapshot $Base $Headers $Views $Period $Date $Recent $Proxy
+        }).AddArgument($Base).AddArgument($Headers.Clone()).AddArgument($Views).AddArgument($Period).
+            AddArgument($Date).AddArgument($Recent).AddArgument($Proxy)
+        return [pscustomobject]@{ Pipeline=$pipeline; Handle=$pipeline.BeginInvoke() }
+    } catch { $pipeline.Dispose(); throw }
+}
+
+$script:CpaAutoRefreshSeconds = 300
+
 function Read-CpaConnection([string]$Proxy, [string]$Base, [string]$Key = '') {
     $port = '7890'; $proxyHost = '127.0.0.1'
     if ($Proxy) { $uri = ConvertTo-CpaProxy $Proxy; $port = [string]$uri.Port; $proxyHost = $uri.Host }
@@ -716,9 +749,9 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
     return $lines.ToArray()
 }
 
-function Read-CpaDashboardAction([string]$Size) {
+function Read-CpaDashboardAction([string]$Size, [scriptblock]$Wake = $null) {
     while ($true) {
-        $key = Read-CpaConsoleKey $Size
+        $key = Read-CpaConsoleKey $Size $Wake
         if ($null -eq $key) { return 'resize' }
         if ($key.Key -eq 'Escape' -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) { return 'q' }
         switch ([string]$key.Key) {
@@ -802,7 +835,7 @@ function Invoke-CpaReport {
     $useTui = if ($Once) { $false } elseif ($explicitTui) { [bool]$Tui } else {
         ($prompted -or $noArguments) -and $View -eq 'all' -and $Period -eq 'overview' -and $interactive
     }
-    $key = $null; $secret = $null; $headers = $null; $consoleState = $null
+    $key = $null; $secret = $null; $headers = $null; $consoleState = $null; $pending = $null
     $protocol = [Net.ServicePointManager]::SecurityProtocol
     $views = if ($View -eq 'all') { @('usage', 'quota') } else { @($View) }
     try {
@@ -821,6 +854,7 @@ function Invoke-CpaReport {
         $headers = @{ Authorization = 'Bearer ' + $key; Accept = 'application/json' }
         [Net.ServicePointManager]::SecurityProtocol = $protocol -bor [Net.SecurityProtocolType]::Tls12
         $refresh = $true; $selected = '1h'; $panel = 'overview'; $page = 0; $offset = 0; $notice = ''
+        $loaded = $false; $clock = [Diagnostics.Stopwatch]::StartNew(); $nextRefresh = 0
         $offerSave = $interactive -and -not $saved -and -not $connection
         if ($useTui) {
             $consoleState = @([Console]::ForegroundColor, [Console]::BackgroundColor, [Console]::CursorVisible, [Console]::TreatControlCAsInput, [Console]::OutputEncoding)
@@ -830,16 +864,27 @@ function Invoke-CpaReport {
             $script:CpaFrameCache = @{}
         }
         do {
-            if ($refresh) {
-                if ($useTui) { Show-CpaConsoleFrame 'CPA / 用量与额度' @('正在通过 VPN 查询…') '查询中' }
-                $results = @{}; $failures = @{}
-                foreach ($item in $views) {
-                    $scope = if ($item -eq 'usage') { 'own_key' } else { 'shared_pool' }
-                    $path = if ($item -eq 'usage') { '/v1/usage?period=' + $Period } else { '/v1/quota' }
-                    if ($item -eq 'usage' -and $Period -ne 'overview') { $path += '&recent=' + $Recent }
-                    if ($item -eq 'usage' -and $Date) { $path += '&date=' + [Uri]::EscapeDataString($Date) }
-                    try { $results[$item] = Get-CpaData $base $headers $path $scope $proxy }
-                    catch { $failures[$item] = $_.Exception.Message }
+            if ($refresh -or ($useTui -and -not $pending -and $clock.Elapsed.TotalSeconds -ge $nextRefresh)) {
+                if (-not $loaded) {
+                    if ($useTui) { Show-CpaConsoleFrame 'CPA / 用量与额度' @('正在通过 VPN 查询…') '查询中' }
+                    $snapshot = Get-CpaSnapshot $base $headers $views $Period $Date $Recent $proxy
+                    $results = $snapshot.Results; $failures = $snapshot.Failures; $loaded = $true
+                } elseif (-not $pending) {
+                    $pending = Start-CpaRefresh $base $headers $views $Period $Date $Recent $proxy
+                }
+                $nextRefresh = $clock.Elapsed.TotalSeconds + $script:CpaAutoRefreshSeconds
+                $refresh = $false
+            }
+            if ($pending -and $pending.Handle.IsCompleted) {
+                try {
+                    $snapshot = @($pending.Pipeline.EndInvoke($pending.Handle))[-1]
+                    $results = $snapshot.Results; $failures = $snapshot.Failures; $notice = ''
+                } catch {
+                    $failures = @{}
+                    foreach ($item in $views) { $failures[$item] = '查询失败，请检查代理和服务。' }
+                } finally {
+                    $pending.Pipeline.Dispose(); $pending = $null
+                    $nextRefresh = $clock.Elapsed.TotalSeconds + $script:CpaAutoRefreshSeconds
                 }
             }
             if ($useTui) {
@@ -880,10 +925,12 @@ function Invoke-CpaReport {
             $capacity = [Math]::Max(1, [Console]::WindowHeight - 4)
             $limit = [Math]::Max(0, $lines.Count - $capacity)
             $offset = [Math]::Min($offset, $limit)
-            $colorState = if ($script:CpaColors) { '彩色' } else { '单色(C开启)' }
-            $status = if ($failures.Count) { '部分查询失败' } else { '只读 · ' + $colorState }
-            Show-CpaConsoleFrame ('CPA  用量看板 · ' + $status) @($lines | Select-Object -Skip $offset -First $capacity) 'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出' -Notice $notice
-            $action = Read-CpaDashboardAction $layoutSize
+            $title = 'CPA  用量看板' + $(if ($failures.Count) { ' · 部分查询失败' })
+            $displayNotice = if ($pending) { '正在刷新…' } else { $notice }
+            Show-CpaConsoleFrame $title @($lines | Select-Object -Skip $offset -First $capacity) 'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出' -Notice $displayNotice
+            $action = Read-CpaDashboardAction $layoutSize {
+                ($pending -and $pending.Handle.IsCompleted) -or (-not $pending -and $clock.Elapsed.TotalSeconds -ge $nextRefresh)
+            }
             $refresh = $action -in @('', 'r')
             if ($action -in @('1', '2', '3', '4')) { $selected = @('1h', '7d', '30d', 'all')[[int]$action - 1]; $page = 0 }
             elseif ($action -eq 'n') { $page++ } elseif ($action -eq 'p') { $page-- }
@@ -901,6 +948,7 @@ function Invoke-CpaReport {
         } while ($action -ne 'q')
         if ($failures.Count) { throw '部分查询失败，请检查上方提示。' }
     } finally {
+        if ($pending) { $pending.Pipeline.Stop(); $pending.Pipeline.Dispose() }
         if ($consoleState) {
             [Console]::ForegroundColor = $consoleState[0]; [Console]::BackgroundColor = $consoleState[1]
             [Console]::CursorVisible = $consoleState[2]; [Console]::TreatControlCAsInput = $consoleState[3]

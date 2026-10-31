@@ -180,6 +180,9 @@ class Store:
                     reasoning_tokens INTEGER, total_tokens INTEGER, accounting_quality TEXT,
                     latency_ms REAL, cost_low REAL, cost_high REAL, price_version TEXT);
                 CREATE INDEX IF NOT EXISTS usage_client_time ON records(client_id, timestamp);
+                CREATE TABLE IF NOT EXISTS cache_ttl (
+                    record_id TEXT PRIMARY KEY, cache_write_5m_tokens INTEGER NOT NULL,
+                    cache_write_1h_tokens INTEGER NOT NULL, cost_actual_ttl REAL);
             """)
             con.execute("INSERT OR IGNORE INTO metadata VALUES (?,?)", ("collection_started_at", now()))
         os.chmod(path, 0o600)
@@ -244,11 +247,25 @@ class Store:
                 if re.fullmatch(re.escape(name) + r"-\d{8}", model):
                     price = self.prices["models"][name]
                     break
-        low = high = None
+        write_5m = write_1h = None
+        if complete:
+            creation = tokens.get("cache_creation")
+            creation = creation if isinstance(creation, dict) else {}
+            write_5m = count(creation.get("ephemeral_5m_input_tokens"))
+            write_1h = count(creation.get("ephemeral_1h_input_tokens"))
+            if write == 0 and not creation:
+                write_5m = write_1h = 0
+            if write_5m is None or write_1h is None or write_5m + write_1h != write:
+                write_5m = write_1h = None
+        low = high = actual = None
         if complete and price:
             basic = uncached * price["input"] + read * price["cache_read"] + output * price["output"]
             low = (basic + write * price["cache_write_5m"]) / 1_000_000
             high = (basic + write * price["cache_write_1h"]) / 1_000_000
+            if write_5m is not None:
+                actual = (basic + write_5m * price["cache_write_5m"] +
+                          write_1h * price["cache_write_1h"]) / 1_000_000
+                low = high = actual
         identity = str(event.get("execution_id") or event.get("request_id") or
                        json.dumps(event, sort_keys=True, separators=(",", ":")))
         account = str(event.get("auth_index") or "unknown")
@@ -256,7 +273,7 @@ class Store:
                 str(event.get("provider") or "unknown")[:60], self.digest("account:" + account),
                 int(bool(event.get("failed"))), input_n, uncached, read, write, output, reasoning,
                 total, quality, event.get("latency_ms"), low, high,
-                self.prices.get("version") if low is not None else None)
+                self.prices.get("version") if low is not None else None, write_5m, write_1h, actual)
 
     def ingest(self, events):
         rows, rejected = [], 0
@@ -266,9 +283,12 @@ class Store:
             except (ValueError, TypeError, KeyError, AttributeError):
                 rejected += 1
         with self.db() as con:
-            before = con.total_changes
-            con.executemany("INSERT OR IGNORE INTO records VALUES (" + ",".join("?" * 19) + ")", rows)
-            inserted = con.total_changes - before
+            inserted = 0
+            for row in rows:
+                cursor = con.execute("INSERT OR IGNORE INTO records VALUES (" + ",".join("?" * 19) + ")", row[:19])
+                inserted += cursor.rowcount
+                if cursor.rowcount and row[19] is not None:
+                    con.execute("INSERT INTO cache_ttl VALUES (?,?,?,?)", (row[0], *row[19:]))
             if rejected:
                 old = con.execute("SELECT value FROM metadata WHERE key='rejected_events'").fetchone()
                 con.execute("INSERT OR REPLACE INTO metadata VALUES ('rejected_events',?)",
@@ -283,6 +303,7 @@ class Store:
 
     def aggregate(self, con, where, args, by):
         token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
+                        "cache_write_5m_tokens", "cache_write_1h_tokens",
                         "output_tokens", "reasoning_tokens", "total_tokens"]
         columns, group, order = ("model", "model", "model") if by == "model" else (
             "account_id, provider, max(timestamp) last_used_at", "account_id, provider", "max(timestamp) DESC, account_id")
@@ -292,11 +313,16 @@ class Store:
                  sum(output_tokens) output_tokens, sum(reasoning_tokens) reasoning_tokens,
                  sum(total_tokens) total_tokens, sum(cost_low) estimated_cost_usd_low,
                  sum(cost_high) estimated_cost_usd_high,
+                 sum(cache_write_5m_tokens) cache_write_5m_tokens,
+                 sum(cache_write_1h_tokens) cache_write_1h_tokens,
+                 sum(coalesce(cost_actual_ttl, cost_high)) estimated_cost_usd,
+                 sum(cache_write_tokens>0 AND cache_write_5m_tokens IS NULL) cache_ttl_unknown_requests,
                  sum(cost_low IS NOT NULL) priced_requests,
                  sum(accounting_quality!='complete') incomplete_accounting_requests
                  FROM records""" + where + " GROUP BY " + group + " ORDER BY " + order
         sql = sql.replace("FROM records", ", " + ", ".join(
-            "count(" + name + ") known_" + name for name in token_fields) + " FROM records")
+            "count(" + name + ") known_" + name for name in token_fields) +
+            " FROM records LEFT JOIN cache_ttl ON cache_ttl.record_id=records.id")
         rows = [dict(row) for row in con.execute(sql, args)]
         for item in rows:
             item["unknown_token_fields"] = []
@@ -327,13 +353,18 @@ class Store:
             records = [dict(row) for row in con.execute("""SELECT timestamp, model, provider, account_id,
                 failed, input_tokens, uncached_tokens, cache_read_tokens, cache_write_tokens,
                 output_tokens, reasoning_tokens, total_tokens, accounting_quality, latency_ms,
-                cost_low estimated_cost_usd_low, cost_high estimated_cost_usd_high
-                FROM records""" + where + " ORDER BY timestamp DESC, id DESC LIMIT ?", args + [recent])]
+                cost_low estimated_cost_usd_low, cost_high estimated_cost_usd_high,
+                cache_write_5m_tokens, cache_write_1h_tokens,
+                coalesce(cost_actual_ttl, cost_high) estimated_cost_usd,
+                CASE WHEN cache_write_tokens>0 AND cache_write_5m_tokens IS NULL
+                     THEN 1 ELSE 0 END cache_ttl_unknown_requests
+                FROM records LEFT JOIN cache_ttl ON cache_ttl.record_id=records.id""" +
+                where + " ORDER BY timestamp DESC, id DESC LIMIT ?", args + [recent])]
         for record in records:
             record["account_id"] = self.public_account(record["account_id"])
         totals = self.total_rows(models)
         for item in models + accounts + records:
-            for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
+            for name in ("estimated_cost_usd_low", "estimated_cost_usd_high", "estimated_cost_usd"):
                 if item.get(name) is not None:
                     item[name] = round(item[name], 8)
         return {"scope": "own_key" if client else "administrator", "client": self.label(client) if client else None,
@@ -345,16 +376,18 @@ class Store:
                 "history_before_collection": "not_available", "totals": totals, "models": models,
                 "accounts": accounts, "recent": records, "recent_limit": recent,
                 "record_unit": "upstream_execution_attempt; retries may create multiple records",
-                "cost_basis": "API list-price estimate; not subscription charges; cache writes span 5m/1h rates",
+                "cost_basis": "API list-price estimate; reported cache TTL when available, otherwise 1h write rate; not subscription charges",
                 "accounting_limitations": "in-memory queue can lose events on outage/restart or between pop and commit"}
 
     @staticmethod
     def total_rows(models):
         token_fields = ["input_tokens", "uncached_tokens", "cache_read_tokens", "cache_write_tokens",
+                        "cache_write_5m_tokens", "cache_write_1h_tokens",
                         "output_tokens", "reasoning_tokens", "total_tokens"]
         fields = ["requests", "failed_requests", "input_tokens", "uncached_tokens", "cache_read_tokens",
                   "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
-                  "estimated_cost_usd_low", "estimated_cost_usd_high", "priced_requests",
+                  "cache_write_5m_tokens", "cache_write_1h_tokens", "cache_ttl_unknown_requests",
+                  "estimated_cost_usd_low", "estimated_cost_usd_high", "estimated_cost_usd", "priced_requests",
                   "incomplete_accounting_requests"]
         totals = {}
         for name in fields:
@@ -363,7 +396,7 @@ class Store:
                 totals[name] = None
             else:
                 totals[name] = sum(values) if values else (None if "cost" in name else 0)
-        for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
+        for name in ("estimated_cost_usd_low", "estimated_cost_usd_high", "estimated_cost_usd"):
             if totals[name] is not None:
                 totals[name] = round(totals[name], 8)
         return totals
@@ -386,7 +419,7 @@ class Store:
                 models = self.aggregate(con, where, args, "model")
                 totals = self.total_rows(models)
                 for model in models:
-                    for name in ("estimated_cost_usd_low", "estimated_cost_usd_high"):
+                    for name in ("estimated_cost_usd_low", "estimated_cost_usd_high", "estimated_cost_usd"):
                         if model[name] is not None:
                             model[name] = round(model[name], 8)
                 windows.append({"period": period, "start_utc": start, "end_utc": end,

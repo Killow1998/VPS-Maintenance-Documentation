@@ -1,0 +1,182 @@
+diff --git a/internal/redisqueue/cache_ttl_usage_test.go b/internal/redisqueue/cache_ttl_usage_test.go
+new file mode 100644
+index 0000000..b1e6320
+--- /dev/null
++++ b/internal/redisqueue/cache_ttl_usage_test.go
+@@ -0,0 +1,40 @@
++package redisqueue
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++)
++
++func TestQueueRetainsCacheTTLUsage(t *testing.T) {
++	withEnabledQueue(t, func() {
++		plugin := &usageQueuePlugin{}
++		plugin.HandleUsage(context.Background(), coreusage.Record{
++			Provider: "claude", Model: "synthetic-model",
++			Detail: coreusage.Detail{
++				InputTokens: 60, OutputTokens: 30, CacheReadTokens: 30, CacheCreationTokens: 10,
++				TotalTokens:   130,
++				CacheCreation: &coreusage.CacheCreationUsage{Ephemeral5mInputTokens: 3, Ephemeral1hInputTokens: 7},
++			},
++		})
++		payload := popSinglePayload(t)
++		var tokens map[string]any
++		if err := json.Unmarshal(payload["tokens"], &tokens); err != nil {
++			t.Fatal(err)
++		}
++		creation := tokens["cache_creation"].(map[string]any)
++		if creation["ephemeral_5m_input_tokens"] != float64(3) || creation["ephemeral_1h_input_tokens"] != float64(7) {
++			t.Fatalf("TTL buckets changed in queue: %+v", creation)
++		}
++		plugin.HandleUsage(context.Background(), coreusage.Record{Provider: "claude"})
++		tokens = nil
++		if err := json.Unmarshal(popSinglePayload(t)["tokens"], &tokens); err != nil {
++			t.Fatal(err)
++		}
++		if _, exists := tokens["cache_creation"]; exists {
++			t.Fatal("missing TTL data became a zero-valued bucket")
++		}
++	})
++}
+diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
+index 04328ef..956fb17 100644
+--- a/internal/redisqueue/plugin.go
++++ b/internal/redisqueue/plugin.go
+@@ -112,6 +112,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+ 		CacheReadTokens:        usageDetail.CacheReadTokens,
+ 		CacheReadTokensPresent: true,
+ 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
++		CacheCreation:          usageDetail.CacheCreation,
+ 		TotalTokens:            usageDetail.TotalTokens,
+ 	}
+ 
+@@ -233,6 +234,7 @@ type tokenStats struct {
+ 	CacheReadTokens        int64 `json:"cache_read_tokens"`
+ 	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
+ 	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
++	CacheCreation          *coreusage.CacheCreationUsage `json:"cache_creation,omitempty"`
+ 	TotalTokens            int64 `json:"total_tokens"`
+ }
+ 
+diff --git a/internal/runtime/executor/helps/cache_ttl_usage_test.go b/internal/runtime/executor/helps/cache_ttl_usage_test.go
+new file mode 100644
+index 0000000..11aa6aa
+--- /dev/null
++++ b/internal/runtime/executor/helps/cache_ttl_usage_test.go
+@@ -0,0 +1,51 @@
++package helps
++
++import "testing"
++
++func TestClaudeCacheTTLUsageAndStreamMerge(t *testing.T) {
++	start := []byte(`{"type":"message_start","message":{"usage":{"input_tokens":60,"cache_read_input_tokens":30,"cache_creation_input_tokens":10,"output_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}}`)
++	initial, ok := ParseClaudeStreamUsage(start)
++	if !ok || initial.CacheCreation == nil {
++		t.Fatal("missing initial cache TTL buckets")
++	}
++	end, ok := ParseClaudeStreamUsage([]byte(`{"type":"message_delta","usage":{"output_tokens":30}}`))
++	merged := MergeStreamUsageDetail(initial, end)
++	if !ok || merged.CacheCreation == nil || merged.CacheCreation.Ephemeral5mInputTokens != 3 ||
++		merged.CacheCreation.Ephemeral1hInputTokens != 7 || merged.CacheCreationTokens != 10 {
++		t.Fatalf("lost TTL buckets on output-only delta: %+v", merged)
++	}
++	if !merged.TokenBreakdown.Valid() || merged.TokenBreakdown.TotalTokens != 130 {
++		t.Fatalf("token accounting changed: %+v", merged.TokenBreakdown)
++	}
++}
++
++func TestClaudeCacheTTLRejectsMissingOrInconsistentBuckets(t *testing.T) {
++	for _, creation := range []string{
++		`{}`, `{"ephemeral_5m_input_tokens":10}`,
++		`{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":8}`,
++		`{"ephemeral_5m_input_tokens":-1,"ephemeral_1h_input_tokens":11}`,
++		`{"ephemeral_5m_input_tokens":3.5,"ephemeral_1h_input_tokens":6.5}`,
++		`{"ephemeral_5m_input_tokens":"3","ephemeral_1h_input_tokens":7}`,
++	} {
++		payload := []byte(`{"usage":{"input_tokens":60,"cache_creation_input_tokens":10,"output_tokens":30,"cache_creation":` + creation + `}}`)
++		if detail := ParseClaudeUsage(payload); detail.CacheCreation != nil {
++			t.Fatalf("accepted ambiguous TTL buckets: %s", creation)
++		}
++	}
++	detail := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":60,"output_tokens":30,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}`))
++	if detail.CacheCreation == nil || detail.CacheCreation.Ephemeral1hInputTokens != 0 {
++		t.Fatal("explicit zero must remain distinguishable from missing data")
++	}
++}
++
++func TestClaudeCacheTTLOrdinaryMixedAndMissing(t *testing.T) {
++	payload := []byte(`{"usage":{"input_tokens":60,"cache_read_input_tokens":30,"cache_creation_input_tokens":10,"output_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}`)
++	detail := ParseClaudeUsage(payload)
++	if detail.CacheCreation == nil || detail.CacheCreation.Ephemeral5mInputTokens != 3 || detail.CacheCreation.Ephemeral1hInputTokens != 7 || !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.TotalTokens != 130 {
++		t.Fatalf("ordinary mixed TTL usage changed: %+v", detail)
++	}
++	missing := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":60,"cache_creation_input_tokens":10,"output_tokens":30}}`))
++	if missing.CacheCreation != nil || missing.CacheCreationTokens != 10 {
++		t.Fatalf("missing TTL became known or lost aggregate: %+v", missing)
++	}
++}
+diff --git a/internal/runtime/executor/helps/plugin_executor_usage.go b/internal/runtime/executor/helps/plugin_executor_usage.go
+index 27dcf04..aed63b8 100644
+--- a/internal/runtime/executor/helps/plugin_executor_usage.go
++++ b/internal/runtime/executor/helps/plugin_executor_usage.go
+@@ -175,6 +175,9 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
+ 	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
+ 		merged.CacheCreationTokens = existing.CacheCreationTokens
+ 	}
++	if merged.CacheCreation == nil && merged.CacheCreationTokens == existing.CacheCreationTokens {
++		merged.CacheCreation = existing.CacheCreation
++	}
+ 	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
+ 		merged.OutputTokens = existing.OutputTokens
+ 	}
+diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
+index 6a2b951..1987e81 100644
+--- a/internal/runtime/executor/helps/usage_helpers.go
++++ b/internal/runtime/executor/helps/usage_helpers.go
+@@ -1231,6 +1231,17 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+ 		CacheReadTokens:     cacheReadTokens,
+ 		CacheCreationTokens: cacheCreationTokens,
+ 	}
++	five := usageNode.Get("cache_creation.ephemeral_5m_input_tokens")
++	hour := usageNode.Get("cache_creation.ephemeral_1h_input_tokens")
++	if five.Type == gjson.Number && hour.Type == gjson.Number &&
++		five.Float() == float64(five.Int()) && hour.Float() == float64(hour.Int()) &&
++		five.Int() >= 0 && hour.Int() >= 0 && five.Int() <= cacheCreationTokens &&
++		hour.Int() == cacheCreationTokens-five.Int() {
++		detail.CacheCreation = &usage.CacheCreationUsage{
++			Ephemeral5mInputTokens: five.Int(),
++			Ephemeral1hInputTokens: hour.Int(),
++		}
++	}
+ 	// Anthropic reports the speed a response was served and billed at in
+ 	// usage.speed ("fast" or "standard"): fast mode costs more, and a
+ 	// fast request on a model without it runs, and is billed, at standard.
+diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
+index 5bb761e..835c65e 100644
+--- a/sdk/cliproxy/usage/manager.go
++++ b/sdk/cliproxy/usage/manager.go
+@@ -91,11 +91,18 @@ type Detail struct {
+ 	CachedTokens        int64
+ 	CacheReadTokens     int64
+ 	CacheCreationTokens int64
++	CacheCreation       *CacheCreationUsage
+ 	TotalTokens         int64
+ 	TokenBreakdown      TokenBreakdown
+ 	ResponseServiceTier string
+ }
+ 
++// CacheCreationUsage retains upstream-reported TTL buckets, not requested TTLs.
++type CacheCreationUsage struct {
++	Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
++	Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
++}
++
+ type requestedModelAliasContextKey struct{}
+ type reasoningEffortContextKey struct{}
+ type serviceTierContextKey struct{}

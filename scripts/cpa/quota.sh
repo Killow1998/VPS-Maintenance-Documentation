@@ -26,10 +26,13 @@ import io
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import stat
 import tempfile
+import threading
+import time
 from pathlib import Path
 import unicodedata
 import warnings
@@ -40,6 +43,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 WINDOW = re.compile(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?")
 COLOR = sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
+AUTO_REFRESH_SECONDS = 300
 
 
 class TerminalUI:
@@ -147,9 +151,15 @@ class TerminalUI:
                 column += sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in safe)
         self.screen.refresh()
 
-    def key(self):
+    def key(self, timeout=None):
         curses = self.curses
-        value = self.screen.get_wch()
+        self.screen.timeout(-1 if timeout is None else timeout)
+        try:
+            value = self.screen.get_wch()
+        except curses.error:
+            return 'tick'
+        finally:
+            self.screen.timeout(-1)
         if value == "\x03":
             raise KeyboardInterrupt
         names = {curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_LEFT: "left",
@@ -501,16 +511,15 @@ def number(value):
 
 def cost(row):
     low, high = row.get("estimated_cost_usd_low"), row.get("estimated_cost_usd_high")
-    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in (low, high)):
+    value = row.get("estimated_cost_usd", high)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         return "未知"
-    if low < 0 or high < low:
-        return "未知"
-    precision = 8 if any(0 < x < .0001 for x in (low, high)) else 4
-    left, right = f"${low:.{precision}f}", f"${high:.{precision}f}"
-    value = left if left == right else left + "–" + right
+    uncertain = row.get('cache_ttl_unknown_requests', 0) > 0 or ('estimated_cost_usd' not in row and low != high)
+    precision = 8 if 0 < value < .0001 else 4
+    amount = ('~' if uncertain else '') + f"${value:.{precision}f}"
     priced, requests = row.get("priced_requests"), row.get("requests")
     partial = isinstance(priced, int) and isinstance(requests, int) and 0 <= priced < requests
-    return ("*" if partial else "") + value
+    return ("*" if partial else "") + amount
 
 
 def cache_percent(row):
@@ -789,6 +798,22 @@ def connection_form(proxy, base, key_env):
     return 'http://' + host + ':' + values[0], values[1], values[2], values[3]
 
 
+def query_snapshot(base, key, views, params, opener, stopped=None):
+    results, errors = {}, {}
+    for view in views:
+        if stopped is not None and stopped.is_set():
+            break
+        path = "/v1/usage?" + urlencode(params) if view == "usage" else "/v1/quota"
+        scope = "own_key" if view == "usage" else "shared_pool"
+        try:
+            results[view] = fetch(base, key, path, scope, opener)
+        except RuntimeError as error:
+            errors[view] = str(error)
+        except Exception:
+            errors[view] = '查询失败，请检查代理和服务。'
+    return results, errors
+
+
 def main():
     parser = argparse.ArgumentParser(description="本 Key 用量、近期调用与匿名号池余量；只需 Base URL + 自己的 CPA API Key。")
     parser.add_argument("base_url", nargs="?", default=os.environ.get("CPA_BASEURL", ""), help="HTTPS 根地址；默认 CPA_BASEURL；未提供则交互输入")
@@ -835,6 +860,7 @@ def main():
     views = ["usage", "quota"] if args.view == "all" else [args.view]
     terminal = None
     key = None
+    stopped, updates, worker = threading.Event(), queue.Queue(maxsize=1), None
     try:
         if args.tui:
             terminal = TerminalUI().__enter__()
@@ -842,18 +868,29 @@ def main():
         connection_key = None
         offer_save = sys.stdout.isatty() and not saved and not args.tui
         refresh, selected, page, offset, notice, panel = True, "1h", 0, 0, '', 'overview'
+        results, errors, loaded = {}, {}, False
+        next_refresh = time.monotonic()
+
+        def refresh_in_background():
+            updates.put(query_snapshot(base, key, views, params, opener, stopped))
+
         while True:
-            if refresh:
-                if terminal:
-                    terminal.draw('CPA / 用量与额度', ['正在通过 VPN 查询…'], '查询中')
-                results, errors = {}, {}
-                for view in views:
-                    path = "/v1/usage?" + urlencode(params) if view == "usage" else "/v1/quota"
-                    scope = "own_key" if view == "usage" else "shared_pool"
-                    try:
-                        results[view] = fetch(base, key, path, scope, opener)
-                    except RuntimeError as error:
-                        errors[view] = str(error)
+            if refresh or (terminal and worker is None and time.monotonic() >= next_refresh):
+                if not loaded:
+                    if terminal:
+                        terminal.draw('CPA / 用量与额度', ['正在通过 VPN 查询…'], '查询中')
+                    results, errors = query_snapshot(base, key, views, params, opener)
+                    loaded = True
+                elif worker is None:
+                    worker = threading.Thread(target=refresh_in_background, daemon=True)
+                    worker.start()
+                next_refresh = time.monotonic() + AUTO_REFRESH_SECONDS
+                refresh = False
+            if worker is not None and not updates.empty():
+                results, errors = updates.get_nowait()
+                worker = None
+                next_refresh = time.monotonic() + AUTO_REFRESH_SECONDS
+                notice = ''
             failed = bool(errors)
             if args.tui:
                 lines = dashboard_lines(results, errors, selected, page, panel, terminal.size()[0])
@@ -890,11 +927,14 @@ def main():
             capacity = terminal.size()[1]
             limit = max(0, len(lines) - capacity)
             offset = min(offset, limit)
-            color_state = '彩色' if terminal.colors else '单色(C开启)'
-            status = '部分查询失败' if failed else '只读 · ' + color_state
-            terminal.draw('CPA  用量看板 · ' + status, lines[offset:offset + capacity],
-                          'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出', notice=notice)
-            action = terminal.key()
+            title = 'CPA  用量看板' + (' · 部分查询失败' if failed else '')
+            terminal.draw(title, lines[offset:offset + capacity],
+                          'Tab 视图  1-4 时段  N/P 翻页  ↑↓ 滚动  C 配色  R 刷新  Q 退出',
+                          notice='正在刷新…' if worker is not None else notice)
+            while True:
+                action = terminal.key(200)
+                if action != 'tick' or not updates.empty() or (worker is None and time.monotonic() >= next_refresh):
+                    break
             if action in ('q', 'Q', 'escape'):
                 break
             action = action.lower() if isinstance(action, str) else ''
@@ -922,6 +962,7 @@ def main():
             elif action == 'end':
                 offset = limit
     finally:
+        stopped.set()
         key = None
         if terminal:
             terminal.__exit__(None, None, None)

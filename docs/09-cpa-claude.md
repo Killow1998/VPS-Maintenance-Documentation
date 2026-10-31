@@ -413,7 +413,7 @@ $env:ANTHROPIC_AUTH_TOKEN = [System.Net.NetworkCredential]::new('', $secureKey).
 
 5 分钟缓存不是每隔 5 分钟固定清空：命中会刷新有效期。`1h` 缓存写入价格比 `5m` 高 60%，适合减少长停顿后的重写；持续高频使用通常选 `5m`。更换模型、上游账号或提示词前缀仍可能未命中。[缓存时长与费用](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
 
-用一次原本就要进行的调用观察 `usage.cache_creation.ephemeral_1h_input_tokens`；非零表示发生过 1 小时缓存写入。已经命中时，写入数可为零，结合缓存读取量判断，不额外发付费探测请求。当前费用估算保留 `5m` / `1h` 写入区间，不根据推荐值重算历史账目。[缓存用量字段](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
+用一次原本就要进行的调用观察 `usage.cache_creation.ephemeral_1h_input_tokens`；非零表示发生过 1 小时缓存写入。已经命中时，写入数可为零，结合缓存读取量判断，不额外发付费探测请求。observer 按上游返回的 `5m/1h` 写入量计价，不根据客户端推荐值猜测时长。CPA 透传与采集端升级见[缓存时长更新](../scripts/cpa/cpa-observer/CACHE_TTL_UPDATE.md)。[缓存用量字段](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
 
 ## 8. 验证鉴权、模型与真实生成
 
@@ -551,7 +551,7 @@ python3 scripts/cpa/cpa-tools/api_keys.py
 | 刷新 | `R` 或回车 |
 | 退出 | `Q` |
 
-看板按键即时生效。切换、翻页和滚动使用已取得的数据。手动刷新分别查询一次用量和账户池接口，不自动轮询。窗口较小时可滚动查看，缩放不会触发查询。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
+看板每 5 分钟后台刷新；`R` 或回车立即刷新，每轮分别查询一次用量和账户池接口。查询不会重叠，期间可继续切换视图，关闭工具后停止查询。切换、翻页、滚动和缩放使用已有数据。表中的 K/M/B/T 表示千、百万、十亿、万亿；具体统计含义见下一节。
 
 #### 已有查询端检查与更新
 
@@ -595,7 +595,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/87571c98f4e533d2d28caef4fdfc7b74f12408a2/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -607,7 +607,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/5bc9330a333afe1255829621004385318761afdc/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/87571c98f4e533d2d28caef4fdfc7b74f12408a2/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```
@@ -664,7 +664,7 @@ Bash 加 `--once`，PowerShell 加 `-Once`，查询一次后退出。默认输�
 
 **缓存。** 输入总数由普通输入、缓存读取和缓存写入组成；缓存命中率取该期间缓存读取总数占输入总数的比例。没有输入或计量字段缺失时，显示“未知”。
 
-**费用。** 普通输入、缓存读取、缓存写入和输出分别计价，输出包含推理 token。价格保存在每条记录中，后续价格调整保留原记录的金额。缓存写入有效期未记录时，分别按 5 分钟和 1 小时价格估算，显示费用区间。缺少价格或计量信息的请求会标为未知。价格依据见 [Anthropic 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)。
+**费用。** 普通输入、缓存读取、缓存写入和输出分别计价，输出包含推理 token。金额显示单个美元估算值；缓存写入按上游报告的 5 分钟和 1 小时用量分别计算。时长未采集的旧记录按 1 小时费率估算，金额前标 `~`，不重写旧记录。缺少价格或计量信息的请求标为未知。价格在入库时固定，后续调价不改变历史金额。升级方法见[缓存时长更新](../scripts/cpa/cpa-observer/CACHE_TTL_UPDATE.md)，价格依据见 [Anthropic 官方价格](https://platform.claude.com/docs/en/about-claude/pricing)。
 
 **记录范围。** observer 从部署后开始采集。内存队列到 SQLite 写入之间发生故障时，可能丢失记录，因此该工具用于用量观察，费用核对以服务商账单为准。服务端只运行一个队列消费者，维护时保留数据库。
 
