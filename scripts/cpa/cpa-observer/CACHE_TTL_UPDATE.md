@@ -69,4 +69,6 @@ go test ./sdk/cliproxy/usage ./internal/redisqueue ./internal/runtime/executor/h
 go build -trimpath -o cli-proxy-api ./cmd/server
 ```
 
-补丁不包含二进制。它通过源码应用检查；Go 编译与测试须由维护 Agent 在构建机完成后才能部署。
+补丁不包含二进制。队列测试通过 JSON 解码读取 `json.RawMessage`，并覆盖普通响应的混合 TTL 与字段缺失；不能对 RawMessage 直接断言为 map。
+
+2026-10-31（Asia/Shanghai）：在 v8.0.42 / `bc0643405a1d0adf77dd0f109972ac3313d66397` 验证补丁干净应用及 gofmt，使用 macOS amd64 / Go 1.27.3 通过上述三个包的测试，并完成 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 交叉构建。后续维护仍须在自己的构建机完成编译、测试和校验后才能部署；这些结果不代替生产 TTL 采集验收。

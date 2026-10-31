@@ -1,13 +1,14 @@
 diff --git a/internal/redisqueue/cache_ttl_usage_test.go b/internal/redisqueue/cache_ttl_usage_test.go
 new file mode 100644
-index 0000000..e0de858
+index 0000000..b1e6320
 --- /dev/null
 +++ b/internal/redisqueue/cache_ttl_usage_test.go
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,40 @@
 +package redisqueue
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"testing"
 +
 +	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -20,18 +21,24 @@ index 0000000..e0de858
 +			Provider: "claude", Model: "synthetic-model",
 +			Detail: coreusage.Detail{
 +				InputTokens: 60, OutputTokens: 30, CacheReadTokens: 30, CacheCreationTokens: 10,
-+				TotalTokens: 130,
++				TotalTokens:   130,
 +				CacheCreation: &coreusage.CacheCreationUsage{Ephemeral5mInputTokens: 3, Ephemeral1hInputTokens: 7},
 +			},
 +		})
 +		payload := popSinglePayload(t)
-+		tokens := payload["tokens"].(map[string]any)
++		var tokens map[string]any
++		if err := json.Unmarshal(payload["tokens"], &tokens); err != nil {
++			t.Fatal(err)
++		}
 +		creation := tokens["cache_creation"].(map[string]any)
 +		if creation["ephemeral_5m_input_tokens"] != float64(3) || creation["ephemeral_1h_input_tokens"] != float64(7) {
 +			t.Fatalf("TTL buckets changed in queue: %+v", creation)
 +		}
 +		plugin.HandleUsage(context.Background(), coreusage.Record{Provider: "claude"})
-+		tokens = popSinglePayload(t)["tokens"].(map[string]any)
++		tokens = nil
++		if err := json.Unmarshal(popSinglePayload(t)["tokens"], &tokens); err != nil {
++			t.Fatal(err)
++		}
 +		if _, exists := tokens["cache_creation"]; exists {
 +			t.Fatal("missing TTL data became a zero-valued bucket")
 +		}
@@ -59,10 +66,10 @@ index 04328ef..956fb17 100644
  
 diff --git a/internal/runtime/executor/helps/cache_ttl_usage_test.go b/internal/runtime/executor/helps/cache_ttl_usage_test.go
 new file mode 100644
-index 0000000..f3ba3db
+index 0000000..11aa6aa
 --- /dev/null
 +++ b/internal/runtime/executor/helps/cache_ttl_usage_test.go
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,51 @@
 +package helps
 +
 +import "testing"
@@ -100,6 +107,18 @@ index 0000000..f3ba3db
 +	detail := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":60,"output_tokens":30,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}`))
 +	if detail.CacheCreation == nil || detail.CacheCreation.Ephemeral1hInputTokens != 0 {
 +		t.Fatal("explicit zero must remain distinguishable from missing data")
++	}
++}
++
++func TestClaudeCacheTTLOrdinaryMixedAndMissing(t *testing.T) {
++	payload := []byte(`{"usage":{"input_tokens":60,"cache_read_input_tokens":30,"cache_creation_input_tokens":10,"output_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}`)
++	detail := ParseClaudeUsage(payload)
++	if detail.CacheCreation == nil || detail.CacheCreation.Ephemeral5mInputTokens != 3 || detail.CacheCreation.Ephemeral1hInputTokens != 7 || !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.TotalTokens != 130 {
++		t.Fatalf("ordinary mixed TTL usage changed: %+v", detail)
++	}
++	missing := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":60,"cache_creation_input_tokens":10,"output_tokens":30}}`))
++	if missing.CacheCreation != nil || missing.CacheCreationTokens != 10 {
++		t.Fatalf("missing TTL became known or lost aggregate: %+v", missing)
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/plugin_executor_usage.go b/internal/runtime/executor/helps/plugin_executor_usage.go
