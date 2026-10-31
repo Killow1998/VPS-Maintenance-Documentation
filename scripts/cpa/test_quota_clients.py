@@ -132,6 +132,7 @@ class PythonClientTests(unittest.TestCase):
     def test_no_args_interactive_setup_refresh_and_quit(self):
         actions = iter(('2', 'n', 'p', '4', 'r', 'q'))
         calls, events, selections = [], [], []
+        refreshed = threading.Event()
         output = io.StringIO()
         output.isatty = lambda: True
 
@@ -150,7 +151,10 @@ class PythonClientTests(unittest.TestCase):
                 pass
 
             def key(self, timeout=None):
-                return next(actions)
+                action = next(actions)
+                if action == 'q' and not refreshed.wait(2):
+                    raise RuntimeError('Synthetic background refresh did not finish')
+                return action
 
         def connection(*args):
             events.append('setup')
@@ -163,6 +167,8 @@ class PythonClientTests(unittest.TestCase):
             proxies = [handler for handler in opener.handlers if isinstance(handler, CLIENT["RequiredProxy"])]
             self.assertEqual(proxies[0].authority, "127.0.0.1:7897")
             calls.append(path)
+            if len(calls) == 4:
+                refreshed.set()
             return overview() if scope == "own_key" else {"scope": "shared_pool", "accounts": []}
 
         render = CLIENT["dashboard_lines"]
