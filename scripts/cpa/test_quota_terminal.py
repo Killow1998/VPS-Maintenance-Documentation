@@ -118,12 +118,14 @@ class TerminalIntegrationTests(unittest.TestCase):
         else:
             cls.shells = ['python']
 
-    def start(self, directory, shell, rows=24, columns=80, preview=None, colors=True, term='xterm-256color', capture=False):
+    def start(self, directory, shell, rows=24, columns=80, preview=None, colors=True, term='xterm-256color', capture=False,
+              refresh_interval=300):
         home = Path(directory)
         env = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
         env.update(CPA_PROXY='', CPA_BASEURL='', CPA_QUERY_CHOICE='2', TERM=term,
                    CPA_TEST_HOME=str(home), CPA_TEST_SOURCE=str(ROOT / 'quota.ps1'),
                    CPA_TEST_EVENTS=str(home / 'events'), CPA_TEST_DATA=str(home / 'data.json'),
+                   CPA_TEST_REFRESH=str(refresh_interval),
                    CPA_TEST_CAPTURE='1' if capture else '')
         env.pop('NO_COLOR', None)
         if not colors:
@@ -135,11 +137,17 @@ class TerminalIntegrationTests(unittest.TestCase):
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
 $source=[IO.File]::ReadAllText($env:CPA_TEST_SOURCE)
 . ([scriptblock]::Create($source.Substring(0,$source.LastIndexOf('Invoke-CpaReport'))))
+$script:CpaAutoRefreshSeconds = [double]$env:CPA_TEST_REFRESH
 function Get-CpaConfigPath { return (Join-Path (Join-Path $env:CPA_TEST_HOME '.cpa') 'query.json') }
 function Invoke-RestMethod {
     param($Uri,$Headers,$Method,$Proxy,[switch]$UseBasicParsing,$MaximumRedirection,$TimeoutSec,$ErrorAction)
     if($Headers.Authorization -ne 'Bearer synthetic-ui-key' -or [string]$Proxy -ne 'http://127.0.0.1:7897/' -or $MaximumRedirection -ne 0){throw 'unsafe request'}
     [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"request`n")
+    if($Uri -like '*/v1/usage*') {
+        $delay=Join-Path $env:CPA_TEST_HOME 'delay'
+        if(Test-Path -LiteralPath $delay){Start-Sleep -Milliseconds ([double][IO.File]::ReadAllText($delay)*1000)}
+        if(Test-Path -LiteralPath (Join-Path $env:CPA_TEST_HOME 'fail')){throw 'synthetic failure'}
+    }
     if($Uri -like '*/v1/usage?period=overview'){return ([IO.File]::ReadAllText($env:CPA_TEST_DATA)|ConvertFrom-Json)}
     if($Uri -like '*/v1/quota'){return ([IO.File]::ReadAllText((Join-Path $env:CPA_TEST_HOME 'quota.json'))|ConvertFrom-Json)}
     throw 'unexpected request'
@@ -147,6 +155,8 @@ function Invoke-RestMethod {
 $script:originalLines=${function:Get-CpaDashboardLines}
 function Get-CpaDashboardLines($Results,$Failures,$Views,$Selected,$Page,$Panel,$Width) {
     [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"view:${Selected}:${Page}:${Panel}:${Width}`n")
+    $total = if($Results.ContainsKey('usage')){$Results.usage.windows[-1].totals.requests}else{''}
+    [IO.File]::AppendAllText($env:CPA_TEST_EVENTS,"snapshot:${total}:$($Failures.ContainsKey('usage')):$($Results.ContainsKey('quota'))`n")
     & $script:originalLines $Results $Failures $Views $Selected $Page $Panel $Width
 }
 $script:originalFrame=${function:Show-CpaConsoleFrame}
@@ -165,6 +175,7 @@ Invoke-CpaReport
             source = source.rsplit('\ntry:\n    main()', 1)[0]
             code = source + '''
 sys.argv = ['quota']
+AUTO_REFRESH_SECONDS = float(os.environ['CPA_TEST_REFRESH'])
 config_path = lambda: Path(os.environ['CPA_TEST_HOME']) / '.cpa' / 'query.json'
 def event(value):
     with open(os.environ['CPA_TEST_EVENTS'], 'a', encoding='utf-8') as output:
@@ -199,11 +210,19 @@ def fetch(base, key, path, scope, opener):
     assert key == 'synthetic-ui-key'
     assert base == 'https://cpa.example.invalid'
     event('request')
+    if scope == 'own_key':
+        delay = Path(os.environ['CPA_TEST_HOME']) / 'delay'
+        if delay.exists():
+            time.sleep(float(delay.read_text()))
+        if (delay.parent / 'fail').exists():
+            raise RuntimeError('synthetic failure')
     path = Path(os.environ['CPA_TEST_DATA']) if scope == 'own_key' else Path(os.environ['CPA_TEST_HOME']) / 'quota.json'
     return json.loads(path.read_text())
 original_render = dashboard_lines
 def dashboard_lines(results, errors, selected, page, panel, width):
     event(f'view:{selected}:{page}:{panel}:{width}')
+    total = results['usage']['windows'][-1]['totals']['requests'] if 'usage' in results else ''
+    event(f"snapshot:{total}:{'usage' in errors}:{'quota' in results}")
     return original_render(results, errors, selected, page, panel, width)
 main()
 '''
@@ -353,6 +372,62 @@ $launcher=$launcher.Insert($launcher.LastIndexOf('Start-CpaQuota'),$hooks+"`n")
                         self.assertEqual(saved['proxy_url'].rstrip('/'), 'http://127.0.0.1:7897')
                     finally:
                         terminal.close()
+
+    def test_background_timer_coalesces_refresh_and_recovers(self):
+        for shell in self.shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                terminal = self.start(directory, shell, refresh_interval=2)
+                events = home / 'events'
+                history = lambda: events.read_text(encoding='utf-8') if events.exists() else ''
+                try:
+                    self.wait_for(terminal, lambda: 'API Key' in terminal.output)
+                    terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t\t\r')
+                    self.wait_for(terminal, lambda: 'snapshot:4:False:True' in history())
+                    (home / 'delay').write_text('2')
+                    (home / 'fail').touch()
+                    self.wait_for(terminal, lambda: history().count('request') == 3)
+                    # The UI must stay responsive while the synthetic API is blocked.
+                    terminal.send('\t')
+                    self.wait_for(terminal, lambda: ':models:' in history())
+                    terminal.send('rrrr')
+                    time.sleep(.2)
+                    self.assertEqual(history().count('request'), 3)
+                    self.wait_for(terminal, lambda: 'snapshot::True:True' in history())
+                    self.assertEqual(history().count('request'), 4)
+                    (home / 'fail').unlink()
+                    (home / 'delay').unlink()
+                    before = history().count('snapshot:4:False:True')
+                    terminal.send('r')
+                    self.wait_for(terminal, lambda: history().count('snapshot:4:False:True') > before)
+                    self.assertEqual(history().count('request'), 6)
+                    terminal.send('q')
+                    self.wait_for(terminal, lambda: not terminal.alive())
+                    time.sleep(.2)
+                    self.assertEqual(history().count('request'), 6)
+                    self.assertNotIn(SECRET, terminal.output)
+                finally:
+                    terminal.close()
+
+    def test_quit_during_background_request(self):
+        for shell in self.shells:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                terminal = self.start(directory, shell, refresh_interval=1)
+                events = home / 'events'
+                history = lambda: events.read_text(encoding='utf-8') if events.exists() else ''
+                try:
+                    self.wait_for(terminal, lambda: 'API Key' in terminal.output)
+                    terminal.send('7897\thttps://cpa.example.invalid/v1/\t' + SECRET + '\t\t\r')
+                    self.wait_for(terminal, lambda: 'snapshot:4:False:True' in history())
+                    (home / 'delay').write_text('10')
+                    self.wait_for(terminal, lambda: history().count('request') == 3)
+                    terminal.send('q')
+                    self.wait_for(terminal, lambda: not terminal.alive(), timeout=3)
+                    self.assertEqual(history().count('request'), 3)
+                    self.assertNotIn(SECRET, terminal.output)
+                finally:
+                    terminal.close()
 
     @unittest.skipIf(os.name == 'nt', 'POSIX curses color fallback')
     def test_secondary_text_uses_readable_foreground(self):

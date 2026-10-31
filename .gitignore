@@ -75,6 +75,10 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/cpa-observer/prices.json
 !scripts/cpa/cpa-observer/query.py
 !scripts/cpa/cpa-observer/test_observer.py
+!scripts/cpa/cpa-observer/CACHE_TTL_UPDATE.md
+!scripts/cpa/cpa-observer/patches/
+scripts/cpa/cpa-observer/patches/*
+!scripts/cpa/cpa-observer/patches/cpa-v8.0.42-cache-ttl.patch
 !scripts/cpa/cpa-tools/README.md
 !scripts/cpa/cpa-tools/api_keys.py
 !scripts/cpa/cpa-tools/claude_auth.py

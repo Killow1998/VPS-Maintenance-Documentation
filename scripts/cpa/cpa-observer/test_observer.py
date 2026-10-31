@@ -43,6 +43,60 @@ class StorageTests(unittest.TestCase):
         self.assertAlmostEqual(totals["estimated_cost_usd_low"], (60*2 + 30*.1 + 10*2.5 + 30*10)/1e6)
         self.assertGreater(totals["estimated_cost_usd_high"], totals["estimated_cost_usd_low"])
 
+    def test_actual_cache_ttl_is_stored_and_priced(self):
+        for index, (five, hour) in enumerate(((10, 0), (0, 10), (3, 7))):
+            item = event(execution=f"ttl-{index}")
+            item['tokens']['cache_creation'] = {
+                'ephemeral_5m_input_tokens': five, 'ephemeral_1h_input_tokens': hour}
+            self.assertEqual(self.store.ingest([item, item]), (1, 0))
+        report = self.store.summary(self.store.client('test-key-a'), 'all')
+        totals = report['totals']
+        self.assertEqual((totals['cache_write_5m_tokens'], totals['cache_write_1h_tokens']), (13, 17))
+        expected = (3 * (60*2 + 30*.1 + 30*10) + 13*2.5 + 17*4) / 1e6
+        self.assertAlmostEqual(totals['estimated_cost_usd'], expected)
+        self.assertEqual(totals['estimated_cost_usd_low'], totals['estimated_cost_usd_high'])
+        self.assertEqual(totals['cache_ttl_unknown_requests'], 0)
+        self.assertTrue(all(row['cache_write_5m_tokens'] is not None for row in report['recent']))
+        overview = self.store.overview(self.store.client('test-key-a'))
+        self.assertEqual(overview['windows'][-1]['totals'], totals)
+
+    def test_missing_or_invalid_ttl_is_not_invented(self):
+        for index, creation in enumerate((None, 'invalid', {},
+                {'ephemeral_5m_input_tokens': 3, 'ephemeral_1h_input_tokens': 8},
+                {'ephemeral_5m_input_tokens': True, 'ephemeral_1h_input_tokens': 9},
+                {'ephemeral_5m_input_tokens': -1, 'ephemeral_1h_input_tokens': 11})):
+            item = event(execution=f"unknown-ttl-{index}")
+            item['tokens']['cache_creation'] = creation
+            self.assertEqual(self.store.ingest([item]), (1, 0))
+        totals = self.store.summary(self.store.client('test-key-a'), 'all')['totals']
+        self.assertEqual(totals['cache_ttl_unknown_requests'], 6)
+        self.assertIsNone(totals['cache_write_1h_tokens'])
+        self.assertIsNone(totals['cache_write_5m_tokens'])
+        self.assertEqual(totals['estimated_cost_usd'], totals['estimated_cost_usd_high'])
+
+    def test_old_database_migrates_without_repricing_or_losing_history(self):
+        self.store.ingest([event()])
+        before = self.store.summary(self.store.client('test-key-a'), 'all')
+        with self.store.db() as con:
+            self.assertEqual(len(list(con.execute('PRAGMA table_info(records)'))), 19)
+            con.execute('DROP TABLE cache_ttl')
+        for _ in range(2):
+            self.store = Store(self.path, 'test-secret', {}, self.prices)
+        after = self.store.summary(self.store.client('test-key-a'), 'all')
+        self.assertEqual(before['totals'], after['totals'])
+        self.assertEqual(before['recent'], after['recent'])
+        self.assertEqual(self.store.ingest([event()]), (0, 0))
+        self.assertIsNone(after['recent'][0]['cache_write_5m_tokens'])
+
+    def test_legacy_writer_keeps_working_after_upgrade(self):
+        # A rolled-back observer still writes the original 19-column record.
+        with self.store.db() as con:
+            row = self.store.normalize(event())[:19]
+            con.execute('INSERT INTO records VALUES (' + ','.join('?' * 19) + ')', row)
+        report = self.store.summary(self.store.client('test-key-a'), 'all')
+        self.assertEqual(report['totals']['requests'], 1)
+        self.assertEqual(report['totals']['cache_ttl_unknown_requests'], 1)
+
     def test_per_key_isolation_and_storage_contains_no_secrets(self):
         self.store.ingest([event(), event("test-key-b", "execution-b")])
         a = self.store.summary(self.store.client("test-key-a"), "all")

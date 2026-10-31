@@ -149,7 +149,7 @@ class PythonClientTests(unittest.TestCase):
             def draw(self, *args, **kwargs):
                 pass
 
-            def key(self):
+            def key(self, timeout=None):
                 return next(actions)
 
         def connection(*args):

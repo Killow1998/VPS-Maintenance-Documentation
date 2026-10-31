@@ -120,9 +120,11 @@ def number(value):
 
 def money(totals):
     lo, hi = totals.get("estimated_cost_usd_low"), totals.get("estimated_cost_usd_high")
-    if lo is None or hi is None:
+    value = totals.get('estimated_cost_usd', hi)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         return "未知"
-    return f"${lo:.4f}" if lo == hi else f"${lo:.4f}–{hi:.4f}"
+    uncertain = totals.get('cache_ttl_unknown_requests', 0) > 0 or ('estimated_cost_usd' not in totals and lo != hi)
+    return ('~' if uncertain else '') + f"${value:.4f}"
 
 
 def table_line(row, totals, size=110):
