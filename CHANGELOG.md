@@ -2,6 +2,10 @@
 
 [返回首页](README.md)
 
+## 2026-11-12 Tailscale 订阅分发（America/Los_Angeles）
+
+补充[集中分发注意事项](docs/04-operations.md#34-tun-与-tailscale-共存)：区分 XBoard 的 Clash/ClashMeta 模板与客户端覆写；共享订阅优先使用系统解析器，并在单设备确有需要时评估 Tailscale MagicDNS。更新订阅不等于所有设备的 TUN 配置已经生效。
+
 ## 2026-11-11 Tailscale 与内核修复（America/Los_Angeles）
 
 补充 [Tailscale 与 TUN 共存排查](docs/04-operations.md#34-tun-与-tailscale-共存)：区分客户端路由和 DNS，合并 Tailscale 网段、Fake-IP 排除及 MagicDNS 策略，保留独立救援入口和原配置。一次 Linux 实机在 TUN 开启后连续 5 分钟的 16 次采样正常；其他系统及长期稳定性未验收。

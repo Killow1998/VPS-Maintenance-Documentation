@@ -198,9 +198,10 @@ systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimest
        - '+.tailscale.io'
        - '+.ts.net'
      nameserver-policy:
-       '+.ts.net': 100.100.100.100
+       '+.ts.net': system
    rules:
      - PROCESS-NAME,tailscaled,DIRECT
+     - PROCESS-NAME,tailscaled.exe,DIRECT
      - DOMAIN-SUFFIX,tailscale.com,DIRECT
      - DOMAIN-SUFFIX,tailscale.io,DIRECT
      - DOMAIN-SUFFIX,ts.net,DIRECT
@@ -210,10 +211,12 @@ systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimest
 
    将网段和域名追加到原有列表；将直连规则放在会匹配这些流量的代理或兜底规则之前。先检查网段是否与其他 VPN、运营商 CGNAT 或已批准的子网路由冲突；使用 Tailscale 子网路由时，还需单独检查相应子网。[Mihomo 的 TUN 规则](https://wiki.metacubex.one/config/inbound/tun/)和 [Tailscale 的 VPN 共存说明](https://tailscale.com/docs/reference/faq/other-vpns)说明了这些限制。
 
-   `fake-ip-filter` 上述写法仅适用于 `blacklist`；`whitelist` 和 `rule` 模式的含义不同，不要直接追加。`100.100.100.100` 是本机 Tailscale 的 [MagicDNS 解析器](https://tailscale.com/docs/reference/quad100)，仅在 MagicDNS 已启用、该地址可达且无 DNS 回环时用于 `.ts.net`。若已有同域名策略，先处理冲突。配置了 `direct-nameserver` 时，还需检查 `direct-nameserver-follow-policy`：启用它可能改变其他直连域名的解析，须先评估现有策略，不能无条件覆盖。
+   `fake-ip-filter` 上述写法仅适用于 `blacklist`；`whitelist` 和 `rule` 模式的含义不同，不要直接追加。共享订阅中的 `.ts.net: system` 使用设备的系统解析器，需确认系统能解析该设备的 MagicDNS 域名；不能仅凭订阅内容认为每个客户端都已生效。如果系统解析失败，可在已启用 MagicDNS 的单台设备上评估使用本机 Tailscale 的 [MagicDNS 解析器](https://tailscale.com/docs/reference/quad100) `100.100.100.100`，先确认地址可达且无 DNS 回环。不要在所有用户设备上无条件强制使用该地址：未运行 Tailscale 的设备无法依赖它。若已有同域名策略，先处理冲突。配置了 `direct-nameserver` 时，还需检查 `direct-nameserver-follow-policy`：启用它可能改变其他直连域名的解析，须先评估现有策略，不能无条件覆盖。
 
 3. 验证合并后的客户端配置，重新应用现有订阅，再在有独立救援入口时打开 TUN。确认有效配置包含目标字段；检查对端路由走 `tailscale0`，控制域名不再返回 Fake-IP，持续测试 Tailscale ping、实际 SSH 和原有代理网站。订阅更新或其他覆写可能改变最终配置，须检查实际生效结果。
 4. 若失联，使用独立入口关闭 TUN，恢复本次修改前的客户端覆写并重新应用；若他人期间改过配置，先比较差异，不覆盖后续修改。不要回滚服务器数据库、清空防火墙或重新登录 Tailscale。
+
+使用 XBoard 集中分发时，`clash` 与 `clashmeta` 是不同客户端使用的模板，并非需要两个订阅链接。先备份并同步更新实际使用的模板，保留原有节点、规则和用户数据；客户端还需更新并重新应用订阅。客户端自身的 DNS/TUN 覆写可能优先于订阅，Android 等平台也可能限制多个 VPN 同时运行，因此仍需分别检查生效配置及连接。
 
 **验收边界**：一次 Linux 客户端修复后，TUN 开启期间连续 5 分钟的 16 次采样均正常，控制域名未返回 Fake-IP，Tailscale 连接及控制服务请求可用。此结果不代表所有网络或其他操作系统已经验收，也不证明每次故障只有一个原因。
 
