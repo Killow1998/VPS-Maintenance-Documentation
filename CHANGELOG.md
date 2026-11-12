@@ -2,11 +2,17 @@
 
 [返回首页](README.md)
 
+## 2026-11-11 Tailscale 与内核修复（America/Los_Angeles）
+
+补充 [Tailscale 与 TUN 共存排查](docs/04-operations.md#34-tun-与-tailscale-共存)：区分客户端路由和 DNS，合并 Tailscale 网段、Fake-IP 排除及 MagicDNS 策略，保留独立救援入口和原配置。一次 Linux 实机在 TUN 开启后连续 5 分钟的 16 次采样正常；其他系统及长期稳定性未验收。
+
+[Linux TCP 安全指南](docs/10-linux-tcp-security.md)更新 Ubuntu 已发布的 CVE-2026-98432 修复状态，区分已安装和正在运行，并增加 Ubuntu 通用内核的备份、升级预演、重启及验收步骤。一次既有服务器案例的修复包已经安装，预检后只执行重启；外部订阅、代理转发和计量恢复。其他发行版和内核系列仍需对照官方状态。
+
 ## 2026-10-31 Linux TCP 内核应急缓解（America/Los_Angeles）
 
 新增 [CVE-2026-98432 维护指南](docs/10-linux-tcp-security.md)，区分内核修复、MPTCP 关闭和 IP-options 过滤。包含相关网络命名空间、备份/配置回滚、最小服务重建、验收及 Agent 交接请求。Linux 桥接网络的 Compose 参考增加两个 sysctl，使用前需核对内核支持。
 
-既有部署已验证宿主机及容器没有 MPTCP 监听；过滤在隔离命名空间允许普通 TCP，并丢弃单个无害 IP-options SYN。仅重建原镜像面板并重启独立节点，用户身份/配额、规则和订阅不变，外部真实转发及计量继续。没有重启 VPS、Docker、nginx 或网络服务，也没有运行利用 PoC。正式内核修复仍待发行版发布并另约重启窗口；备份与主机资料不公开。
+既有部署已验证宿主机及容器没有 MPTCP 监听；过滤在隔离命名空间允许普通 TCP，并丢弃单个无害 IP-options SYN。仅重建原镜像面板并重启独立节点，用户身份/配额、规则和订阅不变，外部真实转发及计量继续。当次没有重启 VPS、Docker、nginx 或网络服务，也没有运行利用 PoC。当时正式内核修复仍待发行版发布并另约重启窗口；备份与主机资料不公开。
 
 ## 2026-10-31 后台刷新与缓存时长采集（America/Los_Angeles）
 

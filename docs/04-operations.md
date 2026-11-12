@@ -66,6 +66,7 @@ PY
 | 所有用户同时 timeout | 同一时段端口、节点日志、OOM、出口、控制通道；透明反代还需查回包策略路由 | 一定是晚高峰或某一种内核有 bug |
 | 只有一个设备出错 | 本机代理端口、覆盖配置、TUN、浏览器扩展、有效规则 | 一定要换服务器 |
 | TUN 开启后失联 | 节点/订阅地址直连、路由回环、DNS bootstrap | 加更多 DoH 就一定不会泄漏 |
+| TUN 开启后 Tailscale 断连 | Tailscale 控制域名解析、TUN 排除网段、目标路由 | 一定是服务器或 Tailscale 账号故障 |
 | DIRECT 测速红色，代理正常 | 测速 URL 是否直连可达，再测普通国内站点 | 直连网络整体不可用 |
 | 国内网站关闭代理可访问，开启后间歇超时 | 有效 DIRECT 规则、直连专用 DNS、海外 CDN 是否触发不可达 fallback、DNS 连接实际出口 | 一定是网站封禁 VPS，或逐站加规则才可解决 |
 | 可以上网但面板不计量 | 节点控制 URL、认证、推送、报表任务、数据库计数 | 转发正常就等于面板所有功能正常 |
@@ -163,6 +164,58 @@ systemctl show ROUTE_ROLLBACK_UNIT.service -p ActiveState -p ExecMainStartTimest
 ```
 
 **已验证的边界**：2026-10-14 维护案例在 Ubuntu 24.04 / systemd 255 上实际重启 networkd 后，两条规则仍在，外部两个节点探测成功；接口地址、默认网关不变，未重启节点或 nginx。该案例没有执行整机重启、全新 VPS 重装或长时间可靠性测试，不能将这些状态写为“已通过”。
+
+### 3.4 TUN 与 Tailscale 共存
+
+**执行位置：出现故障的客户端，不是 XBoard VPS。** 本节针对 Linux 上的 Clash Verge Rev / Mihomo，且客户端使用 `auto-route: true`、`auto-redirect: false` 与 Fake-IP 黑名单模式。其他系统、客户端、DNS 模式或启用了 `auto-redirect` 时，需要按实际路由和防火墙单独检查，不能直接宣称此方案适用。
+
+一次故障中，TUN 开启期间 Tailscale 控制连接使用了 Fake-IP 并超时；关闭 TUN 后连接恢复。这表明 DNS 或路由冲突值得优先检查，但不证明所有 Tailscale 故障都由 Fake-IP 引起。先保留控制台、局域网 SSH 等独立入口：**如果当前 SSH 本身走 Tailscale，切换 TUN 可能使连接中断。** 不要为了测试而重启网络、重置 Tailscale 登录或覆盖整个订阅。
+
+1. 在故障设备记录 TUN 开关、当前订阅、Tailscale 状态、DNS 和路由。下面将 `PEER_IP` 换成自己的 Tailscale 对端 IPv4 地址；不要把输出中的私有地址或设备名发到公开场所。
+
+   ```bash
+   read -r -p 'Tailscale 对端 IPv4: ' PEER_IP
+   systemctl is-active tailscaled
+   tailscale status
+   getent ahostsv4 controlplane.tailscale.com
+   ip -4 rule show
+   ip -4 route get "$PEER_IP"
+   tailscale ping --c=3 --timeout=5s "$PEER_IP"
+   ```
+
+   `PEER_IP` 只保存在当前终端会话中。如果控制域名解析到当前配置的 Fake-IP 地址池，需要继续检查 DNS；地址是否为 Fake-IP 要与本机 `fake-ip-range` 对照，不能只根据地址猜测。`tailscale ping` 与真实 SSH 连接应分别测试。
+
+2. 备份当前订阅的本地扩展覆写。以下是需要**合并到现有配置**的字段示例，不是完整订阅，也不能直接覆盖已有 `tun`、`dns` 或 `rules` 列表。具体编辑入口参见 [Clash Verge Rev 脚本说明](https://github.com/clash-verge-rev/clash-verge-rev.github.io/blob/main/docs/guide/script.md)。若已有脚本 `main`，在现有逻辑中追加，不要替换整个函数。
+
+   ```yaml
+   tun:
+     route-exclude-address:
+       - 100.64.0.0/10
+       - 'fd7a:115c:a1e0::/48'
+   dns:
+     fake-ip-filter:
+       - '+.tailscale.com'
+       - '+.tailscale.io'
+       - '+.ts.net'
+     nameserver-policy:
+       '+.ts.net': 100.100.100.100
+   rules:
+     - PROCESS-NAME,tailscaled,DIRECT
+     - DOMAIN-SUFFIX,tailscale.com,DIRECT
+     - DOMAIN-SUFFIX,tailscale.io,DIRECT
+     - DOMAIN-SUFFIX,ts.net,DIRECT
+     - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+     - IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve
+   ```
+
+   将网段和域名追加到原有列表；将直连规则放在会匹配这些流量的代理或兜底规则之前。先检查网段是否与其他 VPN、运营商 CGNAT 或已批准的子网路由冲突；使用 Tailscale 子网路由时，还需单独检查相应子网。[Mihomo 的 TUN 规则](https://wiki.metacubex.one/config/inbound/tun/)和 [Tailscale 的 VPN 共存说明](https://tailscale.com/docs/reference/faq/other-vpns)说明了这些限制。
+
+   `fake-ip-filter` 上述写法仅适用于 `blacklist`；`whitelist` 和 `rule` 模式的含义不同，不要直接追加。`100.100.100.100` 是本机 Tailscale 的 [MagicDNS 解析器](https://tailscale.com/docs/reference/quad100)，仅在 MagicDNS 已启用、该地址可达且无 DNS 回环时用于 `.ts.net`。若已有同域名策略，先处理冲突。配置了 `direct-nameserver` 时，还需检查 `direct-nameserver-follow-policy`：启用它可能改变其他直连域名的解析，须先评估现有策略，不能无条件覆盖。
+
+3. 验证合并后的客户端配置，重新应用现有订阅，再在有独立救援入口时打开 TUN。确认有效配置包含目标字段；检查对端路由走 `tailscale0`，控制域名不再返回 Fake-IP，持续测试 Tailscale ping、实际 SSH 和原有代理网站。订阅更新或其他覆写可能改变最终配置，须检查实际生效结果。
+4. 若失联，使用独立入口关闭 TUN，恢复本次修改前的客户端覆写并重新应用；若他人期间改过配置，先比较差异，不覆盖后续修改。不要回滚服务器数据库、清空防火墙或重新登录 Tailscale。
+
+**验收边界**：一次 Linux 客户端修复后，TUN 开启期间连续 5 分钟的 16 次采样均正常，控制域名未返回 Fake-IP，Tailscale 连接及控制服务请求可用。此结果不代表所有网络或其他操作系统已经验收，也不证明每次故障只有一个原因。
 
 ## 4. 计量与每月重置
 

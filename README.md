@@ -82,6 +82,7 @@ XBoard 工具通过 SSH 密钥登录，首页显示全部用户，选中用户�
 | 部署 XBoard | [SSH、节点、订阅与计量](docs/02-xboard-deploy.md) |
 | 配置 Google Scholar | [专用分流](docs/03-google-scholar.md) |
 | 备份和排障 | [日常维护](docs/04-operations.md) |
+| Tailscale 在 TUN 模式下断连 | [客户端 DNS 与路由排查](docs/04-operations.md#34-tun-与-tailscale-共存) |
 | 复用完整方案 | [XBoard 配置与交付清单](docs/05-xboard-solution.md) |
 | 使用预构建镜像 | [镜像下载与版本](docs/06-clean-xboard-image.md) |
 | 修复已有服务器 | [PHP 更新与加固](docs/07-existing-vps-security-repair.md) |
