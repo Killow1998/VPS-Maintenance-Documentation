@@ -133,7 +133,8 @@ class Backend:
             "auth_index": auth_index, "method": "GET",
             "url": "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
             "header": {"Authorization": "Bearer $TOKEN$",
-                       "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"}})
+                       "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json",
+                       "User-Agent": "claude-cli/2.1.321 (external, cli)"}})
         status = data.get("status_code")
         if status != 200:
             raw = data.get("body")
@@ -757,7 +758,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/internal/quota":
             return self.answer(405, {"error": "method_not_allowed"})
         auth = self.headers.get("Authorization", "")
-        if not hmac.compare_digest(auth, "Bearer " + observer.config["management_key"]):
+        if not hmac.compare_digest(auth.encode(), ("Bearer " + observer.config["management_key"]).encode()):
             return self.answer(401, {"error": "unauthorized"})
         try:
             if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
