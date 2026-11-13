@@ -86,8 +86,10 @@ function grantName(g) {
   return ({full: "完整重置", fable: "Fable 用量返还", session: "5 小时重置"})[g.kind] || "官方 reset";
 }
 
-function grantUsable(g) {
-  return g.usable_now === true && !g.paused && g.resets_left > 0 && (!g.ends_at || Date.parse(g.ends_at) > Date.now()) && (!g.starts_at || Date.parse(g.starts_at) <= Date.now());
+function grantUsable(g, status) {
+  const usage = Object.values(g.percent_used || {});
+  if (g.gives_back_weekly && usage.length && usage.every((value) => value === 0)) return false;
+  return g.usable_now === true && !g.paused && g.resets_left > 0 && (!g.ends_at || Date.parse(g.ends_at) > Date.now()) && (!g.starts_at || Date.parse(g.starts_at) <= Date.now()) && (g.use_requires_limit === false || status?.at_limit === true);
 }
 
 function resetScope(g) {
@@ -103,7 +105,7 @@ function openReset(accountId) {
   $("reset-options").hidden = false;
   $("reset-cancel").textContent = "取消";
   $("reset-confirm").disabled = true;
-  $("reset-options").innerHTML = (account.resets?.grants || []).map((g) => `<label class="grant-choice"><input type="radio" name="reset-grant" value="${esc(g.id)}" ${grantUsable(g) ? "" : "disabled"}><span>${esc(grantName(g))} · 剩余 ${g.resets_left} 次<small>${esc(resetScope(g))}</small><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></span></label>`).join("");
+  $("reset-options").innerHTML = (account.resets?.grants || []).map((g) => `<label class="grant-choice"><input type="radio" name="reset-grant" value="${esc(g.id)}" ${grantUsable(g, account.resets) ? "" : "disabled"}><span>${esc(grantName(g))} · 剩余 ${g.resets_left} 次<small>${esc(resetScope(g))}</small><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></span></label>`).join("");
   $("reset-dialog").showModal();
 }
 
@@ -160,7 +162,7 @@ function renderAccounts() {
     const routing = a.routing || {};
     const availability = !a.enabled ? "账号已停用" : a.stale ? "等待额度更新" : Object.values(a.windows || {}).some((w) => w.remaining_percent === 0) ? "部分额度已用完" : routing.blocked ? "调用暂不可用" : "可调用";
     const resetRows = (a.resets?.grants || []).map((g) => `<div class="grant-row"><span>${esc(grantName(g))} · ${g.resets_left}/${g.resets_total} 次</span><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></div>`).join("");
-    const resets = `<div class="reset-grants">${a.resets?.status === "ok" ? resetRows || "暂无官方 reset" : "官方 reset 信息未取得"}${a.reset_pending ? '<p class="quota-warning">上次重置结果未确认，请核对官方状态，勿重复兑换。</p>' : ""}<button class="button subtle" data-reset-account="${esc(a.id)}" ${!live || !a.enabled || a.stale || a.reset_pending || !a.resets?.eligible || !a.resets?.grants?.some(grantUsable) ? "disabled" : ""}>重置 Claude 额度</button></div>`;
+    const resets = `<div class="reset-grants">${a.resets?.status === "ok" ? resetRows || "暂无官方 reset" : "官方 reset 信息未取得"}${a.reset_pending ? '<p class="quota-warning">上次重置结果未确认，请核对官方状态，勿重复兑换。</p>' : ""}<button class="button subtle" data-reset-account="${esc(a.id)}" ${!live || !a.enabled || a.stale || a.reset_pending || !a.resets?.eligible || !a.resets?.grants?.some((g) => grantUsable(g, a.resets)) ? "disabled" : ""}>重置 Claude 额度</button></div>`;
     return `<article class="account-card"><div class="account-title"><div><div class="account-name">${esc(a.name)}</div><div class="account-plan">${esc(a.plan)}${a.route_ready === false ? " · 路由待配置" : ""} · ${esc(availability)}</div></div><span class="status ${a.enabled ? "" : "offline"}"><i></i>${a.enabled ? "启用" : "停用"}</span></div>${quota}${resets}<div class="account-updated ${notice ? "quota-warning" : ""}">${esc([notice, updated].filter(Boolean).join(" · ") + retry)}</div></article>`;
   }).join("");
 }
