@@ -2,6 +2,10 @@
 
 [返回首页](README.md)
 
+## 2026-11-13 CPA 官方 reset 与额度刷新（Asia/Shanghai）
+
+管理员网页展示官方 reset 类型、次数与到期时间，选择并确认后兑换；服务端持久保存操作标识，防止重复提交或超时重兑。区分完整重置和 Fable 周用量返还。额度默认每分钟采集，手动刷新按 30 秒限频并遵守 Retry-After，公开查询仍读缓存。相关窗口恢复后保守解除账号额度冷却，保留其他故障。升级和保留当前数据库的回滚见 [后台维护说明](scripts/cpa/cpa-admin/README.md#既有服务修复)。合成测试不消耗真实 reset 或付费模型。
+
 ## 2026-11-12 Tailscale 订阅分发（America/Los_Angeles）
 
 补充[集中分发注意事项](docs/04-operations.md#34-tun-与-tailscale-共存)：区分 XBoard 的 Clash/ClashMeta 模板与客户端覆写；共享订阅优先使用系统解析器，并在单设备确有需要时评估 Tailscale MagicDNS。更新订阅不等于所有设备的 TUN 配置已经生效。

@@ -33,6 +33,13 @@ button,a,input,select {
 button {
   cursor:pointer;
 }
+dialog { background: var(--panel, #141414); color: inherit; border: 1px solid #454545; border-radius: 16px; max-width: 540px; padding: 28px; }
+dialog::backdrop { background: #000a; }
+.reset-grants { margin-top: 18px; padding-top: 14px; border-top: 1px solid #333; }
+.grant-row { display: grid; gap: 5px; margin-bottom: 12px; }
+.grant-row small { opacity: .65; }
+.grant-choice { display: grid; grid-template-columns: auto 1fr; gap: 12px; margin: 18px 0; align-items: start; }
+.grant-choice small { display: block; margin-top: 6px; opacity: .7; }
 button:disabled {
   cursor:default;
   opacity:.4;

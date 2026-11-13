@@ -85,6 +85,39 @@ On upstream 401, the observer calls CPA's local `/v8/management/credentials/refr
 
 ## Operation
 
+### Quota refresh and official resets
+
+Install `observer.py` with sibling `quota_actions.py`. Default quota polling waits 60 seconds
+after each pass; preserve a longer existing private interval. A 429 adaptively increases the
+per-account interval to 120/240/480/900 seconds, waiting at least the upstream Retry-After.
+This interval persists in the snapshot across restarts and remains after recovery. Scheduled
+passes respect it; manual refresh can bypass a successful polling interval, but never an
+active upstream backoff. Manual refresh is coalesced and limited to one attempt per 30 seconds.
+The web button is disabled with a seconds countdown while waiting. Failed queries retain
+same-source quota/reset metadata marked stale, and report rate_limited/unavailable rather
+than successful refresh. Ordinary reads never query Claude. Usage collection is independent.
+
+Loopback `POST /internal/quota` requires the existing management secret. The administrator
+gateway uses read/refresh/redeem actions; downstream keys cannot use it. Public quota omits
+reset grants and routing details. Do not add a public Nginx route. Implementation follows
+[the official management center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/blob/main/src/services/api/claudeResetGrants.ts)
+and [maintainer guidance](https://github.com/router-for-me/CLIProxyAPI/issues/6507).
+
+Before an irreversible reset claim, persist its server-generated request ID and unknown
+outcome in metadata. Duplicate operation IDs return saved results across restarts. Ambiguous
+outcomes block new claims pending operator review; never retry with a fresh request ID.
+The bound profile credential performs official queries/redemption; local cooldown recovery
+targets the inference credential. Automatic recovery requires all reported applicable windows
+to have quota and no non-quota failures. Mixed or model-only cooldowns remain for diagnosis
+because CPA's current reset primitive clears every model state. A five-hour recovery alone
+never clears an exhausted weekly limit. Production tests must not spend real reset grants.
+
+For an existing installation, back up both source files, config and owner-created consistent
+SQLite snapshots. Update admin and observer together in an idle window; restart only these
+two services, retaining CPA binary, OAuth, prices, ACL and TTL history. Rollback restores
+sources and the old polling value, retaining current databases and operation metadata.
+Run `python3 -B -m unittest discover -p 'test_*.py'` for usage/TTL and synthetic reset tests.
+
 Paths on the server:
 
 | Path | Purpose |

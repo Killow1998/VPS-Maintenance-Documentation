@@ -198,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
                             return self.answer(200, {"ok": True}, headers={"Set-Cookie": COOKIE + "=; Path=/admin/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
                         if path == "/admin/api/check":
                             return self.answer(200, self.backend.store.check(data.get("client_id"), data.get("account_id")))
+                        if path == "/admin/api/quota":
+                            return self.answer(200, self.backend.quota_action(data, actor))
                     elif path == "/admin/api/state":
                         return self.answer(200, self.backend.state())
                     elif path == "/admin/api/quota":

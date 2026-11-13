@@ -1,5 +1,7 @@
 # VPS + CLIProxyAPI + Claude Code
 
+管理员网页支持官方 reset 次数、有效期和确认兑换，完整重置与 Fable 用量返还分别显示。后台按配置采集，遇到官方 429 时自动延长间隔；“刷新额度”至少间隔 30 秒，等待期间置灰并显示秒数，不能绕过官方退避。失败保留额度及 reset 旧值，不冒充实时状态；普通查询只读缓存。官方重置后后台在相关窗口确实恢复、且没有其他故障时恢复 CPA 调用状态。更新已有服务需同步 admin 与 observer companion 模块，见 [后台维护说明](../scripts/cpa/cpa-admin/README.md#既有服务修复)。不通过消耗真实 reset 验收，不覆盖用量库或 OAuth。
+
 在 Linux VPS 上部署 CLIProxyAPI（CPA），通过 Nginx 提供 HTTPS 入口，让 Claude Code 使用独立 API Key 调用模型。CPA 由 systemd 管理。
 
 服务端需要具备 sudo 权限的 Debian/Ubuntu。Python 工具统一使用 Python 3.10+，请分别检查本机和 VPS 的版本。管理员工具在 macOS、Linux 或 Windows WSL 中运行；Windows 个人查询使用 PowerShell。

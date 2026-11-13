@@ -73,6 +73,8 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/cpa-observer/README.md
 !scripts/cpa/cpa-observer/cpa-observer.service
 !scripts/cpa/cpa-observer/observer.py
+!scripts/cpa/cpa-observer/quota_actions.py
+!scripts/cpa/cpa-observer/test_quota_actions.py
 !scripts/cpa/cpa-observer/prices.json
 !scripts/cpa/cpa-observer/query.py
 !scripts/cpa/cpa-observer/test_observer.py
