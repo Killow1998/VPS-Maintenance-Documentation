@@ -448,6 +448,8 @@ def quota_windows(body):
     if not isinstance(body, dict):
         raise ValueError("invalid quota response")
     for name, value in body.items():
+        if name == "iguana_necktie":
+            name = "seven_day_fable"
         if not re.fullmatch(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?", name) or not isinstance(value, dict):
             continue
         used = value.get("utilization")

@@ -9,7 +9,7 @@ import threading
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from observer import Observer, Server
+from observer import Observer, Server, quota_windows
 from quota_actions import grants, recoverable
 
 
@@ -96,6 +96,12 @@ class ResetTests(unittest.TestCase):
         entry["cooldowns"].append({"scope": "model", "reason": "not_found"})
         self.assertFalse(recoverable(entry, windows))
 
+    def test_official_fable_window_prevents_premature_recovery(self):
+        windows = quota_windows({"five_hour": {"utilization": 0}, "seven_day": {"utilization": 10},
+                                 "iguana_necktie": {"utilization": 100}})
+        self.assertEqual(windows["seven_day_fable"]["remaining_percent"], 0)
+        self.assertFalse(recoverable({"cooldowns": [{"scope": "credential", "reason": "quota"}]}, windows))
+
     def test_recovery_targets_inference_not_helper_and_public_hides_grants(self):
         entry = {"auth_index": "inference", "cooldowns": [{"scope": "credential", "reason": "quota"}]}
         item = {"id": self.account, "enabled": True, "as_of": "2099-01-01T00:00:00+00:00", "stale": False,
@@ -125,7 +131,7 @@ class ResetTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             url = 'http://127.0.0.1:' + str(server.server_port) + '/internal/quota'
-            for key in ('', 'ordinary-client-key'):
+            for key in ('', 'ordinary-client-key', 'nonascii-é'):
                 req = Request(url, data=b'{"action":"read"}', headers={'Content-Type':'application/json','Authorization':'Bearer '+key})
                 with self.assertRaises(HTTPError) as error:
                     urlopen(req, timeout=3)

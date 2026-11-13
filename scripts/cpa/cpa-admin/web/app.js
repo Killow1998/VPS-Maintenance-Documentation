@@ -150,7 +150,7 @@ function renderAccounts() {
       const percent = value.remaining_percent;
       if (percent === null || !Number.isFinite(percent)) return `<div class="account-unknown">额度未知</div>`;
       const kind = a.stale ? "stale" : percent <= 15 ? "critical" : percent <= 40 ? "low" : "";
-      const windowName = ({five_hour: "5 小时", seven_day: "7 天", seven_day_sonnet: "Sonnet 7 天", seven_day_opus: "Opus 7 天"})[key] || key;
+      const windowName = ({five_hour: "5 小时", seven_day: "7 天", seven_day_sonnet: "Sonnet 7 天", seven_day_opus: "Opus 7 天", seven_day_fable: "Fable 7 天"})[key] || key;
       return `<div class="quota-row"><div class="quota-line"><span>${esc(windowName)}剩余额度${a.stale ? " · 旧值" : ""}</span><strong class="${kind}">${esc(percent)}%</strong></div><progress class="${kind}" max="100" value="${esc(percent)}" aria-label="${esc(a.name + windowName)}剩余额度 ${esc(percent)}%"></progress><div class="reset">${value.resets_at ? `重置 ${esc(timestamp(value.resets_at))}（${esc(duration(value.resets_at))}）` : "重置时间未知"}</div></div>`;
     }).join("") : `<div class="account-unknown">${esc(!a.enabled ? "账号已停用" : a.quota_reason === "observer_unavailable" ? "额度查询服务暂不可用" : "尚无额度数据")}</div>`;
     const reasons = {observer_unavailable: "额度查询服务暂不可用", missing_scope: "额度授权缺少 profile 权限", upstream_http_429: "额度查询被限流", upstream_http_401: "额度授权已失效", upstream_http_403: "额度查询被拒绝", quota_lookup_failed: "额度采集失败", credential_refresh_failed: "额度凭据刷新失败", quota_identity_mismatch: "额度授权账号不匹配", quota_source_missing: "缺少额度授权"};
