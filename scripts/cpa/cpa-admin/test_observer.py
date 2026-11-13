@@ -28,6 +28,18 @@ class ObserverIntegrationTest(unittest.TestCase):
         class Observer(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
 
+            def do_POST(self):
+                if self.path != "/internal/quota" or self.headers.get("Authorization") != "Bearer fixture-management":
+                    self.send_error(401)
+                    return
+                self.rfile.read(int(self.headers["Content-Length"]))
+                failed = "/v1/quota" in fixture.failures
+                body = json.dumps(fixture.snapshot if not failed else {"error": "private diagnostic"}).encode()
+                self.send_response(503 if failed else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 key = self.headers.get("Authorization", "")
                 if key not in ("Bearer fixture-a", "Bearer fixture-b"):
@@ -58,6 +70,7 @@ class ObserverIntegrationTest(unittest.TestCase):
         root = Path(self.temp.name)
         config = root / "observer.json"
         config.write_text(json.dumps({"cpa_base_url": "http://127.0.0.1:8317", "port": self.observer.server_port,
+                                      "management_key": "fixture-management",
                                       "database": str(root / "unavailable-observer.sqlite"), "quota_poll_seconds": 300}))
         self.backend = Backend({"observer_config": str(config), "database": str(root / "control.sqlite"), "active": True})
         self.backend.client_keys = {"ca": "fixture-a", "cb": "fixture-b"}

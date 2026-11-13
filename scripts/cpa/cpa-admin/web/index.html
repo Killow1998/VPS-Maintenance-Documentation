@@ -57,5 +57,13 @@
       <footer>使用者沿用 Base URL + API Key。账号白名单只能由管理员修改。</footer>
     </div>
   </main>
+  <dialog id="reset-dialog" aria-labelledby="reset-title">
+    <h2 id="reset-title">重置 Claude 额度</h2>
+    <p id="reset-account"></p>
+    <div id="reset-options"></div>
+    <p class="muted">将消耗一次所选官方 reset，无法撤销。成功后后台自动恢复相应调用状态。</p>
+    <p id="reset-message" role="status"></p>
+    <div class="button-group"><button class="button" id="reset-cancel">取消</button><button class="button primary" id="reset-confirm" disabled>确认使用 1 次</button></div>
+  </dialog>
 </body>
 </html>

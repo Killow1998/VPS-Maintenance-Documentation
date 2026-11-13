@@ -25,6 +25,12 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from zoneinfo import ZoneInfo
+import importlib.util
+
+_quota_spec = importlib.util.spec_from_file_location("cpa_quota_actions", Path(__file__).with_name("quota_actions.py"))
+_quota_module = importlib.util.module_from_spec(_quota_spec)
+_quota_spec.loader.exec_module(_quota_module)
+QuotaActions, grants = _quota_module.QuotaActions, _quota_module.grants
 
 UTC = dt.timezone.utc
 
@@ -125,7 +131,7 @@ class Backend:
     def quota(self, auth_index):
         data = self.request("/v8/management/requests/api-call", {
             "auth_index": auth_index, "method": "GET",
-            "url": "https://api.anthropic.com/api/oauth/usage",
+            "url": "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
             "header": {"Authorization": "Bearer $TOKEN$",
                        "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"}})
         status = data.get("status_code")
@@ -466,6 +472,45 @@ class Observer:
         self.stop = threading.Event()
         self.auth_cache, self.rate = {}, collections.OrderedDict()
         self.lock = threading.Lock()
+        self.quota_lock = threading.Lock()
+        self.quota_last_attempt = 0.0
+        self.actions = QuotaActions(self)
+
+    def quota_source(self, entry, by_name):
+        binding = self.config.get("quota_bindings", {}).get(entry.get("name"))
+        if binding is None:
+            return entry
+        if not isinstance(binding, dict) or not binding.get("credential") or not binding.get("expected_email"):
+            raise QuotaError("invalid_quota_binding")
+        source = by_name.get(binding["credential"])
+        if not source or source.get("provider") != "claude" or not source.get("disabled"):
+            raise QuotaError("quota_source_must_be_disabled")
+        if str(source.get("email", "")).casefold() != binding["expected_email"].casefold():
+            raise QuotaError("quota_identity_mismatch")
+        return source
+
+    def quota_control(self, data):
+        action = data.get("action")
+        if action == "read":
+            return self.quota_response(admin=True)
+        if action not in ("refresh", "redeem"):
+            raise ValueError("invalid_action")
+        if not self.quota_lock.acquire(blocking=False):
+            return {"status": "busy", "snapshot": self.quota_response(admin=True)}
+        try:
+            if action == "refresh":
+                if time.monotonic() - self.quota_last_attempt >= 30:
+                    self._refresh_quota()
+                return {"status": "ok", "snapshot": self.quota_response(admin=True)}
+            operation = self.actions.redeem(data.get("account_id"), data.get("grant_id"), data.get("operation_id"), data.get("actor", "admin"))
+            # Refresh even after an ambiguous answer, but NEVER retry redemption automatically.
+            try:
+                self._refresh_quota()
+            except Exception:
+                self.store.meta("quota_status", "error:reset_refresh_failed")
+            return {"status": "ok", "result": operation["result"], "snapshot": self.quota_response(admin=True)}
+        finally:
+            self.quota_lock.release()
 
     def allowed_request(self, key):
         identity = self.store.client(key)
@@ -509,6 +554,11 @@ class Observer:
             self.stop.wait(self.config.get("usage_poll_seconds", 3))
 
     def refresh_quota(self):
+        with self.quota_lock:
+            self._refresh_quota()
+
+    def _refresh_quota(self):
+        self.quota_last_attempt = time.monotonic()
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
         accounts = []
@@ -531,16 +581,7 @@ class Observer:
             if active:
                 old = known.get(identity, {})
                 try:
-                    source = entry
-                    binding = bindings.get(entry.get("name"))
-                    if binding is not None:
-                        if not isinstance(binding, dict) or not binding.get("credential") or not binding.get("expected_email"):
-                            raise QuotaError("invalid_quota_binding")
-                        source = by_name.get(binding["credential"])
-                        if source is None or source.get("provider") != "claude" or not source.get("disabled"):
-                            raise QuotaError("quota_source_must_be_disabled")
-                        if str(source.get("email", "")).casefold() != str(binding["expected_email"]).casefold():
-                            raise QuotaError("quota_identity_mismatch")
+                    source = self.quota_source(entry, by_name)
                     source_index = source.get("auth_index")
                     if not source_index:
                         raise QuotaError("quota_source_missing")
@@ -561,6 +602,8 @@ class Observer:
                             self.backend.refresh_credential(source["name"])
                             quota = self.backend.quota(source_index)
                         item.update(windows=quota_windows(quota), status="ok", as_of=now(), stale=False)
+                        item["resets"] = grants(quota)
+                        self.actions.recover(entry, item)
                 except Exception as error:
                     same_source = old.get("source_revision") == item.get("source_revision")
                     item.update(windows=old.get("windows", {}) if same_source else {},
@@ -570,6 +613,7 @@ class Observer:
                         item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=error.retry_after)).isoformat()
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
+        self.store.meta("quota_status", "ok")
 
     def quota_worker(self):
         while not self.stop.is_set():
@@ -578,14 +622,20 @@ class Observer:
                 self.store.meta("quota_status", "ok")
             except Exception as error:
                 self.store.meta("quota_status", "error:" + type(error).__name__)
-            self.stop.wait(self.config.get("quota_poll_seconds", 300))
+            self.stop.wait(self.config.get("quota_poll_seconds", 60))
 
-    def quota_response(self):
+    def quota_response(self, admin=False):
         data = json.loads(self.store.meta("quota_snapshot") or "{}")
         accounts = data.get("accounts", [])
-        max_age = self.config.get("quota_poll_seconds", 300) * 2 + 30
+        max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         for account in accounts:
             account.pop("source_revision", None)
+            if not admin:
+                account.pop("resets", None)
+                account.pop("routing", None)
+            else:
+                op = json.loads(self.store.meta("reset_operation:" + account["id"]) or "{}")
+                account["reset_pending"] = op.get("result") == "unknown"
             as_of = account.get("as_of")
             if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > max_age:
                 account["stale"] = True
@@ -703,7 +753,26 @@ class Handler(BaseHTTPRequestHandler):
             self.answer(503, {"error": "backend_unavailable"})
 
     def do_POST(self):
-        self.answer(405, {"error": "method_not_allowed"})
+        observer = self.server.observer
+        if self.path != "/internal/quota":
+            return self.answer(405, {"error": "method_not_allowed"})
+        auth = self.headers.get("Authorization", "")
+        if not hmac.compare_digest(auth, "Bearer " + observer.config["management_key"]):
+            return self.answer(401, {"error": "unauthorized"})
+        try:
+            if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
+                raise ValueError("invalid_body")
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096 or self.headers.get("Content-Type") != "application/json":
+                raise ValueError("invalid_body")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("invalid_body")
+            self.answer(200, observer.quota_control(data))
+        except ValueError:
+            self.answer(400, {"error": "invalid_reset_or_refresh"})
+        except Exception:
+            self.answer(503, {"error": "quota_control_unavailable"})
 
 
 def main():

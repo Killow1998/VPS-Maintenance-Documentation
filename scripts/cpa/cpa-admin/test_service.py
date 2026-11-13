@@ -185,6 +185,10 @@ class FakeBackend:
     def account_quota(self):
         return {"accounts": self.store.snapshot()["accounts"], "query_status": "ok"}
 
+    def quota_action(self, data, actor):
+        self.last_quota_action = (data, actor)
+        return {"status": "ok", "quota": self.account_quota()}
+
 
 class GatewayTest(unittest.TestCase):
     def setUp(self):
@@ -286,6 +290,12 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.request('/admin/api/quota', headers={"Cookie": session})[0], 200)
         self.assertEqual(self.request('/admin/api/state', headers={"Cookie": session})[0], 200)
         self.assertEqual(self.request('/admin/api/policies', {}, {"Cookie": session, "Origin": "https://evil.example"})[0], 403)
+        reset = {"action": "redeem", "account_id": "account-a", "grant_id": "synthetic", "operation_id": "synthetic"}
+        self.assertEqual(self.request('/admin/api/quota', reset, {"Authorization": "Bearer test-client"})[0], 401)
+        self.assertEqual(self.request('/admin/api/quota', reset, {"Cookie": session, "Origin": "https://evil.example"})[0], 403)
+        self.assertFalse(hasattr(self.backend, "last_quota_action"))
+        self.assertEqual(self.request('/admin/api/quota', reset, {"Cookie": session, "Origin": self.backend.config["origin"]})[0], 200)
+        self.assertEqual(self.backend.last_quota_action, (reset, "ssh-admin"))
 
 
 if __name__ == '__main__': unittest.main()

@@ -27,5 +27,5 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           python -B -m unittest discover -s scripts/cpa/cpa-admin -p 'test_*.py' -v
-          python -B -m unittest discover -s scripts/cpa/cpa-observer -p 'test_observer.py' -v
+          python -B -m unittest discover -s scripts/cpa/cpa-observer -p 'test_*.py' -v
           python -B -m unittest discover -s scripts/cpa/cpa-tools -p 'test_*.py' -v

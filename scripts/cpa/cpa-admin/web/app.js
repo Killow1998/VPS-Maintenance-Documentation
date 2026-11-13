@@ -7,6 +7,8 @@ let saving = false;
 let live = false;
 let quotaLoading = false;
 let quotaError = "";
+let resetSelection = null;
+let resetBusy = false;
 const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const compact = (number) => new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 1}).format(number);
 const normalized = (rows) => rows.map(({id, enabled, account_ids}) => ({id, enabled, account_ids: [...account_ids].sort()}));
@@ -80,13 +82,66 @@ function timestamp(value) {
   return new Intl.DateTimeFormat("zh-CN", {timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false}).format(new Date(value));
 }
 
+function grantName(g) {
+  return ({full: "完整重置", fable: "Fable 用量返还", session: "5 小时重置"})[g.kind] || "官方 reset";
+}
+
+function grantUsable(g) {
+  return g.usable_now === true && !g.paused && g.resets_left > 0 && (!g.ends_at || Date.parse(g.ends_at) > Date.now()) && (!g.starts_at || Date.parse(g.starts_at) <= Date.now());
+}
+
+function resetScope(g) {
+  return g.kind === "fable" ? "退还 Fable 周用量并补满 5 小时；其他模型周用量不变。" : g.kind === "full" ? "恢复 5 小时和 7 天额度。" : "恢复 5 小时额度，7 天额度不变。";
+}
+
+function openReset(accountId) {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account || resetBusy || !live) return;
+  resetSelection = {accountId, operationId: crypto.randomUUID(), grantId: null};
+  $("reset-account").textContent = account.name;
+  $("reset-message").textContent = "请选择本次使用的 reset。";
+  $("reset-options").hidden = false;
+  $("reset-cancel").textContent = "取消";
+  $("reset-confirm").disabled = true;
+  $("reset-options").innerHTML = (account.resets?.grants || []).map((g) => `<label class="grant-choice"><input type="radio" name="reset-grant" value="${esc(g.id)}" ${grantUsable(g) ? "" : "disabled"}><span>${esc(grantName(g))} · 剩余 ${g.resets_left} 次<small>${esc(resetScope(g))}</small><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></span></label>`).join("");
+  $("reset-dialog").showModal();
+}
+
+async function confirmReset() {
+  if (resetBusy || !resetSelection?.grantId) return;
+  resetBusy = true;
+  $("reset-confirm").disabled = true;
+  $("reset-cancel").disabled = true;
+  $("reset-options").querySelectorAll("input").forEach((input) => { input.disabled = true; });
+  $("reset-message").textContent = "正在提交官方重置，请勿重复操作…";
+  try {
+    const result = await request("/api/quota", {action: "redeem", account_id: resetSelection.accountId,
+      grant_id: resetSelection.grantId, operation_id: resetSelection.operationId});
+    const messages = {reset: "官方重置成功，额度已重新采集。", already_used: "该 reset 已使用，已更新额度。", unknown: "结果未确认。请刷新查看官方状态，勿重复兑换。", rate_limited: "官方请求限流，请稍后查看额度。", auth_error: "官方授权不可用，未完成重置。", not_limited: "官方返回当前未达到该 reset 的使用条件。", cooldown: "官方暂不允许再次重置。", ineligible: "该账号不符合使用条件。", unavailable: "该 reset 当前不可用。"};
+    $("reset-message").textContent = messages[result.result] || "操作处理中，请刷新查看额度。";
+    const account = result.quota?.accounts?.find((a) => a.id === resetSelection.accountId);
+    if (result.result === "reset" && (account?.stale || account?.routing?.blocked)) {
+      $("reset-message").textContent += "账号仍有其他额度或调用限制，请查看账号卡片。";
+    }
+    $("reset-options").hidden = true;
+    await refreshQuota();
+  } catch (_) {
+    $("reset-message").textContent = "操作未确认，请刷新额度并核对 reset 次数，勿重复兑换。";
+  } finally {
+    resetBusy = false;
+    resetSelection = null;
+    $("reset-cancel").disabled = false;
+    $("reset-cancel").textContent = "关闭";
+  }
+}
+
 function renderAccounts() {
   const meta = state.quota || {};
   $("quota-caption").textContent = live
     ? `北京时间 UTC+8 · ${meta.checked_at ? `采集于 ${timestamp(meta.checked_at)}` : "尚无采集时间"}`
     : "模拟快照 · 北京时间 UTC+8";
   $("quota-status").textContent = quotaError || (live
-    ? `页面每 30 秒刷新 · 额度每 ${Math.round((meta.poll_seconds || 300) / 60)} 分钟采集 · 百分比为服务商窗口剩余额度`
+    ? `页面每 30 秒更新 · 后台约每 ${Math.round((meta.poll_seconds || 60) / 60)} 分钟采集 · 手动刷新至少间隔 30 秒`
     : "演示数据");
   $("quota-status").classList.toggle("quota-warning", !!quotaError || meta.query_status === "unavailable");
   $("account-cards").innerHTML = state.accounts.map((a) => {
@@ -102,22 +157,27 @@ function renderAccounts() {
     const notice = a.stale && windows.length ? "旧快照 · 等待更新" : a.quota_status === "unavailable" ? reasons[a.quota_reason] || "额度采集失败" : "";
     const updated = a.as_of ? `更新 ${timestamp(a.as_of)}` : "";
     const retry = a.retry_at ? ` · 重试 ${timestamp(a.retry_at)}（${duration(a.retry_at)}）` : "";
-    return `<article class="account-card"><div class="account-title"><div><div class="account-name">${esc(a.name)}</div><div class="account-plan">${esc(a.plan)}${a.route_ready === false ? " · 路由待配置" : ""}</div></div><span class="status ${a.enabled ? "" : "offline"}"><i></i>${a.enabled ? "启用" : "停用"}</span></div>${quota}<div class="account-updated ${notice ? "quota-warning" : ""}">${esc([notice, updated].filter(Boolean).join(" · ") + retry)}</div></article>`;
+    const routing = a.routing || {};
+    const availability = !a.enabled ? "账号已停用" : a.stale ? "等待额度更新" : Object.values(a.windows || {}).some((w) => w.remaining_percent === 0) ? "部分额度已用完" : routing.blocked ? "调用暂不可用" : "可调用";
+    const resetRows = (a.resets?.grants || []).map((g) => `<div class="grant-row"><span>${esc(grantName(g))} · ${g.resets_left}/${g.resets_total} 次</span><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></div>`).join("");
+    const resets = `<div class="reset-grants">${a.resets?.status === "ok" ? resetRows || "暂无官方 reset" : "官方 reset 信息未取得"}${a.reset_pending ? '<p class="quota-warning">上次重置结果未确认，请核对官方状态，勿重复兑换。</p>' : ""}<button class="button subtle" data-reset-account="${esc(a.id)}" ${!live || !a.enabled || a.stale || a.reset_pending || !a.resets?.eligible || !a.resets?.grants?.some(grantUsable) ? "disabled" : ""}>重置 Claude 额度</button></div>`;
+    return `<article class="account-card"><div class="account-title"><div><div class="account-name">${esc(a.name)}</div><div class="account-plan">${esc(a.plan)}${a.route_ready === false ? " · 路由待配置" : ""} · ${esc(availability)}</div></div><span class="status ${a.enabled ? "" : "offline"}"><i></i>${a.enabled ? "启用" : "停用"}</span></div>${quota}${resets}<div class="account-updated ${notice ? "quota-warning" : ""}">${esc([notice, updated].filter(Boolean).join(" · ") + retry)}</div></article>`;
   }).join("");
 }
 
-async function refreshQuota() {
+async function refreshQuota(manual = false) {
   if (!state || quotaLoading || document.body.classList.contains("needs-login")) return;
   quotaLoading = true;
   $("quota-refresh").disabled = true;
   $("quota-refresh").textContent = "正在刷新…";
   try {
-    const snapshot = await request("/api/quota");
+    const answer = await request("/api/quota", manual ? {action: "refresh"} : undefined);
+    const snapshot = manual ? answer.quota : answer;
     const byId = new Map(snapshot.accounts.map((a) => [a.id, a]));
     for (const account of state.accounts) {
       const current = byId.get(account.id);
       if (!current) { account.stale = true; continue; }
-      for (const field of ["windows", "stale", "as_of", "quota_status", "quota_reason", "retry_at"]) account[field] = current[field];
+      for (const field of ["windows", "stale", "as_of", "quota_status", "quota_reason", "retry_at", "resets", "routing", "reset_pending"]) account[field] = current[field];
     }
     const {accounts, ...meta} = snapshot;
     state.quota = meta;
@@ -190,7 +250,17 @@ $("matrix").addEventListener("change", (event) => {
 
 $("search").addEventListener("input", renderMatrix);
 $("refresh").addEventListener("click", () => load(true));
-$("quota-refresh").addEventListener("click", refreshQuota);
+$("quota-refresh").addEventListener("click", () => refreshQuota(true));
+$("account-cards").addEventListener("click", (e) => {
+  const button = e.target.closest("[data-reset-account]");
+  if (button && !button.disabled) openReset(button.dataset.resetAccount);
+});
+$("reset-options").addEventListener("change", (e) => {
+  if (!resetBusy && resetSelection) { resetSelection.grantId = e.target.value; $("reset-confirm").disabled = false; }
+});
+$("reset-confirm").addEventListener("click", confirmReset);
+$("reset-cancel").addEventListener("click", () => $("reset-dialog").close());
+$("reset-dialog").addEventListener("cancel", (e) => { if (resetBusy) e.preventDefault(); });
 $("discard").addEventListener("click", () => {
   draft = structuredClone(state.clients);
   error(); renderMatrix(); renderMetrics(); renderStatus();
