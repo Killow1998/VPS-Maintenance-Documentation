@@ -502,9 +502,13 @@ class Observer:
             return {"status": "busy", "snapshot": self.quota_response(admin=True)}
         try:
             if action == "refresh":
-                if time.monotonic() - self.quota_last_attempt >= 30:
-                    self._refresh_quota()
-                return {"status": "ok", "snapshot": self.quota_response(admin=True)}
+                if time.monotonic() - self.quota_last_attempt < 30:
+                    return {"status": "throttled", "snapshot": self.quota_response(admin=True)}
+                self._refresh_quota()
+                snapshot = self.quota_response(admin=True)
+                failed = [a for a in snapshot["accounts"] if a["enabled"] and a["stale"]]
+                status = "rate_limited" if any(a.get("reason") == "upstream_http_429" for a in failed) else "unavailable" if failed else "ok"
+                return {"status": status, "snapshot": snapshot}
             operation = self.actions.redeem(data.get("account_id"), data.get("grant_id"), data.get("operation_id"), data.get("actor", "admin"))
             # Refresh even after an ambiguous answer, but NEVER retry redemption automatically.
             try:
@@ -556,11 +560,11 @@ class Observer:
                 self.store.meta("collector_status", "error:" + type(error).__name__)
             self.stop.wait(self.config.get("usage_poll_seconds", 3))
 
-    def refresh_quota(self):
+    def refresh_quota(self, *, scheduled=False):
         with self.quota_lock:
-            self._refresh_quota()
+            self._refresh_quota(scheduled=scheduled)
 
-    def _refresh_quota(self):
+    def _refresh_quota(self, *, scheduled=False):
         self.quota_last_attempt = time.monotonic()
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
@@ -593,9 +597,10 @@ class Observer:
                     revision = self.store.digest("quota-source:" + str(source_index) + ":" + str(source.get("updated_at", "")))
                     item["source_revision"] = revision
                     retry_at = old.get("retry_at")
-                    if old.get("source_revision") == revision and retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
-                        item.update(windows=old.get("windows", {}), as_of=old.get("as_of"),
-                                    status=old.get("status", "unavailable"), reason=old.get("reason"), retry_at=retry_at)
+                    same_source = old.get("source_revision") == revision
+                    next_poll = old.get("next_poll_at") if scheduled else None
+                    if same_source and any(t and dt.datetime.fromisoformat(t) > dt.datetime.now(UTC) for t in (retry_at, next_poll)):
+                        item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "retry_at", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                     else:
                         try:
                             quota = self.backend.quota(source_index)
@@ -605,24 +610,34 @@ class Observer:
                             self.backend.refresh_credential(source["name"])
                             quota = self.backend.quota(source_index)
                         item.update(windows=quota_windows(quota), status="ok", as_of=now(), stale=False)
+                        interval = old.get("poll_interval_seconds", self.config.get("quota_poll_seconds", 60)) if same_source else self.config.get("quota_poll_seconds", 60)
+                        item["poll_interval_seconds"] = interval
+                        item["next_poll_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=interval)).isoformat()
                         item["resets"] = grants(quota)
                         self.actions.recover(entry, item)
                 except Exception as error:
                     same_source = old.get("source_revision") == item.get("source_revision")
                     item.update(windows=old.get("windows", {}) if same_source else {},
-                                as_of=old.get("as_of") if same_source else None, status="unavailable",
+                                as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
-                    if isinstance(error, QuotaError) and error.retry_after:
+                    if same_source:
+                        item.update({k: old[k] for k in ("resets", "routing", "poll_interval_seconds") if k in old})
+                    if isinstance(error, QuotaError) and error.status == 429:
+                        interval = min(900, max(120, item.get("poll_interval_seconds", 60) * 2))
+                        item["poll_interval_seconds"] = interval
+                        delay = max(interval, error.retry_after or 0)
+                        item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=delay)).isoformat()
+                    elif isinstance(error, QuotaError) and error.retry_after:
                         item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=error.retry_after)).isoformat()
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
-        self.store.meta("quota_status", "ok")
+        enabled = [a for a in accounts if a["enabled"]]
+        self.store.meta("quota_status", "unavailable" if enabled and all(a["stale"] for a in enabled) else "partial" if any(a["stale"] for a in enabled) else "ok")
 
     def quota_worker(self):
         while not self.stop.is_set():
             try:
-                self.refresh_quota()
-                self.store.meta("quota_status", "ok")
+                self.refresh_quota(scheduled=True)
             except Exception as error:
                 self.store.meta("quota_status", "error:" + type(error).__name__)
             self.stop.wait(self.config.get("quota_poll_seconds", 60))
@@ -640,7 +655,8 @@ class Observer:
                 op = json.loads(self.store.meta("reset_operation:" + account["id"]) or "{}")
                 account["reset_pending"] = op.get("result") == "unknown"
             as_of = account.get("as_of")
-            if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > max_age:
+            age_limit = max(max_age, account.get("poll_interval_seconds", 0) * 2 + 30)
+            if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > age_limit:
                 account["stale"] = True
         names = sorted({w for account in accounts for w in account["windows"]})
         windows = {}

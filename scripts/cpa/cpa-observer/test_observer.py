@@ -427,6 +427,55 @@ class APITests(unittest.TestCase):
         self.assertEqual(len(backend.calls), before)
         self.assertIn("retry_at", self.observer.quota_response()["accounts"][0])
 
+    def test_rate_limit_preserves_grants_and_persists_adaptive_backoff(self):
+        backend = self.paired_backend()
+        original = backend.quota
+        backend.quota = lambda index: dict(original(index), cedar_ember={"eligible": True, "grants": [{
+            "id": "test-grant", "resets_total": 1, "resets_left": 1}]})
+        self.observer.refresh_quota()
+        fresh = self.observer.quota_response(admin=True)["accounts"][0]
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError("upstream_http_429", 429, 1)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        failed = self.observer.quota_response(admin=True)["accounts"][0]
+        self.assertTrue(failed["stale"])
+        self.assertEqual(failed["resets"], fresh["resets"])
+        self.assertEqual(failed["poll_interval_seconds"], 120)
+        self.assertGreater((dt.datetime.fromisoformat(failed["retry_at"]) - dt.datetime.now(dt.timezone.utc)).total_seconds(), 115)
+        self.assertEqual(self.observer.quota_response()["query_status"], "unavailable")
+        self.assertNotIn("resets", self.observer.quota_response()["accounts"][0])
+        before = len(backend.calls)
+        restarted = Observer(self.observer.config)
+        restarted.backend = backend
+        restarted.refresh_quota()
+        self.assertEqual(len(backend.calls), before)
+        self.assertEqual(restarted.quota_response(admin=True)["accounts"][0]["resets"], fresh["resets"])
+        data = json.loads(restarted.store.meta("quota_snapshot"))
+        data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
+        restarted.store.meta("quota_snapshot", json.dumps(data))
+        restarted.refresh_quota()
+        self.assertEqual(restarted.quota_response()["accounts"][0]["poll_interval_seconds"], 240)
+        data = json.loads(restarted.store.meta("quota_snapshot"))
+        data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
+        restarted.store.meta("quota_snapshot", json.dumps(data))
+        backend.quota = original
+        restarted.refresh_quota()
+        self.assertFalse(restarted.quota_response()["stale"])
+        before = len(backend.calls)
+        restarted.refresh_quota(scheduled=True)
+        self.assertEqual(len(backend.calls), before)
+
+    def test_manual_refresh_reports_rate_limit_and_local_throttle(self):
+        backend = self.paired_backend()
+        def limited(index):
+            raise QuotaError("upstream_http_429", 429)
+        backend.quota = limited
+        self.observer.quota_last_attempt = 0
+        self.assertEqual(self.observer.quota_control({"action": "refresh"})["status"], "rate_limited")
+        self.assertEqual(self.observer.quota_control({"action": "refresh"})["status"], "throttled")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,9 +88,14 @@ On upstream 401, the observer calls CPA's local `/v8/management/credentials/refr
 ### Quota refresh and official resets
 
 Install `observer.py` with sibling `quota_actions.py`. Default quota polling waits 60 seconds
-after each pass; change an existing private `quota_poll_seconds: 300` to 60 if desired. Manual
-refresh is coalesced and limited to one attempt per 30 seconds, respecting Retry-After.
-Ordinary reads never query Claude. Usage collection remains independent.
+after each pass; preserve a longer existing private interval. A 429 adaptively increases the
+per-account interval to 120/240/480/900 seconds, waiting at least the upstream Retry-After.
+This interval persists in the snapshot across restarts and remains after recovery. Scheduled
+passes respect it; manual refresh can bypass a successful polling interval, but never an
+active upstream backoff. Manual refresh is coalesced and limited to one attempt per 30 seconds.
+The web button is disabled with a seconds countdown while waiting. Failed queries retain
+same-source quota/reset metadata marked stale, and report rate_limited/unavailable rather
+than successful refresh. Ordinary reads never query Claude. Usage collection is independent.
 
 Loopback `POST /internal/quota` requires the existing management secret. The administrator
 gateway uses read/refresh/redeem actions; downstream keys cannot use it. Public quota omits
