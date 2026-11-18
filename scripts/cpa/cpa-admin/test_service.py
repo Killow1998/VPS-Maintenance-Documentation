@@ -270,6 +270,20 @@ class GatewayTest(unittest.TestCase):
             self.assertEqual(self.session_model(None, metadata={'user_id': json.dumps({'session_id': 'claude-session'})})[0], 200)
         self.assertEqual([c['model'] for c in self.calls], ['account-a/claude-test'] * 3)
 
+    def test_backup_quota_error_does_not_turn_primary_transient_error_into_migration(self):
+        state = self.backend.store.snapshot()
+        state['accounts'][2]['enabled'] = True
+        state['clients'][1]['account_ids'].append('account-c')
+        with self.backend.store.db() as con:
+            con.execute('UPDATE policy SET data=?', (json.dumps({k: state[k] for k in ('clients', 'accounts')}),))
+        self.backend.models['account-c'] = {'claude-test': {}}
+        self.statuses.update({'account-a': 503, 'account-b': 429})
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-c/claude-test')
+        self.statuses.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
     def test_binding_write_failure_does_not_discard_successful_generation(self):
         with patch.object(self.server.router, 'succeeded', side_effect=sqlite3.OperationalError('synthetic')):
             with self.assertLogs('service', level='WARNING') as logs:

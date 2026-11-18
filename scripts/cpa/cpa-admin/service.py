@@ -292,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
                 connection.request("POST", self.path, json.dumps(body, ensure_ascii=False).encode(), headers)
                 response = connection.getresponse()
                 if response.status in (401, 403, 429, 503) and index < len(candidates) - 1:
-                    migrate = migrate or response.status in (401, 403, 429)
+                    migrate = migrate or (account["id"] == selection.primary and response.status in (401, 403, 429))
                     response.read(1024 * 1024)
                     continue
                 if 200 <= response.status < 300:
