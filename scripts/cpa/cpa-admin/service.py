@@ -6,9 +6,11 @@ import http.client
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 from urllib.parse import urlsplit
@@ -16,10 +18,12 @@ from urllib.parse import urlsplit
 from authentication import Authentication
 from backend import Backend
 from server import PolicyError
+from session_routing import SESSION_HEADERS, SessionRouter
 
 ROOT = Path(__file__).resolve().parent
 COOKIE = "__Secure-cpa_admin"
 MODEL_PATHS = {"/v1/messages", "/v1/messages/count_tokens", "/v1/chat/completions", "/v1/responses", "/v1/completions"}
+SESSION_HEADER_NAMES = frozenset(name.lower() for name in SESSION_HEADERS)
 
 
 def unique_object(pairs):
@@ -37,7 +41,7 @@ class Server(ThreadingHTTPServer):
         self.backend = backend
         self.authentication = Authentication(backend.store)
         self.slots = threading.BoundedSemaphore(32)
-        self.sequence, self.sequence_lock = 0, threading.Lock()
+        self.router = SessionRouter(backend.store, backend.c["hmac_secret"])
         self.body_bytes, self.body_lock = 0, threading.Lock()
         super().__init__(address, Handler)
 
@@ -242,11 +246,8 @@ class Handler(BaseHTTPRequestHandler):
                 candidates = [a for a in usable if base_model in self.backend.models.get(a["id"], {})]
             if not candidates:
                 raise PolicyError(400, "获准账号不支持这个模型。")
-            with self.server.sequence_lock:
-                offset = self.server.sequence % len(candidates)
-                self.server.sequence += 1
-            candidates = candidates[offset:] + candidates[:offset]
-            return self.forward_model(key, identity, body, model, candidates)
+            selection = self.server.router.select(identity, base_model, self.headers, body, candidates)
+            return self.forward_model(key, identity, body, model, selection)
         except PolicyError as error:
             self.close_connection = True
             self.answer(error.status, {"type": "error", "error": {"type": "permission_error" if error.status in (401, 403) else "api_error", "message": error.message}})
@@ -273,11 +274,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             con.close()
 
-    def forward_model(self, key, identity, body, model, candidates):
+    def forward_model(self, key, identity, body, model, selection):
+        candidates = selection.candidates
+        migrate = False
         headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "Accept-Encoding": "identity"}
         for name, value in self.headers.items():
             lower = name.lower()
-            if lower in ("accept", "user-agent", "x-app") or lower.startswith(("anthropic-", "x-stainless-", "x-claude-", "x-client-")):
+            if lower in ("accept", "user-agent", "x-app") or lower in SESSION_HEADER_NAMES or lower.startswith(("anthropic-", "x-stainless-", "x-claude-", "x-client-")):
                 headers[name] = value
         for index, account in enumerate(candidates):
             # Every new attempt rechecks the committed policy. No fallback can widen its scope.
@@ -289,8 +292,15 @@ class Handler(BaseHTTPRequestHandler):
                 connection.request("POST", self.path, json.dumps(body, ensure_ascii=False).encode(), headers)
                 response = connection.getresponse()
                 if response.status in (401, 403, 429, 503) and index < len(candidates) - 1:
+                    migrate = migrate or response.status in (401, 403, 429)
                     response.read(1024 * 1024)
                     continue
+                if 200 <= response.status < 300:
+                    try:
+                        self.server.router.succeeded(selection, account["id"], migrate=migrate)
+                    except sqlite3.Error as error:
+                        # Do not discard a successful inference if its binding cannot be saved.
+                        logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
                 self.send_header("Cache-Control", "no-store")

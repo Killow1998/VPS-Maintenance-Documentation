@@ -417,6 +417,12 @@ $env:ANTHROPIC_AUTH_TOKEN = [System.Net.NetworkCredential]::new('', $secureKey).
 
 用一次原本就要进行的调用观察 `usage.cache_creation.ephemeral_1h_input_tokens`；非零表示发生过 1 小时缓存写入。已经命中时，写入数可为零，结合缓存读取量判断，不额外发付费探测请求。observer 按上游返回的 `5m/1h` 写入量计价，不根据客户端推荐值猜测时长。CPA 透传与采集端升级见[缓存时长更新](../scripts/cpa/cpa-observer/CACHE_TTL_UPDATE.md)。[缓存用量字段](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
 
+### 7.2 会话固定账号与切号缓存
+
+新版权限网关按新会话分配账号，同一 Key、会话和基础模型的后续请求保持原账号；认证或额度错误后在白名单内迁移，成功后不自动跳回。没有可靠会话 ID 时按 Key 与模型固定，不退回逐请求轮询。Claude Code 使用其现有 metadata；通用客户端可发送稳定的 `X-Session-ID`，不要每轮重新生成。具体识别、24 小时空闲绑定、并发与升级边界见[会话调度](../scripts/cpa/cpa-admin/README.md#会话调度)。
+
+旧轮询可能让同一上下文在 A、B 分别建立缓存，新方案减少这部分重复写入，不减少首次请求本身需要的上下文。真正迁移到未缓存的独立账号仍可能冷启动。绑定期限不等于上游缓存 TTL；总输入 token 包含缓存读取，美元估算不等于订阅额度扣减。对比正常调用中的缓存读取与 5m/1h 写入，不主动预热或为验收调用付费模型。
+
 ## 8. 验证鉴权、模型与真实生成
 
 **位置：已设置第 7 节环境变量的本机终端。前提：HTTPS 和上游就绪。完成：无 Key 401、有效 Key 200、真实生成含文本且退出码 0。**

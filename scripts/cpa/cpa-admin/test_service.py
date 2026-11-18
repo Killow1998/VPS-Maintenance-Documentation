@@ -143,7 +143,7 @@ class AuthenticationTest(unittest.TestCase):
 
 class FakeBackend:
     config = {"origin": "https://control.example", "active": True}
-    c = {"management_key": "test-admin-only"}
+    c = {"management_key": "test-admin-only", "hmac_secret": "synthetic-routing-hmac"}
 
     def __init__(self, path, upstream):
         self.store = Store(path)
@@ -192,14 +192,16 @@ class FakeBackend:
 
 class GatewayTest(unittest.TestCase):
     def setUp(self):
-        self.calls, self.failures = [], set()
-        calls, failures = self.calls, self.failures
+        self.calls, self.failures, self.statuses, self.session_headers = [], set(), {}, []
+        calls, failures, statuses, session_headers = self.calls, self.failures, self.statuses, self.session_headers
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_POST(self):
                 data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 calls.append({"model": data["model"], "key": self.headers.get("Authorization")})
-                code = 429 if data["model"].split('/')[0] in failures else 200
+                session_headers.append(self.headers.get('X-Session-ID'))
+                account = data["model"].split('/')[0]
+                code = statuses.get(account, 429 if account in failures else 200)
                 body = b'data: {"type":"message_stop"}\n\n' if data.get("stream") else b'{"ok":true}'
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(body)))
@@ -231,6 +233,62 @@ class GatewayTest(unittest.TestCase):
 
     def model(self, model="claude-test", **extra):
         return self.request('/v1/messages', {"model": model, "messages": [], **extra}, {"Authorization": "Bearer test-client"})
+
+    def session_model(self, session='one', key='test-other', **extra):
+        return self.request('/v1/messages', {'model': 'claude-test', 'messages': [], **extra},
+                            {'Authorization': 'Bearer ' + key, **({'X-Session-ID': session} if session else {})})
+
+    def test_session_stays_on_one_upstream_and_only_new_sessions_rotate(self):
+        for _ in range(3): self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual([c['model'] for c in self.calls], ['account-a/claude-test'] * 3)
+        self.assertEqual(self.session_headers, ['one'] * 3)
+        self.assertEqual(self.session_model('two', stream=True)[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
+    def test_quota_failover_is_sticky_after_original_recovers(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual([c['model'] for c in self.calls[-2:]], ['account-a/claude-test', 'account-b/claude-test'])
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+
+    def test_transient_failover_keeps_primary_and_missing_id_does_not_rotate(self):
+        self.assertEqual(self.session_model(None)[0], 200)
+        self.statuses['account-a'] = 503
+        self.assertEqual(self.session_model(None)[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+        self.statuses.clear()
+        self.assertEqual(self.session_model(None)[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
+    def test_claude_metadata_binds_same_session_without_headers(self):
+        for _ in range(3):
+            self.assertEqual(self.session_model(None, metadata={'user_id': json.dumps({'session_id': 'claude-session'})})[0], 200)
+        self.assertEqual([c['model'] for c in self.calls], ['account-a/claude-test'] * 3)
+
+    def test_binding_write_failure_does_not_discard_successful_generation(self):
+        with patch.object(self.server.router, 'succeeded', side_effect=sqlite3.OperationalError('synthetic')):
+            with self.assertLogs('service', level='WARNING') as logs:
+                self.assertEqual(self.session_model()[0], 200)
+        self.assertIn('session_binding_save_failed: OperationalError', logs.output[0])
+        self.assertNotIn('test-other', logs.output[0])
+
+    def test_revoked_session_account_cannot_override_policy(self):
+        self.assertEqual(self.session_model()[0], 200)
+        state = self.backend.store.snapshot()
+        state['clients'][1]['account_ids'] = ['account-b']
+        self.backend.store.save({'expected_revision': state['revision'], 'clients': [
+            {k: c[k] for k in ('id', 'enabled', 'account_ids')} for c in state['clients']]})
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+        self.failures.add('account-b')
+        before = len(self.calls)
+        self.assertEqual(self.session_model()[0], 429)
+        self.assertEqual(len(self.calls), before + 1)
 
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)
