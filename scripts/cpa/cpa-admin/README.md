@@ -67,6 +67,8 @@ python3 cpa-tools/api_keys.py permissions
 
 合成测试运行 `python3 -B -m unittest discover -s cpa-admin -p 'test_*.py'`，覆盖同会话固定、新会话分配、相同 ID 跨 Key 隔离、Claude metadata、无 ID 降级、并发首请求、重启持久化、权限撤销、额度迁移与 503 回退。生产先验证只读接口、权限与历史保留；通过后续正常调用观察路由及实际 cache-read/cache-write，不发付费探测或预热请求。没有正常新调用就记为待验证，不用合成测试代替缓存节省证据。
 
+Windows CI 额外安装固定版本的 `tzdata`，为权限审计时间提供 `Asia/Shanghai` IANA 数据；这是跨平台测试环境依赖，不增加 Linux VPS 的 Python 包依赖或改写系统时区。
+
 回滚只恢复原 `service.py` 并重启 admin，**保留当前数据库**。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。只添加 companion 的失败可在服务切换前停止，不删除正在被新版 service 导入的模块。
 
 ## 新增 Claude 账号

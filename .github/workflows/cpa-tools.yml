@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
       - if: runner.os == 'Windows'
-        run: python -m pip install pywinpty==2.0.15
+        run: python -m pip install pywinpty==2.0.15 tzdata==2026.6
       - run: python -B -m unittest discover -s scripts/cpa -p "test_quota_*.py" -v
       - if: runner.os != 'Linux'
         run: |
