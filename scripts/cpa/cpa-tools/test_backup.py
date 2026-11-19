@@ -1,9 +1,38 @@
 import os
+import datetime as dt
+import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
-from remote_admin import sqlite_snapshot
+from unittest.mock import patch
+from remote_admin import Admin, sqlite_snapshot
+
+
+class QuotaSnapshotTests(unittest.TestCase):
+    def test_nonempty_snapshot_includes_active_source_backoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / 'usage.sqlite'
+            now = dt.datetime.now(dt.timezone.utc)
+            deadline = (now + dt.timedelta(hours=1)).isoformat()
+            snapshot = {'accounts': [{'id': 'account-one', 'enabled': True, 'status': 'ok',
+                'stale': False, 'as_of': now.isoformat(), 'windows': {'five_hour': {
+                    'remaining_percent': 80, 'resets_at': None}}}]}
+            with sqlite3.connect(db) as con:
+                con.execute('CREATE TABLE metadata (key TEXT PRIMARY KEY,value TEXT)')
+                con.executemany('INSERT INTO metadata VALUES (?,?)', [
+                    ('quota_snapshot', json.dumps(snapshot)), ('quota_status', 'ok'),
+                    ('quota_account_source:account-one', 'source-one'), ('quota_backoff:source-one', deadline)])
+            con.close()
+            observer = Path(__file__).resolve().parent.parent / 'cpa-observer' / 'observer.py'
+            admin = Admin.__new__(Admin)
+            admin.c = {'database': str(db), 'hmac_secret': 'fixture'}
+            admin.j = {'observer_script': str(observer)}
+            with patch.object(admin, 'files', return_value=[]), patch.object(sys, 'path', [str(observer.parent), *sys.path]):
+                result = admin.pool_snapshot()
+            self.assertEqual(result['quota']['accounts'][0]['retry_at'], deadline)
+            self.assertTrue(result['quota']['accounts'][0]['stale'])
 
 
 @unittest.skipUnless(os.name == 'posix', 'Administrator runtime is Linux/WSL/macOS')

@@ -599,6 +599,25 @@ class Observer:
         old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
         return self.store.bind_quota_source(account_id, source_index, old)
 
+    def migrate_known_backoffs(self, entries, previous=None):
+        previous = previous if previous is not None else json.loads(self.store.meta('quota_snapshot') or '{}')
+        for old in previous.get('accounts', []):
+            if old.get('retry_at') and not old.get('source_identity'):
+                self.store.legacy_quota_backoff(old['id'], old['retry_at'])
+        by_name = {entry.get('name'): entry for entry in entries if entry.get('name')}
+        bindings = self.config.get('quota_bindings', {})
+        sources = {binding.get('credential') for binding in bindings.values() if isinstance(binding, dict)}
+        for entry in entries:
+            if entry.get('provider') != 'claude' or entry.get('name') in sources or not entry.get('auth_index'):
+                continue
+            try:
+                source = self.quota_source(entry, by_name)
+                if source.get('auth_index'):
+                    identity = 'account-' + self.store.digest('account:' + entry['auth_index'])[:12]
+                    self.source_backoff(source['auth_index'], identity)
+            except QuotaError:
+                continue
+
     def require_source_ready(self, source_index, account_id=None):
         retry_at = self.source_backoff(source_index, account_id)
         if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
@@ -639,12 +658,13 @@ class Observer:
                 failed = [a for a in snapshot["accounts"] if a["enabled"] and a["stale"]]
                 status = "rate_limited" if any(a.get("reason") == "upstream_http_429" for a in failed) else "unavailable" if failed else "ok"
                 return {"status": status, "snapshot": snapshot}
-            operation = self.actions.redeem(data.get("account_id"), data.get("grant_id"), data.get("operation_id"), data.get("actor", "admin"))
+            operation, fresh = self.actions.redeem(data.get("account_id"), data.get("grant_id"), data.get("operation_id"), data.get("actor", "admin"), include_fresh=True)
             # Refresh even after an ambiguous answer, but NEVER retry redemption automatically.
-            try:
-                self._refresh_quota()
-            except Exception:
-                self.store.meta("quota_status", "error:reset_refresh_failed")
+            if fresh:
+                try:
+                    self._refresh_quota()
+                except Exception:
+                    self.store.meta("quota_status", "error:reset_refresh_failed")
             return {"status": "ok", "result": operation["result"], "snapshot": self.quota_response(admin=True)}
         finally:
             self.quota_lock.release()
@@ -698,25 +718,12 @@ class Observer:
         self.quota_last_attempt = time.monotonic()
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
-        for identity, old in known.items():
-            if old.get("retry_at") and not old.get("source_identity"):
-                self.store.legacy_quota_backoff(identity, old["retry_at"])
         accounts = []
         entries = self.backend.accounts()
+        self.migrate_known_backoffs(entries, previous)
         by_name = {entry.get("name"): entry for entry in entries if entry.get("name")}
         bindings = self.config.get("quota_bindings", {})
         sources = {binding.get("credential") for binding in bindings.values() if isinstance(binding, dict)}
-        # Move every identifiable legacy deadline before querying a shared source.
-        for entry in entries:
-            if entry.get("provider") != "claude" or entry.get("name") in sources or entry.get("disabled") or not entry.get("auth_index"):
-                continue
-            try:
-                source = self.quota_source(entry, by_name)
-                if source.get("auth_index"):
-                    identity = "account-" + self.store.digest("account:" + entry["auth_index"])[:12]
-                    self.source_backoff(source["auth_index"], identity)
-            except QuotaError:
-                continue
         for entry in entries:
             if entry.get("provider") != "claude":
                 continue

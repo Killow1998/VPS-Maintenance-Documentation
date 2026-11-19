@@ -131,6 +131,18 @@ class ObserverIntegrationTest(unittest.TestCase):
         self.assertEqual(denied["windows"], {})
         self.assertTrue(denied["stale"])
 
+    def test_public_status_uses_only_authorized_accounts(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot['query_status'] = 'partial'
+        snapshot['accounts'][1].update(stale=True, status='unavailable')
+        result = scope_quota(snapshot, {'a'})
+        self.assertEqual(result['query_status'], 'ok')
+        self.assertFalse(result['stale'])
+        self.assertEqual(scope_quota(snapshot, {'b'})['query_status'], 'unavailable')
+        self.assertEqual(scope_quota(snapshot, {'a', 'b'})['query_status'], 'partial')
+        snapshot['query_status'] = 'error:collector'
+        self.assertEqual(scope_quota(snapshot, {'a'})['query_status'], 'error:collector')
+
     def test_stale_and_unknown_values_do_not_become_fresh_aggregates(self):
         snapshot = copy.deepcopy(self.snapshot)
         snapshot["accounts"][0]["stale"] = True

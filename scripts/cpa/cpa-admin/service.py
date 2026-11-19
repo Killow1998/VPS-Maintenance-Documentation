@@ -30,12 +30,13 @@ SSE_BUFFER_LIMIT = 1024 * 1024
 
 class SSECompletionGate:
     """Hold terminal events until a complete backup response is bound."""
-    def __init__(self):
+    def __init__(self, expected_choices=1):
         self.pending = bytearray()
         self.held = None
+        self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= 128 else None
+        self.finished_choices = set()
 
-    @staticmethod
-    def terminal(event):
+    def terminal(self, event):
         kind, data = '', []
         for line in event.splitlines():
             name, sep, value = line.partition(b':')
@@ -60,8 +61,15 @@ class SSECompletionGate:
         if value.get('type') in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete'):
             return True
         choices = value.get('choices')
-        return isinstance(choices, list) and any(isinstance(choice, dict) and choice.get('finish_reason') is not None
-                                                for choice in choices)
+        if self.expected_choices and isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict) or choice.get('finish_reason') is None:
+                    continue
+                index = choice.get('index', 0 if self.expected_choices == 1 else None)
+                if type(index) is int and 0 <= index < self.expected_choices:
+                    self.finished_choices.add(index)
+            return len(self.finished_choices) == self.expected_choices
+        return False
 
     def feed(self, chunk):
         if self.held is not None:
@@ -392,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                     if connection.sock:
                         connection.sock.settimeout(3600)
                     migrating = selection.missing_bound or (account['id'] != selection.primary and migrate)
-                    sse = SSECompletionGate() if (migrating and 200 <= response.status < 300 and
+                    sse = SSECompletionGate(body.get('n', 1)) if (migrating and 200 <= response.status < 300 and
                         response.getheader('Content-Type', '').split(';', 1)[0].strip().lower() == 'text/event-stream') else None
                     def send_chunk(data):
                         self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")

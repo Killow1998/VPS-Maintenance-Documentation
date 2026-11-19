@@ -31,6 +31,10 @@ def scope_quota(snapshot, allowed_ids):
                   accounts_total=len(accounts), accounts_enabled=sum(bool(a.get("enabled")) for a in accounts),
                   accounts_with_fresh_quota=sum(not a.get("stale", True) for a in accounts),
                   stale=not accounts or any(a.get("enabled") and a.get("stale", True) for a in accounts))
+    if result.get('query_status') in ('ok', 'partial', 'unavailable'):
+        enabled = [a for a in accounts if a.get('enabled')]
+        fresh = sum(not a.get('stale', True) for a in enabled)
+        result['query_status'] = 'unavailable' if not fresh else 'ok' if fresh == len(enabled) else 'partial'
     return result
 
 

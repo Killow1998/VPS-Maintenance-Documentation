@@ -42,6 +42,16 @@ class SSECompletionGateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SSECompletionGate().feed(b'x' * (SSE_BUFFER_LIMIT + 1))
 
+    def test_multichoice_waits_for_all_choices_before_holding_completion(self):
+        gate = SSECompletionGate(expected_choices=2)
+        first = b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+        progress = b'data: {"choices":[{"index":1,"delta":{"content":"still running"}}]}\n\n'
+        last = b'data: {"choices":[{"index":1,"finish_reason":"stop"}]}\n\n'
+        self.assertEqual(gate.feed(first), [first])
+        self.assertEqual(gate.feed(progress), [progress])
+        self.assertEqual(gate.feed(last), [])
+        self.assertEqual(gate.finish(), last)
+
 
 class AuthenticationTest(unittest.TestCase):
     def setUp(self):

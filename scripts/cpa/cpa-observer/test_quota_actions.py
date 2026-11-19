@@ -41,12 +41,13 @@ class ResetTests(unittest.TestCase):
         self.answer = "reset"
 
         def request(path, data):
-            self.assertEqual(data["auth_index"], "profile")
+            self.assertIn(data["auth_index"], ("profile", "profile-two"))
             url = data["url"]
             if "/usage" in url:
                 body = grant_body()
             elif "/profile" in url:
-                body = {"organization": {"uuid": "00000000-0000-0000-0000-000000000001"}}
+                body = {"account": {"email": "a@example.invalid"},
+                        "organization": {"uuid": "00000000-0000-0000-0000-000000000001"}}
             else:
                 self.spends.append(json.loads(data["data"]))
                 if self.answer == "timeout":
@@ -55,6 +56,117 @@ class ResetTests(unittest.TestCase):
             return {"status_code": 200, "body": json.dumps(body)}
         self.obs.backend.request.side_effect = request
         self.obs.backend.quota.side_effect = lambda index: Backend.quota(self.obs.backend, index)
+
+    def shared_account(self):
+        self.obs.config['quota_bindings']['other'] = {'credential': 'helper', 'expected_email': 'a@example.invalid'}
+        self.entries.append({'name': 'other', 'provider': 'claude', 'auth_index': 'other-inference'})
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        return 'account-' + self.obs.store.digest('account:other-inference')[:12]
+
+    def test_unknown_shared_source_blocks_other_account_after_restart(self):
+        other = self.shared_account()
+        self.answer = 'timeout'
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'first')['result'], 'unknown')
+            clock.return_value = 15000
+            restarted = Observer(self.config)
+            restarted.backend = self.obs.backend
+            with self.assertRaisesRegex(ValueError, 'reset_pending_or_recent'):
+                restarted.actions.redeem(other, 'full-test', 'second')
+        self.assertEqual(len(self.spends), 1)
+
+    def test_shared_principal_blocks_parallel_redemption(self):
+        other_account = self.shared_account()
+        started, release = threading.Event(), threading.Event()
+        original = self.obs.backend.request.side_effect
+        def delayed(path, data):
+            if 'reset_rate_limits' in data['url']:
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError('test wait')
+            return original(path, data)
+        self.obs.backend.request.side_effect = delayed
+        second = Observer(self.config)
+        second.backend = self.obs.backend
+        results, errors = [], []
+        def first():
+            try:
+                results.append(self.obs.actions.redeem(self.account, 'full-test', 'first'))
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=first)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(5))
+            with self.assertRaisesRegex(ValueError, 'reset_pending_or_recent'):
+                second.actions.redeem(other_account, 'full-test', 'second')
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]['result'], 'reset')
+        self.assertEqual(len(self.spends), 1)
+
+    def test_profile_identity_must_match_before_redemption(self):
+        original = self.obs.backend.request.side_effect
+        for index, account in enumerate(({}, {'email': 'other@example.invalid'})):
+            def mismatched(path, data):
+                if '/profile' in data['url']:
+                    return {'status_code': 200, 'body': json.dumps({'account': account,
+                        'organization': {'uuid': '00000000-0000-0000-0000-000000000001'}})}
+                return original(path, data)
+            self.obs.backend.request.side_effect = mismatched
+            with patch('quota_actions.time.time', return_value=10000 + index * 60):
+                with self.assertRaisesRegex(ValueError, 'reset_identity'):
+                    self.obs.actions.redeem(self.account, 'full-test', 'profile-mismatch')
+            self.assertFalse(self.spends)
+
+    def test_same_email_in_separate_credentials_shares_unknown_lock(self):
+        other = self.shared_account()
+        self.obs.config['quota_bindings']['other']['credential'] = 'helper-two'
+        self.entries.append({'name': 'helper-two', 'provider': 'claude', 'auth_index': 'profile-two',
+                             'disabled': True, 'email': 'A@EXAMPLE.INVALID'})
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        self.answer = 'timeout'
+        self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'first')['result'], 'unknown')
+        with self.assertRaisesRegex(ValueError, 'reset_pending_or_recent'):
+            self.obs.actions.redeem(other, 'full-test', 'second')
+        self.assertEqual(len(self.spends), 1)
+
+    def test_legacy_unknown_for_shared_account_blocks_reset(self):
+        other = self.shared_account()
+        self.obs.store.meta('reset_operation:' + self.account, json.dumps({'id': 'legacy',
+            'grant_id': 'full-test', 'created': 1, 'request_id': 'previous', 'result': 'unknown'}))
+        with self.assertRaisesRegex(ValueError, 'reset_pending_or_recent'):
+            self.obs.actions.redeem(other, 'full-test', 'second')
+        self.assertFalse(self.spends)
+
+    def test_unattributed_legacy_unknown_blocks_reset_until_reconciled(self):
+        self.obs.store.meta('reset_operation:account-removed', json.dumps({'id': 'legacy',
+            'grant_id': 'full-test', 'created': 1, 'request_id': 'previous', 'result': 'unknown'}))
+        with self.assertRaisesRegex(ValueError, 'reset_unresolved_legacy'):
+            self.obs.actions.redeem(self.account, 'full-test', 'next')
+        self.assertFalse(self.spends)
+
+    def test_shared_source_legacy_backoff_blocks_reset_before_first_poll(self):
+        other = self.shared_account()
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': self.account, 'retry_at': retry_at_after(3600)}]}))
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(other, 'full-test', 'blocked-shared')
+        self.obs.backend.request.assert_not_called()
+        self.assertFalse(self.spends)
+
+    def test_completed_replay_does_not_query_provider_again(self):
+        self.obs.quota_control({'action': 'redeem', 'account_id': self.account,
+                                'grant_id': 'full-test', 'operation_id': 'replay'})
+        calls = self.obs.backend.request.call_count
+        for _ in range(2):
+            self.obs.quota_control({'action': 'redeem', 'account_id': self.account,
+                                    'grant_id': 'full-test', 'operation_id': 'replay'})
+        self.assertEqual(self.obs.backend.request.call_count, calls)
+        self.assertEqual(len(self.spends), 1)
 
     def test_duplicate_confirmation_spends_once_even_after_process_restart(self):
         first = self.obs.actions.redeem(self.account, "full-test", "operation-one")

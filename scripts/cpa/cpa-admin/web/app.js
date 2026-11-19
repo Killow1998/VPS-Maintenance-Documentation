@@ -222,15 +222,16 @@ function updateQuotaRefreshButton() {
 }
 
 async function refreshQuota(manual = false) {
-  if (!state || quotaLoading || document.body.classList.contains("needs-login")) return;
+  if (!state || quotaLoading || saving || document.body.classList.contains("needs-login")) return;
   updateQuotaRefreshButton();
   if (manual && $("quota-refresh").disabled) return;
-  if (manual) quotaRefreshAfter = Date.now() + 30000;
+  const collect = manual && live;
+  if (collect) quotaRefreshAfter = Date.now() + 30000;
   quotaLoading = true;
   updateQuotaRefreshButton();
   try {
-    const answer = await request("/api/quota", manual ? {action: "refresh"} : undefined);
-    const snapshot = manual ? answer.quota : answer;
+    const answer = await request("/api/quota", collect ? {action: "refresh"} : undefined);
+    const snapshot = collect ? answer.quota : answer;
     const byId = new Map(snapshot.accounts.map((a) => [a.id, a]));
     let inventoryChanged = false;
     for (const account of state.accounts) {
@@ -290,7 +291,7 @@ function render() {
 }
 
 async function load(preserve = false) {
-  if (loading) return;
+  if (loading || saving) return;
   loading = true;
   $("matrix").inert = true;
   if (state) renderStatus();
@@ -324,7 +325,7 @@ async function load(preserve = false) {
 $("matrix").addEventListener("change", (event) => {
   const input = event.target;
   if (!input.matches("input[data-client]")) return;
-  if (loading) { renderMatrix(); return; }
+  if (loading || saving) { renderMatrix(); return; }
   const row = draft.find((c) => c.id === input.dataset.client);
   if (input.hasAttribute("data-enabled")) row.enabled = input.checked;
   else {
@@ -352,14 +353,14 @@ $("reset-confirm").addEventListener("click", confirmReset);
 $("reset-cancel").addEventListener("click", () => $("reset-dialog").close());
 $("reset-dialog").addEventListener("cancel", (e) => { if (resetBusy) e.preventDefault(); });
 $("discard").addEventListener("click", () => {
-  if (loading) return;
+  if (loading || saving) return;
   draft = structuredClone(state.clients);
   if (inventoryConflict) { load(); return; }
   error(); renderMatrix(); renderMetrics(); renderStatus();
 });
 $("save").addEventListener("click", async () => {
   if (saving || loading || inventoryConflict || !dirty()) return;
-  saving = true; error(); renderStatus();
+  saving = true; $("matrix").inert = true; $("refresh").disabled = true; error(); renderStatus();
   try {
     state = await request("/api/policies", {expected_revision: state.revision, clients: normalized(draft)});
     draft = structuredClone(state.clients);
@@ -367,7 +368,7 @@ $("save").addEventListener("click", async () => {
     $("check-result").className = "check-result";
     render();
   } catch (e) { error(e.message); }
-  finally { saving = false; renderStatus(); }
+  finally { saving = false; $("matrix").inert = loading; $("refresh").disabled = loading; renderStatus(); }
 });
 $("check").addEventListener("click", async () => {
   $("check").disabled = true; error();

@@ -70,6 +70,8 @@ python3 cpa-tools/api_keys.py permissions
 - **从尚未安装 reset/刷新版本的 main 升级**：更新 admin 的 `backend.py`、`service.py`、`session_routing.py` 和 `web/app.js`、`web/index.html`、`web/style.css`，以及 observer 的 `observer.py`、`quota_actions.py`
 - **已完整安装 PR #12 版本**：更新 admin 的 `backend.py`、`service.py`、`session_routing.py`、`web/app.js`、`web/index.html`，以及 observer 的 `observer.py`、`quota_actions.py`；其余文件先核对实际版本
 
+使用管理 TUI 时，也要更新运行它的机器上的 `cpa-tools/remote_admin.py`，使其能读取新版额度快照；这不是 VPS 常驻服务。
+
 备份将要替换的全部文件、配置、unit 和用量/策略一致 SQLite 快照，连接以数据库所属用户运行；此前不存在的文件记录为新增。先用临时库预检，再安装 companion 文件并替换其余文件，确认维护窗口后仅重启有变更的 `cpa-observer` 和 `cpa-admin`。admin 是转发网关，重启可能中断流式调用，需检查活跃任务并与用户确认。不更换 CPA 二进制，不重启 Nginx、XBoard，不改 HTTPS/代理，不运行首次部署脚本或重新导入权限。
 
 合成测试运行 `python3 -B -m unittest discover -s cpa-admin -p 'test_*.py'`，覆盖同会话固定、新会话分配、相同 ID 跨 Key 隔离、Claude metadata、无 ID 降级、并发首请求、重启持久化、权限撤销、额度迁移与 503 回退。生产先验证只读接口、权限与历史保留；通过后续正常调用观察路由及实际 cache-read/cache-write，不发付费探测或预热请求。没有正常新调用就记为待验证，不用合成测试代替缓存节省证据。
@@ -77,6 +79,8 @@ python3 cpa-tools/api_keys.py permissions
 Windows CI 额外安装固定版本的 `tzdata`，为权限审计时间提供 `Asia/Shanghai` IANA 数据；这是跨平台测试环境依赖，不增加 Linux VPS 的 Python 包依赖或改写系统时区。
 
 回滚恢复实际变更前的全部 admin、web 和 observer 文件，**保留当前数据库**。若还有未到期的额度查询退避，必须按下方说明暂不启动旧 observer；不能只依赖旧版的定时轮询设置。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。旧版没有逐操作防重放，回滚后须暂停 reset 重试并由管理员核对；不删除正在被新版服务导入的 companion 文件。
+
+**回滚到旧 observer 前必须暂时阻断所有公网 `/v1/quota` 入口**。新版缓存可能包含 reset 和内部路由字段，而旧版读取缓存时不会过滤它们。先在现有 Nginx 站点配置中将该路径临时设为 503，`nginx -t` 后 reload，并验证实际公网入口已被阻断；不要暴露其他直连 observer 的路径。停止新版 observer，核对并等待所有退避期限到期，恢复旧源码后再启动旧 observer。保持公网阻断，直到旧 observer 自然产生回滚之后的新快照，且私下验证该快照的账号字段只包含旧版字段 `id`、`enabled`、`status`、`windows`、`as_of`、`stale`、`reason`、`retry_at`、`source_revision`，窗口只包含 `used_percent`、`remaining_percent`、`resets_at`，没有 reset、routing 或来源身份字段；通过 SSH 隧道验证旧服务的授权响应后，恢复原 Nginx 路由并再次验证公网响应。如果无法确认已生成安全快照，继续阻断，或保留新版 observer。不要用备份覆盖用量库，也不要通过删除数据库解决。
 
 ## 新增 Claude 账号
 
@@ -133,7 +137,7 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 新增仅回环管理接口 `POST /internal/quota`，复用 management secret，支持 read/refresh/redeem。admin 通过现有管理员会话和 Origin 校验访问；普通 Key 无权访问，Nginx 不增加公共路由。公开 `/v1/quota` 不含 reset grant 或调度详情。操作按账号和操作 ID 保存在 observer metadata，不修改 records/cache_ttl 表。旧版只保留最后一笔，升级只能迁移仍存在的记录，无法恢复更早的操作 ID；切换前应等待进行中操作结束，不重放旧请求。unknown 结果需管理员核对后处理，不删除记录盲重试。
 
-回滚恢复旧源码和原 `quota_poll_seconds`，保留当前数据库、reset 操作日志和新增用量。旧版读取新快照时会忽略单独保存的未知额度窗口，不应将其当作零；旧版既不执行新版源级退避，其定时采样也可能提前查询。恢复旧 observer 前，先停止它并核对快照及 `quota_backoff:*`、`quota_legacy_backoff:*` 记录中最晚的有效截止时间；截止前保持旧 observer 停止，无法确认期限时继续停用或保留修复后的 observer，不能宣称回滚完成。暂停期间管理端额度视图可能不可用。整个回滚期间暂停 reset 操作；旧版不具备完整操作 ID 防重放。不能用维护前快照覆盖数据库，也不能恢复旧 OAuth 文件覆盖新 token。已兑换的官方 reset 无法撤销。
+回滚恢复旧源码和原 `quota_poll_seconds`，保留当前数据库、reset 操作日志和新增用量。旧版读取新快照时会忽略单独保存的未知额度窗口，不应将其当作零；旧版既不执行新版源级退避，其定时采样也可能提前查询。恢复旧 observer 前，先停止它并核对快照及 `quota_backoff:*`、`quota_legacy_backoff:*` 记录中最晚的有效截止时间；截止前保持旧 observer 停止，无法确认期限时继续停用或保留修复后的 observer，不能宣称回滚完成。旧版公开接口可能暴露新版缓存字段，必须按[既有部署回滚步骤](#既有部署升级与验收)先阻断公网额度入口并验证安全快照。暂停期间管理端额度视图可能不可用。整个回滚期间暂停 reset 操作；旧版不具备完整操作 ID 防重放。不能用维护前快照覆盖数据库，也不能恢复旧 OAuth 文件覆盖新 token。已兑换的官方 reset 无法撤销。
 
 审查修复按以下范围更新：
 

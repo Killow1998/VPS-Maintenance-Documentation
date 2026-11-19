@@ -131,6 +131,33 @@ vm.runInContext(`(async () => {
   await refreshQuota(false);
   assert.equal(state.revision, 5);
   assert.equal(attempts, 2);
+
+  inventoryConflict = false;
+  state.clients = [{id:'k', enabled:true, account_ids:[]}];
+  draft = [{id:'k', enabled:true, account_ids:['a']}];
+  let resolveSave;
+  request = async (path) => {
+    assert.equal(path, '/api/policies');
+    return new Promise((resolve) => { resolveSave = resolve; });
+  };
+  const savingRequest = document.getElementById('save').listeners.click();
+  await Promise.resolve();
+  assert.equal(document.getElementById('matrix').inert, true);
+  input.dataset.account = 'b';
+  document.getElementById('matrix').listeners.change({target:input});
+  assert.equal(draft[0].account_ids.includes('b'), false);
+  resolveSave({...state, clients:structuredClone(draft), revision:6});
+  await savingRequest;
+  assert.equal(document.getElementById('matrix').inert, false);
+
+  live = false;
+  quotaRefreshAfter = 0;
+  let previewRequest;
+  request = async (path, data) => { previewRequest = {path, data}; return {accounts:state.accounts}; };
+  state.accounts.forEach((a) => { a.retry_at = null; a.stale = false; });
+  await refreshQuota(true);
+  assert.equal(previewRequest.path, '/api/quota');
+  assert.equal(previewRequest.data, undefined);
 })()`, context, {filename: file, timeout: 5000}).then(() => {
   console.log("web quota status: ok");
 }).catch((error) => { console.error(error); process.exitCode = 1; });

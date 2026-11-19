@@ -119,6 +119,13 @@ unconditional and cannot guard against concurrent model-state changes, so this o
 clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
 diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
 credential metadata changes and account disable/enable cycles.
+Before a reset POST, the live profile email must match the configured expected identity; a
+missing or mismatched identity stops the operation. Reservations are shared by the HMAC of that
+identity, so logical accounts and separate credentials for the same email cannot bypass an
+unresolved reset. The identity and request bodies are not written to the operation ledger.
+Older records without a source identity can be associated only with accounts still identifiable
+from the current inventory or stored source mapping; unresolved historical operations whose
+identity cannot be established require manual reconciliation before enabling new resets.
 On the first upgrade, an old snapshot without a source identity conservatively retains its
 retry deadline even if the account or credential temporarily disappears, and carries it to
 the current bound source when it returns. Known legacy deadlines are migrated before querying
@@ -132,6 +139,9 @@ the old observer stopped until every active deadline has passed; if the deadline
 determined, keep it stopped or retain the corrected observer instead of claiming a completed
 rollback. Pause reset operations throughout. Check whether admin quota views require the
 observer; stopping it can temporarily make those views unavailable.
+Older public quota handlers may expose administrator-only fields from a newer cached snapshot.
+Block public quota access before rollback and restore it only after verifying a fresh old-format
+snapshot, as described in [the rollback procedure](../cpa-admin/README.md#既有部署升级与验收).
 Stored windows retain numeric-only compatibility with older readers;
 unknown windows live separately in the snapshot and are combined in new API responses. An
 older reader after rollback may omit those unknown windows, but must not treat them as zero.
