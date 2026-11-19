@@ -615,6 +615,16 @@ class Observer:
                 if source.get('auth_index'):
                     identity = 'account-' + self.store.digest('account:' + entry['auth_index'])[:12]
                     self.source_backoff(source['auth_index'], identity)
+                    binding = bindings.get(entry.get('name')) or {}
+                    email = binding.get('expected_email') or source.get('email')
+                    logical_email = entry.get('email')
+                    if (isinstance(email, str) and email.strip() and
+                            (logical_email is None or isinstance(logical_email, str) and
+                             (not logical_email.strip() or logical_email.strip().casefold() == email.strip().casefold()))):
+                        principal = self.store.digest('reset-principal:' + email.strip().casefold())
+                        self.store.meta('reset_account_principal:' + identity, principal)
+                    else:
+                        self.store.meta('reset_account_principal:' + identity, '')
             except QuotaError:
                 continue
 
@@ -827,6 +837,16 @@ class Observer:
         accounts = data.get("accounts", [])
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         backoff_active = False
+        legacy_reset_pending = False
+        if admin:
+            with self.store.db() as con:
+                for (raw,) in con.execute("SELECT value FROM metadata WHERE key LIKE 'reset_operation:%'"):
+                    prior = json.loads(raw)
+                    if not prior.get('reset_principal') and (prior.get('result') == 'unknown' or
+                            prior.get('result') == 'preflight' and
+                            time.time() - prior.get('created', 0) < self.actions.PREFLIGHT_LEASE_SECONDS):
+                        legacy_reset_pending = True
+                        break
         for account in accounts:
             account.pop("source_revision", None)
             snapshot_source = account.pop("source_identity", None)
@@ -855,9 +875,12 @@ class Observer:
                 account.pop("routing", None)
             else:
                 op = json.loads(self.store.meta("reset_operation:" + account["id"]) or "{}")
-                account["reset_pending"] = (op.get("result") == "unknown" or
-                    (op.get("result") == "preflight" and
-                     time.time() - op.get("created", 0) < self.actions.PREFLIGHT_LEASE_SECONDS))
+                principal = self.store.meta('reset_account_principal:' + account['id'])
+                shared = json.loads(self.store.meta('reset_principal:' + principal) or '{}') if principal else {}
+                account["reset_pending"] = legacy_reset_pending or any(item.get('result') == 'unknown' or
+                    (item.get('result') == 'preflight' and
+                     time.time() - item.get('created', 0) < self.actions.PREFLIGHT_LEASE_SECONDS)
+                    for item in (op, shared))
             as_of = account.get("as_of")
             age_limit = max(max_age, account.get("poll_interval_seconds", 0) * 2 + 30)
             if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > age_limit:

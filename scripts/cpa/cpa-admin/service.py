@@ -28,6 +28,24 @@ SSE_BOUNDARY = re.compile(rb'(?:\r\n|\r(?!\n)|(?<!\r)\n){2}')
 SSE_BUFFER_LIMIT = 1024 * 1024
 
 
+def expected_stream_choices(path, body):
+    count = body.get('n', 1)
+    if type(count) is not int or count < 1:
+        return None
+    if path == '/v1/completions':
+        prompt = body.get('prompt')
+        if isinstance(prompt, str):
+            pass
+        elif isinstance(prompt, list) and prompt and all(type(token) is int for token in prompt):
+            pass
+        elif isinstance(prompt, list) and prompt and all(isinstance(p, str) or
+                isinstance(p, list) and all(type(token) is int for token in p) for p in prompt):
+            count *= len(prompt)
+        else:
+            return None
+    return count if count <= 128 else None
+
+
 class SSECompletionGate:
     """Hold terminal events until a complete backup response is bound."""
     def __init__(self, expected_choices=1):
@@ -35,6 +53,7 @@ class SSECompletionGate:
         self.held = None
         self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= 128 else None
         self.finished_choices = set()
+        self.failed = False
 
     def terminal(self, event):
         kind, data = '', []
@@ -47,7 +66,10 @@ class SSECompletionGate:
                 kind = value.decode('utf-8', errors='replace')
             elif name == b'data':
                 data.append(value)
-        if kind in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete'):
+        if kind in ('error', 'response.failed', 'response.incomplete'):
+            self.failed = True
+            return True
+        if kind in ('message_stop', 'response.completed'):
             return True
         payload = b'\n'.join(data)
         if payload == b'[DONE]':
@@ -58,7 +80,10 @@ class SSECompletionGate:
             return False
         if not isinstance(value, dict):
             return False
-        if value.get('type') in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete'):
+        if value.get('type') in ('error', 'response.failed', 'response.incomplete'):
+            self.failed = True
+            return True
+        if value.get('type') in ('message_stop', 'response.completed'):
             return True
         choices = value.get('choices')
         if self.expected_choices and isinstance(choices, list):
@@ -400,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
                     if connection.sock:
                         connection.sock.settimeout(3600)
                     migrating = selection.missing_bound or (account['id'] != selection.primary and migrate)
-                    sse = SSECompletionGate(body.get('n', 1)) if (migrating and 200 <= response.status < 300 and
+                    sse = SSECompletionGate(expected_stream_choices(urlsplit(self.path).path, body)) if (migrating and 200 <= response.status < 300 and
                         response.getheader('Content-Type', '').split(';', 1)[0].strip().lower() == 'text/event-stream') else None
                     def send_chunk(data):
                         self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")
@@ -415,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                             send_chunk(data)
                     if response.length is not None and response.length > 0:
                         raise http.client.IncompleteRead(b"")
-                    if has_body and 200 <= response.status < 300:
+                    if has_body and 200 <= response.status < 300 and not (sse and sse.failed):
                         try:
                             self.server.router.succeeded(selection, account["id"], migrate=migrate)
                         except sqlite3.Error as error:

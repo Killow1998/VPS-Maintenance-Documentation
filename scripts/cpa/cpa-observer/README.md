@@ -119,13 +119,15 @@ unconditional and cannot guard against concurrent model-state changes, so this o
 clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
 diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
 credential metadata changes and account disable/enable cycles.
-Before a reset POST, the live profile email must match the configured expected identity; a
-missing or mismatched identity stops the operation. Reservations are shared by the HMAC of that
-identity, so logical accounts and separate credentials for the same email cannot bypass an
-unresolved reset. The identity and request bodies are not written to the operation ledger.
-Older records without a source identity can be associated only with accounts still identifiable
-from the current inventory or stored source mapping; unresolved historical operations whose
-identity cannot be established require manual reconciliation before enabling new resets.
+Before a reset POST, the live profile email and any email on the selected logical account must
+match the configured expected identity. A missing or mismatched identity stops the operation.
+Reservations and operation IDs are shared by the HMAC of that identity, so logical accounts and
+separate credentials for the same email cannot bypass an unresolved reset or replay a completed
+operation. The raw email and request bodies are not written to the operation ledger. An older
+unresolved record without its original principal blocks new resets globally until an administrator
+reconciles it; present-day bindings cannot establish who owned that historical operation. Avoid
+rebinding or replacing credentials during a reset: the external CPA API does not provide an atomic
+identity check and redemption in one request.
 On the first upgrade, an old snapshot without a source identity conservatively retains its
 retry deadline even if the account or credential temporarily disappears, and carries it to
 the current bound source when it returns. Known legacy deadlines are migrated before querying

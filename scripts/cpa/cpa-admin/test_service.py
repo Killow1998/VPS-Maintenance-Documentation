@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from authentication import Authentication, digest
 import authentication
 from server import PolicyError, Store
-from service import COOKIE, Server, SSE_BUFFER_LIMIT, SSECompletionGate
+from service import COOKIE, Server, SSE_BUFFER_LIMIT, SSECompletionGate, expected_stream_choices
 
 
 class SSECompletionGateTest(unittest.TestCase):
@@ -51,6 +51,12 @@ class SSECompletionGateTest(unittest.TestCase):
         self.assertEqual(gate.feed(progress), [progress])
         self.assertEqual(gate.feed(last), [])
         self.assertEqual(gate.finish(), last)
+
+    def test_batch_completions_count_all_prompts(self):
+        self.assertEqual(expected_stream_choices('/v1/completions', {'prompt': ['a', 'b'], 'n': 2}), 4)
+        self.assertEqual(expected_stream_choices('/v1/completions', {'prompt': [1, 2, 3], 'n': 2}), 2)
+        self.assertEqual(expected_stream_choices('/v1/completions', {'prompt': [[1], [2]], 'n': 1}), 2)
+        self.assertIsNone(expected_stream_choices('/v1/completions', {'prompt': [], 'n': 1}))
 
 
 class AuthenticationTest(unittest.TestCase):
@@ -232,9 +238,11 @@ class GatewayTest(unittest.TestCase):
         self.calls, self.failures, self.statuses, self.session_headers = [], set(), {}, []
         self.broken_errors, self.empty_successes, self.truncated = set(), set(), set()
         self.delayed_sse = {}
+        self.stream_events = {}
         calls, failures, statuses, session_headers = self.calls, self.failures, self.statuses, self.session_headers
         broken_errors, empty_successes, truncated = self.broken_errors, self.empty_successes, self.truncated
         delayed_sse = self.delayed_sse
+        stream_events = self.stream_events
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_POST(self):
@@ -243,7 +251,7 @@ class GatewayTest(unittest.TestCase):
                 session_headers.append(self.headers.get('X-Session-ID'))
                 account = data["model"].split('/')[0]
                 code = statuses.get(account, 429 if account in failures else 200)
-                body = b'data: {"type":"message_stop"}\n\n' if data.get("stream") else b'{"ok":true}'
+                body = stream_events.get(account, b'data: {"type":"message_stop"}\n\n') if data.get("stream") else b'{"ok":true}'
                 if account in truncated:
                     self.send_response(code)
                     self.send_header('Content-Type', 'text/event-stream' if data.get('stream') else 'application/json')
@@ -553,6 +561,24 @@ class GatewayTest(unittest.TestCase):
         self.failures.clear()
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+
+    def test_batch_prompt_migration_passes_total_choices_to_sse_gate(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        with patch('service.SSECompletionGate', wraps=SSECompletionGate) as gate:
+            status, _, _ = self.request('/v1/completions', {'model': 'claude-test', 'prompt': ['a', 'b'],
+                'n': 1, 'stream': True}, {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+        self.assertEqual(status, 200)
+        gate.assert_called_once_with(2)
+
+    def test_sse_error_does_not_commit_backup_binding(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        self.stream_events['account-b'] = b'event: error\ndata: {"type":"error"}\n\n'
+        self.assertEqual(self.session_model(stream=True)[0], 200)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)

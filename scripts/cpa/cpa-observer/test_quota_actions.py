@@ -138,7 +138,7 @@ class ResetTests(unittest.TestCase):
         other = self.shared_account()
         self.obs.store.meta('reset_operation:' + self.account, json.dumps({'id': 'legacy',
             'grant_id': 'full-test', 'created': 1, 'request_id': 'previous', 'result': 'unknown'}))
-        with self.assertRaisesRegex(ValueError, 'reset_pending_or_recent'):
+        with self.assertRaisesRegex(ValueError, 'reset_unresolved_legacy'):
             self.obs.actions.redeem(other, 'full-test', 'second')
         self.assertFalse(self.spends)
 
@@ -148,6 +148,56 @@ class ResetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'reset_unresolved_legacy'):
             self.obs.actions.redeem(self.account, 'full-test', 'next')
         self.assertFalse(self.spends)
+
+    def test_rebound_account_legacy_unknown_blocks_other_principal(self):
+        other = self.shared_account()
+        self.obs.store.meta('reset_operation:' + self.account, json.dumps({'id': 'legacy',
+            'grant_id': 'full-test', 'created': 1, 'request_id': 'previous', 'result': 'unknown'}))
+        self.obs.config['quota_bindings']['main']['credential'] = 'helper-two'
+        self.obs.config['quota_bindings']['main']['expected_email'] = 'changed@example.invalid'
+        self.entries.append({'name': 'helper-two', 'provider': 'claude', 'auth_index': 'profile-two',
+                             'disabled': True, 'email': 'changed@example.invalid'})
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        with self.assertRaisesRegex(ValueError, 'reset_unresolved_legacy'):
+            self.obs.actions.redeem(other, 'full-test', 'next')
+        self.assertFalse(self.spends)
+
+    def test_logical_account_email_must_match_bound_identity(self):
+        self.entries[0]['email'] = 'other@example.invalid'
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        with self.assertRaisesRegex(ValueError, 'reset_identity'):
+            self.obs.actions.redeem(self.account, 'full-test', 'mismatched-account')
+        self.assertFalse(self.spends)
+
+    def test_completed_operation_replayed_via_alias_is_not_redeemed(self):
+        other = self.shared_account()
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            first = self.obs.actions.redeem(self.account, 'full-test', 'same-operation')
+            clock.return_value = 11000
+            restarted = Observer(self.config)
+            restarted.backend = self.obs.backend
+            second = restarted.actions.redeem(other, 'full-test', 'same-operation')
+            with self.assertRaisesRegex(ValueError, 'reset_selection_changed'):
+                restarted.actions.redeem(other, 'different-grant', 'same-operation')
+        self.assertEqual(first['request_id'], second['request_id'])
+        self.assertEqual(len(self.spends), 1)
+
+    def test_unknown_shared_principal_is_visible_for_all_aliases(self):
+        other = self.shared_account()
+        self.answer = 'timeout'
+        self.obs.actions.redeem(self.account, 'full-test', 'first')
+        self.obs.refresh_quota()
+        accounts = {a['id']: a for a in self.obs.quota_response(admin=True)['accounts']}
+        self.assertTrue(accounts[self.account]['reset_pending'])
+        self.assertTrue(accounts[other]['reset_pending'])
+
+    def test_alias_added_after_unknown_is_marked_pending_on_refresh(self):
+        self.answer = 'timeout'
+        self.obs.actions.redeem(self.account, 'full-test', 'first')
+        other = self.shared_account()
+        self.obs.refresh_quota()
+        accounts = {a['id']: a for a in self.obs.quota_response(admin=True)['accounts']}
+        self.assertTrue(accounts[other]['reset_pending'])
 
     def test_shared_source_legacy_backoff_blocks_reset_before_first_poll(self):
         other = self.shared_account()

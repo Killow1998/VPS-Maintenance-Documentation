@@ -166,8 +166,9 @@ class QuotaActions:
             self._put(con, record_key, raw)
             self._put(con, latest_key, raw)
             self._put(con, source_key, raw)
+            self._put(con, 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id'], raw)
 
-    def _claim_principal(self, account_id, source_index, expected_email, operation, aliases, resolved_accounts):
+    def _claim_principal(self, account_id, source_index, expected_email, operation, aliases):
         identity = self.observer.store.digest('reset-principal:' + expected_email.strip().casefold())
         quota_identity = self.observer.store.digest('quota-source:' + str(source_index))
         source_key = 'reset_principal:' + identity
@@ -180,16 +181,24 @@ class QuotaActions:
             if (own.get('request_id') != operation['request_id'] or own.get('result') != 'preflight'
                     or at - operation['created'] >= self.PREFLIGHT_LEASE_SECONDS):
                 raise ValueError('reset_preflight_expired')
+            principal_operation = 'reset_principal_operation:' + identity + ':' + operation['id']
+            saved = json.loads(self._get(con, principal_operation) or '{}')
+            if saved:
+                if saved.get('grant_id') != operation['grant_id']:
+                    raise ValueError('reset_selection_changed')
+                if saved.get('result') == 'preflight' and at - saved.get('created', 0) >= self.PREFLIGHT_LEASE_SECONDS:
+                    saved['result'] = 'preflight_expired'
+                    self._put(con, principal_operation, json.dumps(saved))
+                return saved
             previous = json.loads(self._get(con, source_key) or '{}')
             prefix = 'quota_account_source:'
             aliases = set(aliases)
             aliases.update(row[0][len(prefix):] for row in con.execute(
                 "SELECT key FROM metadata WHERE key LIKE 'quota_account_source:%' AND value=?", (quota_identity,)))
-            resolved_accounts = set(resolved_accounts) | aliases | {account_id}
             for key, raw in con.execute("SELECT key,value FROM metadata WHERE key LIKE 'reset_operation:%'"):
                 prior = json.loads(raw)
                 age = at - prior.get('created', 0)
-                if (key.removeprefix('reset_operation:') not in resolved_accounts and not prior.get('reset_principal')
+                if (key.removeprefix('reset_operation:') != account_id and not prior.get('reset_principal')
                         and (prior.get('result') == 'unknown' or
                              prior.get('result') == 'preflight' and age < self.PREFLIGHT_LEASE_SECONDS)):
                     raise ValueError('reset_unresolved_legacy')
@@ -207,6 +216,9 @@ class QuotaActions:
             self._put(con, latest_key, raw)
             self._put(con, record_key, raw)
             self._put(con, source_key, raw)
+            self._put(con, principal_operation, raw)
+            for alias in aliases | {account_id}:
+                self._put(con, 'reset_account_principal:' + alias, identity)
 
     def _finish(self, account_id, operation):
         latest_key = "reset_operation:" + account_id
@@ -223,8 +235,9 @@ class QuotaActions:
             self._put(con, record_key, raw)
             self._put(con, latest_key, raw)
             self._put(con, source_key, raw)
+            self._put(con, 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id'], raw)
 
-    def _cancel_preflight(self, account_id, operation, legacy_raw):
+    def _cancel_preflight(self, account_id, operation, legacy_raw, *, replay=False):
         latest_key = "reset_operation:" + account_id
         record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
         with self.observer.store.db() as con:
@@ -237,7 +250,14 @@ class QuotaActions:
                 source = json.loads(self._get(con, source_key) or '{}')
                 if source.get('request_id') == operation['request_id'] and source.get('result') == 'preflight':
                     con.execute('DELETE FROM metadata WHERE key=?', (source_key,))
+                principal_operation = 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id']
+                saved = json.loads(self._get(con, principal_operation) or '{}')
+                if saved.get('request_id') == operation['request_id'] and saved.get('result') == 'preflight':
+                    con.execute('DELETE FROM metadata WHERE key=?', (principal_operation,))
             con.execute("DELETE FROM metadata WHERE key=?", (record_key,))
+            attempt_key = 'reset_attempt:' + account_id
+            if replay and self._get(con, attempt_key) == str(operation['created']):
+                con.execute('DELETE FROM metadata WHERE key=?', (attempt_key,))
             if legacy_raw is None:
                 con.execute("DELETE FROM metadata WHERE key=?", (latest_key,))
             else:
@@ -265,7 +285,11 @@ class QuotaActions:
             expected = binding.get('expected_email') or source.get('email')
             if not isinstance(expected, str) or not expected.strip():
                 raise ValueError('reset_identity_unavailable')
-            aliases, resolved_accounts = [], []
+            logical_email = entry.get('email')
+            if logical_email is not None and (not isinstance(logical_email, str) or
+                    logical_email.strip() and logical_email.strip().casefold() != expected.strip().casefold()):
+                raise ValueError('reset_identity_mismatch')
+            aliases = []
             for other in entries:
                 if other.get('provider') != 'claude' or other.get('name') in helpers or not other.get('auth_index'):
                     continue
@@ -274,14 +298,15 @@ class QuotaActions:
                     other_binding = obs.config.get('quota_bindings', {}).get(other.get('name')) or {}
                     other_email = other_binding.get('expected_email') or other_source.get('email')
                     other_id = 'account-' + obs.store.digest('account:' + other['auth_index'])[:12]
-                    if isinstance(other_email, str) and other_email.strip():
-                        resolved_accounts.append(other_id)
                     if (other_source.get('auth_index') == source.get('auth_index') or
                             isinstance(other_email, str) and other_email.strip().casefold() == expected.strip().casefold()):
                         aliases.append(other_id)
                 except ValueError:
                     continue
-            self._claim_principal(account_id, source['auth_index'], expected, operation, aliases, resolved_accounts)
+            saved = self._claim_principal(account_id, source['auth_index'], expected, operation, aliases)
+            if saved:
+                self._cancel_preflight(account_id, operation, legacy_raw, replay=True)
+                return (saved, False) if include_fresh else saved
             obs.migrate_known_backoffs(entries)
             body = obs.query_quota(source["auth_index"], account_id)
             if not isinstance(body, dict):
