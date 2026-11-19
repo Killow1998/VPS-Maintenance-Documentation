@@ -9,7 +9,7 @@ const elements = new Map();
 function element(id) {
   if (!elements.has(id)) {
     elements.set(id, {
-      addEventListener() {},
+      listeners: {}, addEventListener(name, handler) { this.listeners[name] = handler; },
       classList: {add() {}, remove() {}, toggle() {}, contains() { return false; }},
       dataset: {}, innerHTML: "", textContent: "", disabled: false,
     });
@@ -28,7 +28,7 @@ const file = path.join(__dirname, "web", "app.js");
 const original = fs.readFileSync(file, "utf8");
 assert.match(original, /\nboot\(\);\s*$/);
 const source = original.replace(/\nboot\(\);\s*$/, "\n");
-const context = vm.createContext({document, setInterval() {}, structuredClone, assert});
+const context = vm.createContext({document, setInterval() {}, setTimeout, structuredClone, assert});
 vm.runInContext(source + `
   live = true;
   state = {quota: {}, accounts: [{
@@ -93,6 +93,44 @@ vm.runInContext(`(async () => {
   assert.equal(state.revision, 3);
   assert.equal(draft[0].account_ids[0], 'a');
   assert.equal(document.getElementById('save').disabled, true);
+  let resolveState;
+  let stateRequests = 0;
+  request = async (path) => {
+    if (path === '/api/state') {
+      stateRequests++;
+      return new Promise((resolve) => { resolveState = resolve; });
+    }
+    return {accounts:another, query_status:'partial'};
+  };
+  document.getElementById('discard').listeners.click();
+  await Promise.resolve();
+  assert.equal(document.getElementById('matrix').inert, true);
+  const input = {dataset:{client:'k', account:'a'}, checked:true,
+    matches:() => true, hasAttribute:() => false,
+    closest:() => ({classList:{toggle() {}}, querySelector:() => ({})})};
+  document.getElementById('matrix').listeners.change({target:input});
+  assert.equal(draft[0].account_ids.length, 0);
+  resolveState({accounts:structuredClone(another), clients:[{id:'k', enabled:true, account_ids:[]}],
+    revision:4, mode:'live', enforcement:'enforced', quota:{}, audit:[]});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.revision, 4);
+  assert.equal(draft[0].account_ids.length, 0);
+  assert.equal(document.getElementById('matrix').inert, false);
+  state.accounts.push({id:'removed-again', name:'Removed', enabled:false, route_ready:false});
+  let attempts = 0;
+  request = async (path) => {
+    if (path === '/api/state') {
+      stateRequests++;
+      if (++attempts === 1) throw new Error('temporary');
+      return {accounts:another, clients:state.clients, revision:5, mode:'live', enforcement:'enforced', quota:{}, audit:[]};
+    }
+    return {accounts:another, query_status:'partial'};
+  };
+  await refreshQuota(false);
+  assert.equal(state.revision, 4);
+  await refreshQuota(false);
+  assert.equal(state.revision, 5);
+  assert.equal(attempts, 2);
 })()`, context, {filename: file, timeout: 5000}).then(() => {
   console.log("web quota status: ok");
 }).catch((error) => { console.error(error); process.exitCode = 1; });

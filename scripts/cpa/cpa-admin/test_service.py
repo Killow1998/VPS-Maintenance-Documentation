@@ -13,7 +13,34 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from authentication import Authentication, digest
 import authentication
 from server import PolicyError, Store
-from service import COOKIE, Server
+from service import COOKIE, Server, SSE_BUFFER_LIMIT, SSECompletionGate
+
+
+class SSECompletionGateTest(unittest.TestCase):
+    def test_split_crlf_events_preserve_incremental_output_and_completion(self):
+        gate = SSECompletionGate()
+        start = b'event: delta\r\ndata: {"text":"x"}\r\n\r\n'
+        end = b'event: message_stop\r\ndata: {}\r\n\r\n: ping\r\n\r\n'
+        output = []
+        for byte in start + end:
+            output.extend(gate.feed(bytes([byte])))
+        self.assertEqual(b''.join(output), start)
+        self.assertEqual(gate.finish(), end)
+
+    def test_terminal_formats_and_invalid_payloads(self):
+        for event in (b'data: {"type":"message_stop"}\n\n', b'data: [DONE]\n\n',
+                      b'event: response.completed\n\n',
+                      b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'):
+            with self.subTest(event=event):
+                gate = SSECompletionGate()
+                self.assertEqual(gate.feed(event), [])
+                self.assertEqual(gate.finish(), event)
+        for event in (b'data: {"choices":null}\n\n', b'data: not-json\n\n'):
+            self.assertEqual(SSECompletionGate().feed(event), [event])
+
+    def test_event_buffer_is_bounded(self):
+        with self.assertRaises(ValueError):
+            SSECompletionGate().feed(b'x' * (SSE_BUFFER_LIMIT + 1))
 
 
 class AuthenticationTest(unittest.TestCase):
@@ -194,8 +221,10 @@ class GatewayTest(unittest.TestCase):
     def setUp(self):
         self.calls, self.failures, self.statuses, self.session_headers = [], set(), {}, []
         self.broken_errors, self.empty_successes, self.truncated = set(), set(), set()
+        self.delayed_sse = {}
         calls, failures, statuses, session_headers = self.calls, self.failures, self.statuses, self.session_headers
         broken_errors, empty_successes, truncated = self.broken_errors, self.empty_successes, self.truncated
+        delayed_sse = self.delayed_sse
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_POST(self):
@@ -207,11 +236,11 @@ class GatewayTest(unittest.TestCase):
                 body = b'data: {"type":"message_stop"}\n\n' if data.get("stream") else b'{"ok":true}'
                 if account in truncated:
                     self.send_response(code)
-                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Type', 'text/event-stream' if data.get('stream') else 'application/json')
                     self.send_header('Retry-After', '173')
                     self.send_header('Content-Length', '100')
                     self.end_headers()
-                    self.wfile.write(b'{')
+                    self.wfile.write(body if data.get('stream') else b'{')
                     self.close_connection = True
                     return
                 if account in broken_errors:
@@ -225,6 +254,19 @@ class GatewayTest(unittest.TestCase):
                     return
                 if account in empty_successes:
                     body = b''
+                if code == 200 and data.get('stream') and account in delayed_sse:
+                    sent, release = delayed_sse[account]
+                    self.send_response(code)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Transfer-Encoding', 'chunked')
+                    self.end_headers()
+                    chunk = b'event: content_block_delta\ndata: {"delta":"ok"}\n\n' + body
+                    self.wfile.write(('%x\r\n' % len(chunk)).encode() + chunk + b'\r\n')
+                    self.wfile.flush()
+                    sent.set()
+                    release.wait(5)
+                    self.wfile.write(b'0\r\n\r\n')
+                    return
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Content-Type", "text/event-stream" if data.get("stream") else "application/json")
@@ -423,8 +465,9 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.session_model()[0], 200)
         self.statuses['account-a'] = 429
         self.truncated.add('account-b')
-        with self.assertRaises(http.client.IncompleteRead):
+        with self.assertRaises(http.client.IncompleteRead) as caught:
             self.session_model(stream=True)
+        self.assertNotIn(b'message_stop', caught.exception.partial)
         self.truncated.clear()
         self.statuses.clear()
         self.assertEqual(self.session_model()[0], 200)
@@ -460,6 +503,43 @@ class GatewayTest(unittest.TestCase):
                 thread.join(10)
         self.assertFalse(thread.is_alive())
         self.assertFalse(errors)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+
+    def test_terminal_sse_event_waits_for_complete_backup_and_binding(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        sent, release, received_terminal = threading.Event(), threading.Event(), threading.Event()
+        self.delayed_sse['account-b'] = sent, release
+        conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
+        errors = []
+        def receive():
+            try:
+                conn.request('POST', '/v1/messages', json.dumps({'model': 'claude-test', 'messages': [], 'stream': True}),
+                             {'Content-Type': 'application/json', 'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+                res = conn.getresponse()
+                self.assertEqual(res.readline(), b'event: content_block_delta\n')
+                self.assertEqual(res.readline(), b'data: {"delta":"ok"}\n')
+                self.assertEqual(res.readline(), b'\n')
+                self.assertIn(b'message_stop', res.readline())
+                received_terminal.set()
+                res.read()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                conn.close()
+        thread = threading.Thread(target=receive)
+        thread.start()
+        try:
+            self.assertTrue(sent.wait(5))
+            self.assertFalse(received_terminal.wait(.4))
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertTrue(received_terminal.is_set())
         self.failures.clear()
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')

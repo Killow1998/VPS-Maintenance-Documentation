@@ -179,6 +179,18 @@ class ResetTests(unittest.TestCase):
         self.obs.backend.request.assert_not_called()
         self.assertFalse(self.spends)
 
+    def test_missing_source_reports_retained_legacy_deadline(self):
+        deadline = retry_at_after(3600)
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': self.account, 'retry_at': deadline, 'windows': {}, 'stale': True}]}))
+        self.obs.backend.accounts.return_value = []
+        self.obs.refresh_quota()
+        self.obs.backend.accounts.return_value = [self.entries[0]]
+        self.obs.refresh_quota()
+        for admin in (False, True):
+            account = self.obs.quota_response(admin=admin)['accounts'][0]
+            self.assertEqual(account['retry_at'], deadline)
+
     def test_reset_preflight_429_persists_retry_after_without_spending(self):
         original = self.obs.backend.request.side_effect
         def limited(path, data):

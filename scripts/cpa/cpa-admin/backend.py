@@ -210,8 +210,6 @@ class Backend:
         for client in state["clients"]:
             counts = {"requests": None, "tokens": None, "period": "1h"}
             try:
-                if quota["query_status"] == "unavailable":
-                    raise PolicyError(503, "查询服务暂不可用。")
                 data = self.observer_get("/v1/usage?period=1h", keys[client["id"]])
                 totals = data["totals"]
                 counts.update(requests=totals.get("requests"), tokens=totals.get("total_tokens"))

@@ -256,7 +256,53 @@ class Store:
         return self._latest_deadline(key, proposed)
 
     def legacy_quota_backoff(self, account, proposed=None):
-        return self._latest_deadline("quota_legacy_backoff:" + account, proposed)
+        key = "quota_legacy_backoff:" + account
+        if proposed is None:
+            return self._latest_deadline(key)
+        proposed = stamp(proposed)
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            migrated = con.execute("SELECT value FROM metadata WHERE key=?", ("quota_legacy_consumed:" + account,)).fetchone()
+            row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            current = stamp(row[0]) if row else None
+            if (not migrated or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(stamp(migrated[0]))) and (
+                    not current or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(current)):
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, proposed))
+                current = proposed
+            return current
+
+    def bind_quota_source(self, account, source, old):
+        identity = self.digest("quota-source:" + str(source))
+        source_key = "quota_backoff:" + identity
+        pending_key = "quota_legacy_backoff:" + account
+        consumed_key = "quota_legacy_consumed:" + account
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            def get(key):
+                row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+                return stamp(row[0]) if row else None
+            def later(first, second):
+                if not first:
+                    return second
+                if not second:
+                    return first
+                return first if dt.datetime.fromisoformat(first) >= dt.datetime.fromisoformat(second) else second
+            current, pending, consumed = get(source_key), get(pending_key), get(consumed_key)
+            old_retry = stamp(old["retry_at"]) if old.get("retry_at") else None
+            if old_retry and old.get("source_identity") is None and (
+                    not consumed or dt.datetime.fromisoformat(old_retry) > dt.datetime.fromisoformat(consumed)):
+                pending = later(pending, old_retry)
+            elif old_retry and old.get("source_identity") == identity:
+                current = later(current, old_retry)
+            if pending:
+                current = later(current, pending)
+                consumed = later(consumed, pending)
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (consumed_key, consumed))
+                con.execute("DELETE FROM metadata WHERE key=?", (pending_key,))
+            if current:
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (source_key, current))
+            con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", ("quota_account_source:" + account, identity))
+            return current
 
     def _latest_deadline(self, key, proposed=None):
         if proposed is None:
@@ -547,20 +593,11 @@ class Observer:
         return source
 
     def source_backoff(self, source_index, account_id=None):
-        retry_at = self.store.quota_backoff(source_index)
-        if account_id:
-            snapshot = json.loads(self.store.meta("quota_snapshot") or "{}")
-            old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
-            identity = self.store.digest("quota-source:" + str(source_index))
-            self.store.meta("quota_account_source:" + account_id, identity)
-            if old.get("retry_at") and not old.get("source_identity"):
-                self.store.legacy_quota_backoff(account_id, old["retry_at"])
-            legacy = self.store.legacy_quota_backoff(account_id)
-            if legacy and dt.datetime.fromisoformat(legacy) > dt.datetime.now(UTC):
-                retry_at = self.store.quota_backoff(source_index, legacy)
-            if old.get("retry_at") and old.get("source_identity") in (None, identity):
-                retry_at = self.store.quota_backoff(source_index, old["retry_at"])
-        return retry_at
+        if not account_id:
+            return self.store.quota_backoff(source_index)
+        snapshot = json.loads(self.store.meta("quota_snapshot") or "{}")
+        old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
+        return self.store.bind_quota_source(account_id, source_index, old)
 
     def require_source_ready(self, source_index, account_id=None):
         retry_at = self.source_backoff(source_index, account_id)
@@ -669,6 +706,17 @@ class Observer:
         by_name = {entry.get("name"): entry for entry in entries if entry.get("name")}
         bindings = self.config.get("quota_bindings", {})
         sources = {binding.get("credential") for binding in bindings.values() if isinstance(binding, dict)}
+        # Move every identifiable legacy deadline before querying a shared source.
+        for entry in entries:
+            if entry.get("provider") != "claude" or entry.get("name") in sources or entry.get("disabled") or not entry.get("auth_index"):
+                continue
+            try:
+                source = self.quota_source(entry, by_name)
+                if source.get("auth_index"):
+                    identity = "account-" + self.store.digest("account:" + entry["auth_index"])[:12]
+                    self.source_backoff(source["auth_index"], identity)
+            except QuotaError:
+                continue
         for entry in entries:
             if entry.get("provider") != "claude":
                 continue
@@ -776,7 +824,16 @@ class Observer:
             account.pop("source_revision", None)
             snapshot_source = account.pop("source_identity", None)
             source_identity = self.store.meta("quota_account_source:" + account["id"]) or snapshot_source
-            retry_at = account.get("retry_at")
+            retry_at = account.get("retry_at") if not snapshot_source or snapshot_source == source_identity else None
+            if snapshot_source and source_identity and snapshot_source != source_identity:
+                account.update(windows={}, stale=True, status="unavailable", reason="quota_source_changed", as_of=None)
+                account.pop("retry_at", None)
+                account.pop("unknown_windows", None)
+                account.pop("resets", None)
+                account.pop("routing", None)
+            legacy = self.store.legacy_quota_backoff(account["id"])
+            if legacy and (not retry_at or dt.datetime.fromisoformat(legacy) > dt.datetime.fromisoformat(retry_at)):
+                retry_at = legacy
             if source_identity:
                 current = self.store.meta("quota_backoff:" + source_identity)
                 if current and (not retry_at or dt.datetime.fromisoformat(current) > dt.datetime.fromisoformat(retry_at)):

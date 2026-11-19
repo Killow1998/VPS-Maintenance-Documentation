@@ -51,6 +51,8 @@ python3 cpa-tools/api_keys.py permissions
 
 路由使用实际模型请求结果。模型请求的 401/403/429 允许在当前白名单内尝试备用账号；备用返回有内容的 2xx 且 HTTP 传输完整后才迁移绑定，原账号恢复后不自动跳回。503 仅对本次请求回退，不改变长期绑定。每次尝试重读权限；账号停用、移出白名单或暂不支持当前模型时，只选择获准账号。没有获准备用账号时返回原错误，不借用其他号池。响应头或流式内容已经发出后不再次尝试，网络结果不明不自动重放。未声明长度、以连接关闭结束的上游响应不能可靠识别截断；HTTP 传输完整也不等于应用层生成一定成功。
 
+需要迁移绑定的 SSE 流会正常转发中间事件，将可识别的完成事件留到传输完成且绑定保存后再发出，避免客户端提前发起下一轮。单个未完成事件或完成后的缓冲最多 1 MiB；超过时关闭该响应，不提交迁移，也不自动重放。绑定写入失败会记警告并保留已生成的回答，此时下一轮可能仍使用原账号。
+
 **额度查询的 429 不参与模型调度**，不会因 observer 被限流而切号。路由不增加官方额度查询，CPA 仍负责认证、配额冷却与模型限制。新会话可能先分到已耗尽但仍启用的账号，再由 CPA 的实际错误触发回退；未知或旧额度不会被视为零额度，不把所有 429 都当作五小时额度耗尽。
 
 `session_routing.py` 在现有策略 SQLite 新增 `session_routes`、`session_route_cursors` 两张附表。会话 ID 存 HMAC 摘要，Key、OAuth、请求正文、图片和工具结果不落库。绑定按请求续期，默认空闲 24 小时过期，最多保留 10,000 条，超限淘汰最久未使用的绑定；过期/淘汰后下一请求可能重新分配。候选池游标也持久保存并限量。事务防止并发首请求分到不同账号，代次校验防止旧响应覆盖后续迁移。策略、认证和用量表不重建。
@@ -66,7 +68,7 @@ python3 cpa-tools/api_keys.py permissions
 先核对实际运行文件及版本，保留现场定制。升级有两条路径：
 
 - **从尚未安装 reset/刷新版本的 main 升级**：更新 admin 的 `backend.py`、`service.py`、`session_routing.py` 和 `web/app.js`、`web/index.html`、`web/style.css`，以及 observer 的 `observer.py`、`quota_actions.py`
-- **已完整安装 PR #12 版本**：更新 admin 的 `service.py`、`session_routing.py`、`web/app.js`、`web/index.html`，以及 observer 的 `observer.py`、`quota_actions.py`；其余文件先核对实际版本
+- **已完整安装 PR #12 版本**：更新 admin 的 `backend.py`、`service.py`、`session_routing.py`、`web/app.js`、`web/index.html`，以及 observer 的 `observer.py`、`quota_actions.py`；其余文件先核对实际版本
 
 备份将要替换的全部文件、配置、unit 和用量/策略一致 SQLite 快照，连接以数据库所属用户运行；此前不存在的文件记录为新增。先用临时库预检，再安装 companion 文件并替换其余文件，确认维护窗口后仅重启有变更的 `cpa-observer` 和 `cpa-admin`。admin 是转发网关，重启可能中断流式调用，需检查活跃任务并与用户确认。不更换 CPA 二进制，不重启 Nginx、XBoard，不改 HTTPS/代理，不运行首次部署脚本或重新导入权限。
 

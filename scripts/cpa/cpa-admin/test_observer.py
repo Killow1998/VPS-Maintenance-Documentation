@@ -93,14 +93,23 @@ class ObserverIntegrationTest(unittest.TestCase):
         self.assertFalse(Path(self.backend.c["database"]).exists())
         self.assertNotIn("fixture-a", json.dumps(state))
 
-    def test_observer_failure_is_unknown_and_does_not_disable_accounts(self):
+    def test_quota_failure_does_not_hide_independent_usage_or_disable_accounts(self):
         self.failures.add("/v1/quota")
         state = self.backend.state()
         self.assertEqual(state["quota"]["query_status"], "unavailable")
         self.assertTrue(state["accounts"][0]["enabled"])
         self.assertEqual(state["accounts"][0]["quota_reason"], "observer_unavailable")
-        self.assertIsNone(state["clients"][0]["usage"]["requests"])
+        self.assertEqual(state["clients"][0]["usage"]["requests"], 2)
+        self.assertEqual(state["collection"]["collector_status"], "ok")
         self.assertNotIn("private diagnostic", json.dumps(state))
+
+    def test_upstream_quota_backoff_does_not_hide_independent_usage(self):
+        self.snapshot['query_status'] = 'unavailable'
+        self.snapshot['stale'] = True
+        state = self.backend.state()
+        self.assertEqual(state['quota']['query_status'], 'unavailable')
+        self.assertEqual(state['clients'][0]['usage']['requests'], 2)
+        self.assertEqual(state['collection']['collector_status'], 'ok')
 
     def test_usage_failure_is_not_zero_and_does_not_hide_quota(self):
         self.failures.add("/v1/usage?period=1h")

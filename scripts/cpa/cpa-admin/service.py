@@ -24,6 +24,72 @@ ROOT = Path(__file__).resolve().parent
 COOKIE = "__Secure-cpa_admin"
 MODEL_PATHS = {"/v1/messages", "/v1/messages/count_tokens", "/v1/chat/completions", "/v1/responses", "/v1/completions"}
 SESSION_HEADER_NAMES = frozenset(name.lower() for name in SESSION_HEADERS)
+SSE_BOUNDARY = re.compile(rb'(?:\r\n|\r(?!\n)|(?<!\r)\n){2}')
+SSE_BUFFER_LIMIT = 1024 * 1024
+
+
+class SSECompletionGate:
+    """Hold terminal events until a complete backup response is bound."""
+    def __init__(self):
+        self.pending = bytearray()
+        self.held = None
+
+    @staticmethod
+    def terminal(event):
+        kind, data = '', []
+        for line in event.splitlines():
+            name, sep, value = line.partition(b':')
+            if not sep:
+                continue
+            value = value.removeprefix(b' ')
+            if name == b'event':
+                kind = value.decode('utf-8', errors='replace')
+            elif name == b'data':
+                data.append(value)
+        if kind in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete'):
+            return True
+        payload = b'\n'.join(data)
+        if payload == b'[DONE]':
+            return True
+        try:
+            value = json.loads(payload)
+        except (ValueError, UnicodeError):
+            return False
+        if not isinstance(value, dict):
+            return False
+        if value.get('type') in ('message_stop', 'response.completed', 'response.failed', 'response.incomplete'):
+            return True
+        choices = value.get('choices')
+        return isinstance(choices, list) and any(isinstance(choice, dict) and choice.get('finish_reason') is not None
+                                                for choice in choices)
+
+    def feed(self, chunk):
+        if self.held is not None:
+            self.held.extend(chunk)
+            if len(self.held) > SSE_BUFFER_LIMIT:
+                raise ValueError('SSE completion exceeds buffer limit')
+            return []
+        self.pending.extend(chunk)
+        ready = []
+        while match := SSE_BOUNDARY.search(self.pending):
+            if match.end() == len(self.pending) and self.pending[-1] == 13:
+                break
+            event = bytes(self.pending[:match.end()])
+            del self.pending[:match.end()]
+            if len(event) > SSE_BUFFER_LIMIT:
+                raise ValueError('SSE event exceeds buffer limit')
+            if self.terminal(event):
+                self.held = bytearray(event)
+                self.held.extend(self.pending)
+                self.pending.clear()
+                break
+            ready.append(event)
+        if len(self.pending) > SSE_BUFFER_LIMIT or (self.held is not None and len(self.held) > SSE_BUFFER_LIMIT):
+            raise ValueError('SSE buffer limit exceeded')
+        return ready
+
+    def finish(self):
+        return bytes(self.held if self.held is not None else self.pending)
 
 
 def unique_object(pairs):
@@ -325,14 +391,20 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if connection.sock:
                         connection.sock.settimeout(3600)
+                    migrating = selection.missing_bound or (account['id'] != selection.primary and migrate)
+                    sse = SSECompletionGate() if (migrating and 200 <= response.status < 300 and
+                        response.getheader('Content-Type', '').split(';', 1)[0].strip().lower() == 'text/event-stream') else None
+                    def send_chunk(data):
+                        self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")
+                        self.wfile.flush()
                     has_body = False
                     while True:
                         chunk = response.read1(65536)
                         if not chunk:
                             break
                         has_body = True
-                        self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
-                        self.wfile.flush()
+                        for data in sse.feed(chunk) if sse else (chunk,):
+                            send_chunk(data)
                     if response.length is not None and response.length > 0:
                         raise http.client.IncompleteRead(b"")
                     if has_body and 200 <= response.status < 300:
@@ -340,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
                             self.server.router.succeeded(selection, account["id"], migrate=migrate)
                         except sqlite3.Error as error:
                             logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
+                    if sse and (last := sse.finish()):
+                        send_chunk(last)
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 except Exception:

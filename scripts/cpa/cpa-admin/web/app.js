@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 let state = null;
 let draft = [];
 let saving = false;
+let loading = false;
 let live = false;
 let quotaLoading = false;
 let quotaError = "";
@@ -47,8 +48,8 @@ function renderMetrics() {
 
 function renderStatus() {
   const changed = dirty();
-  $("save").disabled = saving || !changed || inventoryConflict;
-  $("discard").disabled = saving || !changed;
+  $("save").disabled = saving || loading || !changed || inventoryConflict;
+  $("discard").disabled = saving || loading || !changed;
   $("save").textContent = saving ? "正在保存…" : live ? "保存权限" : "保存本地策略";
   $("save-status").classList.toggle("dirty-label", changed);
   $("save-status").textContent = inventoryConflict
@@ -248,12 +249,9 @@ async function refreshQuota(manual = false) {
         inventoryChanged = true;
       }
     }
-    if (inventoryChanged) {
-      inventoryConflict = true;
-      if (!dirty()) {
-        await load(true);
-        return;
-      }
+    if (inventoryChanged) inventoryConflict = true;
+    if (inventoryConflict) {
+      if (!dirty()) { await load(true); return; }
       error("账号状态已变化。请先放弃本页未保存修改，再重新加载策略。");
       renderMetrics(); renderMatrix(); renderSelects(); renderStatus();
     }
@@ -292,6 +290,10 @@ function render() {
 }
 
 async function load(preserve = false) {
+  if (loading) return;
+  loading = true;
+  $("matrix").inert = true;
+  if (state) renderStatus();
   error();
   $("refresh").disabled = true;
   try {
@@ -311,12 +313,18 @@ async function load(preserve = false) {
     render();
     document.body.dataset.ready = "true";
   } catch (e) { error(e.message); }
-  finally { $("refresh").disabled = false; }
+  finally {
+    loading = false;
+    $("matrix").inert = false;
+    $("refresh").disabled = false;
+    if (state) renderStatus();
+  }
 }
 
 $("matrix").addEventListener("change", (event) => {
   const input = event.target;
   if (!input.matches("input[data-client]")) return;
+  if (loading) { renderMatrix(); return; }
   const row = draft.find((c) => c.id === input.dataset.client);
   if (input.hasAttribute("data-enabled")) row.enabled = input.checked;
   else {
@@ -344,12 +352,13 @@ $("reset-confirm").addEventListener("click", confirmReset);
 $("reset-cancel").addEventListener("click", () => $("reset-dialog").close());
 $("reset-dialog").addEventListener("cancel", (e) => { if (resetBusy) e.preventDefault(); });
 $("discard").addEventListener("click", () => {
+  if (loading) return;
   draft = structuredClone(state.clients);
   if (inventoryConflict) { load(); return; }
   error(); renderMatrix(); renderMetrics(); renderStatus();
 });
 $("save").addEventListener("click", async () => {
-  if (saving || inventoryConflict || !dirty()) return;
+  if (saving || loading || inventoryConflict || !dirty()) return;
   saving = true; error(); renderStatus();
   try {
     state = await request("/api/policies", {expected_revision: state.revision, clients: normalized(draft)});

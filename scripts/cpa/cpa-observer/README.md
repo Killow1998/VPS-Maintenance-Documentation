@@ -121,8 +121,9 @@ diagnose it. Unknown reported windows stay unknown; retry deadlines persist inde
 credential metadata changes and account disable/enable cycles.
 On the first upgrade, an old snapshot without a source identity conservatively retains its
 retry deadline even if the account or credential temporarily disappears, and carries it to
-the current bound source when it returns. Later source changes
-do not transfer a new-format deadline to a different credential. Usage, profile and reset
+the current bound source when it returns. Known legacy deadlines are migrated before querying
+any shared source. Once migrated, the legacy deadline is consumed and is not transferred again
+if the account is later rebound to a different credential. Usage, profile and reset
 responses all preserve upstream retry deadlines; active backoff marks cached quota stale.
 After rollback, old code will not enforce the new source-level backoff, including during its
 scheduled polling. Before restoring old code, stop the observer and check the latest deadline
