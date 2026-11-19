@@ -430,6 +430,40 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 
+    def test_completed_backup_is_bound_before_client_sees_end_of_stream(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        original = self.server.router.succeeded
+        errors = []
+        def delayed(selection, account, **kwargs):
+            if account == 'account-b':
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('test wait')
+            return original(selection, account, **kwargs)
+        def request():
+            try:
+                self.assertEqual(self.session_model(stream=True)[0], 200)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+        with patch.object(self.server.router, 'succeeded', side_effect=delayed):
+            thread = threading.Thread(target=request)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertFalse(finished.wait(.5))
+            finally:
+                release.set()
+                thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)
         self.assertEqual(self.calls, [{"model": "account-a/claude-test", "key": "Bearer test-client"}])

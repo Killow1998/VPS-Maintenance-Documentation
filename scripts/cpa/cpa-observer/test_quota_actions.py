@@ -157,6 +157,17 @@ class ResetTests(unittest.TestCase):
         self.obs.backend.request.assert_not_called()
         self.assertFalse(self.spends)
 
+    def test_legacy_backoff_survives_temporary_missing_source(self):
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': self.account, 'retry_at': retry_at_after(3600), 'windows': {}, 'stale': True}]}))
+        self.obs.backend.accounts.return_value = [self.entries[0]]
+        self.obs.refresh_quota()
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(self.account, 'full-test', 'after-missing')
+        self.obs.backend.request.assert_not_called()
+        self.assertFalse(self.spends)
+
     def test_reset_preflight_429_persists_retry_after_without_spending(self):
         original = self.obs.backend.request.side_effect
         def limited(path, data):
@@ -182,6 +193,45 @@ class ResetTests(unittest.TestCase):
             self.obs.actions.redeem(self.account, 'full-test', 'profile-limited')
         self.assertIsNotNone(self.obs.store.quota_backoff('profile'))
         self.assertFalse(self.spends)
+
+    def test_profile_429_is_visible_in_reads_without_another_poll(self):
+        self.obs.backend.quota.side_effect = lambda _: {**grant_body(),
+            'five_hour': {'utilization': 20}, 'seven_day': {'utilization': 30}}
+        self.obs.refresh_quota()
+        original = self.obs.backend.request.side_effect
+        def limited(path, data):
+            if '/profile' in data['url']:
+                return {'status_code': 429, 'body': '{}', 'header': {'Retry-After': ['7200']}}
+            return original(path, data)
+        self.obs.backend.request.side_effect = limited
+        with self.assertRaises(ValueError):
+            self.obs.actions.redeem(self.account, 'full-test', 'limited-profile')
+        for admin in (False, True):
+            result = self.obs.quota_response(admin=admin)
+            self.assertTrue(result['accounts'][0]['stale'])
+            self.assertEqual(result['accounts'][0]['reason'], 'quota_backoff')
+            self.assertIsNotNone(result['accounts'][0]['retry_at'])
+            self.assertEqual(result['accounts_with_fresh_quota'], 0)
+            self.assertEqual(result['query_status'], 'unavailable')
+
+    def test_profile_429_overlays_legacy_fresh_snapshot_before_first_poll(self):
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [{
+            'id': self.account, 'enabled': True, 'status': 'ok', 'stale': False,
+            'as_of': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'windows': {'five_hour': {'used_percent': 20, 'remaining_percent': 80, 'resets_at': None}}}]}))
+        self.obs.store.meta('quota_status', 'ok')
+        original = self.obs.backend.request.side_effect
+        def limited(path, data):
+            if '/profile' in data['url']:
+                return {'status_code': 429, 'body': '{}', 'header': {'Retry-After': ['3600']}}
+            return original(path, data)
+        self.obs.backend.request.side_effect = limited
+        with self.assertRaises(ValueError):
+            self.obs.actions.redeem(self.account, 'full-test', 'legacy-profile')
+        result = self.obs.quota_response()
+        self.assertTrue(result['accounts'][0]['stale'])
+        self.assertIsNotNone(result['accounts'][0]['retry_at'])
+        self.assertEqual(result['query_status'], 'unavailable')
 
     def test_post_429_backoff_prevents_immediate_quota_refresh(self):
         original = self.obs.backend.request.side_effect

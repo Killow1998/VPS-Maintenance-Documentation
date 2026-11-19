@@ -8,6 +8,7 @@ let live = false;
 let quotaLoading = false;
 let quotaError = "";
 let quotaRefreshAfter = 0;
+let inventoryConflict = false;
 let resetSelection = null;
 let resetBusy = false;
 const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -46,11 +47,13 @@ function renderMetrics() {
 
 function renderStatus() {
   const changed = dirty();
-  $("save").disabled = saving || !changed;
+  $("save").disabled = saving || !changed || inventoryConflict;
   $("discard").disabled = saving || !changed;
   $("save").textContent = saving ? "正在保存…" : live ? "保存权限" : "保存本地策略";
   $("save-status").classList.toggle("dirty-label", changed);
-  $("save-status").textContent = changed
+  $("save-status").textContent = inventoryConflict
+    ? "账号状态已变化，请放弃未保存修改并重新加载"
+    : changed
     ? `${changedRows()} 个 Key 有未保存修改 · 尚未生效`
     : live ? `策略 v${state.revision} · ${state.enforcement === "enforced" ? "新请求按此版本执行" : "尚未切换线上流量"}` : `本地策略 v${state.revision} 已保存 · 尚未应用到 VPS`;
 }
@@ -164,6 +167,7 @@ async function confirmReset() {
     await refreshQuota();
   } catch (_) {
     $("reset-message").textContent = "操作未确认，请刷新额度并核对 reset 次数，勿重复兑换。";
+    await refreshQuota();
   } finally {
     resetBusy = false;
     resetSelection = null;
@@ -244,7 +248,15 @@ async function refreshQuota(manual = false) {
         inventoryChanged = true;
       }
     }
-    if (inventoryChanged) { renderMetrics(); renderMatrix(); renderSelects(); }
+    if (inventoryChanged) {
+      inventoryConflict = true;
+      if (!dirty()) {
+        await load(true);
+        return;
+      }
+      error("账号状态已变化。请先放弃本页未保存修改，再重新加载策略。");
+      renderMetrics(); renderMatrix(); renderSelects(); renderStatus();
+    }
     const {accounts, ...meta} = snapshot;
     state.quota = meta;
     const limited = snapshot.accounts.some((a) => a.enabled && quotaBackoff(a));
@@ -287,6 +299,7 @@ async function load(preserve = false) {
     const keepDraft = preserve && dirty();
     if (keepDraft && data.revision !== state.revision) throw new Error("策略已在另一窗口更新。先撤销本页修改，再刷新快照。");
     state = data;
+    inventoryConflict = false;
     live = state.mode === "live";
     document.body.classList.remove("needs-login");
     $("login-panel").classList.add("hidden");
@@ -332,10 +345,11 @@ $("reset-cancel").addEventListener("click", () => $("reset-dialog").close());
 $("reset-dialog").addEventListener("cancel", (e) => { if (resetBusy) e.preventDefault(); });
 $("discard").addEventListener("click", () => {
   draft = structuredClone(state.clients);
+  if (inventoryConflict) { load(); return; }
   error(); renderMatrix(); renderMetrics(); renderStatus();
 });
 $("save").addEventListener("click", async () => {
-  if (saving || !dirty()) return;
+  if (saving || inventoryConflict || !dirty()) return;
   saving = true; error(); renderStatus();
   try {
     state = await request("/api/policies", {expected_revision: state.revision, clients: normalized(draft)});

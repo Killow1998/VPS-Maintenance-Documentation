@@ -546,6 +546,7 @@ class Observer:
             snapshot = json.loads(self.store.meta("quota_snapshot") or "{}")
             old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
             identity = self.store.digest("quota-source:" + str(source_index))
+            self.store.meta("quota_account_source:" + account_id, identity)
             if old.get("retry_at") and old.get("source_identity") in (None, identity):
                 retry_at = self.store.quota_backoff(source_index, old["retry_at"])
         return retry_at
@@ -716,6 +717,11 @@ class Observer:
                     item.update(windows=old.get("windows", {}) if same_source else {},
                                 as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
+                    if old.get("retry_at") and (not source_index or not old.get("source_identity")
+                                                or old.get("source_identity") == item.get("source_identity")):
+                        item["retry_at"] = old["retry_at"]
+                        if not source_index:
+                            item.update({k: old[k] for k in ("source_revision", "source_identity") if k in old})
                     if same_source:
                         item.update({k: old[k] for k in ("unknown_windows", "resets", "routing", "poll_interval_seconds") if k in old})
                     if isinstance(error, QuotaError) and error.status == 429:
@@ -751,9 +757,20 @@ class Observer:
         data = json.loads(self.store.meta("quota_snapshot") or "{}")
         accounts = data.get("accounts", [])
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
+        backoff_active = False
         for account in accounts:
             account.pop("source_revision", None)
-            account.pop("source_identity", None)
+            snapshot_source = account.pop("source_identity", None)
+            source_identity = self.store.meta("quota_account_source:" + account["id"]) or snapshot_source
+            retry_at = account.get("retry_at")
+            if source_identity:
+                current = self.store.meta("quota_backoff:" + source_identity)
+                if current and (not retry_at or dt.datetime.fromisoformat(current) > dt.datetime.fromisoformat(retry_at)):
+                    retry_at = current
+            if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+                account.update(retry_at=retry_at, stale=True, status="unavailable",
+                               reason=account.get("reason") if account.get("reason") == "upstream_http_429" else "quota_backoff")
+                backoff_active = backoff_active or account.get("enabled", False)
             account["windows"].update(account.pop("unknown_windows", {}))
             if not admin:
                 account.pop("resets", None)
@@ -777,12 +794,16 @@ class Observer:
                              "min_remaining_percent": min(values) if values else None,
                              "max_remaining_percent": max(values) if values else None,
                              "resets_at": accounts[0]["windows"][name]["resets_at"] if len(accounts) == 1 else None}
+        query_status = self.store.meta("quota_status") or "starting"
+        if backoff_active and query_status in ("ok", "partial", "unavailable", "starting"):
+            enabled = [a for a in accounts if a["enabled"]]
+            query_status = "unavailable" if all(a["stale"] for a in enabled) else "partial"
         return {"scope": "shared_pool", "provider": "claude", "checked_at": data.get("checked_at"),
                 "stale": not accounts or any(a["enabled"] and a["stale"] for a in accounts),
                 "accounts_total": len(accounts), "accounts_enabled": sum(a["enabled"] for a in accounts),
                 "accounts_with_fresh_quota": sum(not a["stale"] for a in accounts),
                 "windows": windows, "accounts": accounts,
-                "query_status": self.store.meta("quota_status") or "starting",
+                "query_status": query_status,
                 "unit": "percentage_of_provider_usage_window; not tokens or cash balance"}
 
 

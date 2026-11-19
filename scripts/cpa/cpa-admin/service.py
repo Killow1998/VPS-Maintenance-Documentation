@@ -335,13 +335,13 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     if response.length is not None and response.length > 0:
                         raise http.client.IncompleteRead(b"")
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
                     if has_body and 200 <= response.status < 300:
                         try:
                             self.server.router.succeeded(selection, account["id"], migrate=migrate)
                         except sqlite3.Error as error:
                             logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
                 except Exception:
                     self.close_connection = True
                 return

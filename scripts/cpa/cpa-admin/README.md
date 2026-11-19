@@ -74,7 +74,7 @@ python3 cpa-tools/api_keys.py permissions
 
 Windows CI 额外安装固定版本的 `tzdata`，为权限审计时间提供 `Asia/Shanghai` IANA 数据；这是跨平台测试环境依赖，不增加 Linux VPS 的 Python 包依赖或改写系统时区。
 
-回滚恢复实际变更前的全部 admin、web 和 observer 文件，并只重启对应服务，**保留当前数据库**。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。旧版没有逐操作防重放，回滚后须暂停 reset 重试并由管理员核对；不删除正在被新版服务导入的 companion 文件。
+回滚恢复实际变更前的全部 admin、web 和 observer 文件，**保留当前数据库**。若还有未到期的额度查询退避，必须按下方说明暂不启动旧 observer；不能只依赖旧版的定时轮询设置。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。旧版没有逐操作防重放，回滚后须暂停 reset 重试并由管理员核对；不删除正在被新版服务导入的 companion 文件。
 
 ## 新增 Claude 账号
 
@@ -131,7 +131,7 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 新增仅回环管理接口 `POST /internal/quota`，复用 management secret，支持 read/refresh/redeem。admin 通过现有管理员会话和 Origin 校验访问；普通 Key 无权访问，Nginx 不增加公共路由。公开 `/v1/quota` 不含 reset grant 或调度详情。操作按账号和操作 ID 保存在 observer metadata，不修改 records/cache_ttl 表。旧版只保留最后一笔，升级只能迁移仍存在的记录，无法恢复更早的操作 ID；切换前应等待进行中操作结束，不重放旧请求。unknown 结果需管理员核对后处理，不删除记录盲重试。
 
-回滚仅恢复旧源码、原 `quota_poll_seconds` 并重启 admin/observer，保留当前数据库、reset 操作日志和新增用量。旧版读取新快照时会忽略单独保存的未知额度窗口，不应将其当作零；旧版也不执行新版源级退避，回滚后暂停 reset 操作，并等待最近一次限流截止后再手动刷新。旧版不具备完整操作 ID 防重放。不能用维护前快照覆盖数据库，也不能恢复旧 OAuth 文件覆盖新 token。已兑换的官方 reset 无法撤销。
+回滚恢复旧源码和原 `quota_poll_seconds`，保留当前数据库、reset 操作日志和新增用量。旧版读取新快照时会忽略单独保存的未知额度窗口，不应将其当作零；旧版既不执行新版源级退避，其定时采样也可能提前查询。恢复旧 observer 前，先停止它并核对快照及 `quota_backoff:*` 记录中最晚的有效截止时间；截止前保持旧 observer 停止，无法确认期限时继续停用或保留修复后的 observer，不能宣称回滚完成。暂停期间管理端额度视图可能不可用。整个回滚期间暂停 reset 操作；旧版不具备完整操作 ID 防重放。不能用维护前快照覆盖数据库，也不能恢复旧 OAuth 文件覆盖新 token。已兑换的官方 reset 无法撤销。
 
 审查修复按以下范围更新：
 

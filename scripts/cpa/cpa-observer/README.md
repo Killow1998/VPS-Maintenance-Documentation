@@ -123,8 +123,13 @@ On the first upgrade, an old snapshot without a source identity conservatively c
 retry deadline to the current bound source, even if its revision changed. Later source changes
 do not transfer a new-format deadline to a different credential. Usage, profile and reset
 responses all preserve upstream retry deadlines; active backoff marks cached quota stale.
-After rollback, old code will not enforce the new source-level backoff: pause reset operations
-and wait for the last recorded deadline before permitting a manual refresh.
+After rollback, old code will not enforce the new source-level backoff, including during its
+scheduled polling. Before restoring old code, stop the observer and check the latest deadline
+in its snapshot and `quota_backoff:*` metadata without publishing account identifiers. Keep
+the old observer stopped until every active deadline has passed; if the deadline cannot be
+determined, keep it stopped or retain the corrected observer instead of claiming a completed
+rollback. Pause reset operations throughout. Check whether admin quota views require the
+observer; stopping it can temporarily make those views unavailable.
 Stored windows retain numeric-only compatibility with older readers;
 unknown windows live separately in the snapshot and are combined in new API responses. An
 older reader after rollback may omit those unknown windows, but must not treat them as zero.
@@ -132,7 +137,8 @@ older reader after rollback may omit those unknown windows, but must not treat t
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these
 two services, retaining CPA binary, OAuth, prices, ACL and TTL history. Rollback restores
-sources and the old polling value, retaining current databases and operation metadata.
+sources and the old polling value, retaining current databases and operation metadata. Follow
+the backoff procedure above before restarting an old observer.
 Run `python3 -B -m unittest discover -p 'test_*.py'` for usage/TTL and synthetic reset tests.
 
 Paths on the server:

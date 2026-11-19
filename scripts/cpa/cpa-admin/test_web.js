@@ -28,7 +28,7 @@ const file = path.join(__dirname, "web", "app.js");
 const original = fs.readFileSync(file, "utf8");
 assert.match(original, /\nboot\(\);\s*$/);
 const source = original.replace(/\nboot\(\);\s*$/, "\n");
-const context = vm.createContext({document, setInterval() {}, assert});
+const context = vm.createContext({document, setInterval() {}, structuredClone, assert});
 vm.runInContext(source + `
   live = true;
   state = {quota: {}, accounts: [{
@@ -60,18 +60,32 @@ vm.runInContext(source + `
   assert.match(document.getElementById("account-cards").innerHTML, /部分额度未知/);
 `, context, {filename: file, timeout: 5000});
 vm.runInContext(`(async () => {
+  state.clients = [];
+  state.revision = 1;
+  draft = [];
   state.accounts[0].quota_reason = 'quota_backoff';
   state.accounts[0].retry_at = new Date(Date.now() + 60000).toISOString();
   state.accounts.push({id:'b', name:'B', plan:'Claude', enabled:false, stale:true,
     windows:{}, resets:{status:'unknown'}, routing:{}});
   const updated = [{...state.accounts[0]}, {...state.accounts[1], enabled:true, stale:false},
     {id:'c', name:'C', plan:'Claude', enabled:true, stale:false, windows:{}, resets:{}, routing:{}}];
-  request = async () => ({accounts:updated, query_status:'partial'});
-  renderMetrics = renderMatrix = renderSelects = () => {};
+  request = async (path) => path === '/api/state'
+    ? {accounts:updated, clients:[], revision:2, mode:'live', enforcement:'enforced', quota:{}, audit:[]}
+    : {accounts:updated, query_status:'partial'};
+  renderMetrics = renderMatrix = renderSelects = render = () => {};
   await refreshQuota(false);
   assert.equal(state.accounts.find((a) => a.id === 'b').enabled, true);
   assert.equal(state.accounts.some((a) => a.id === 'c'), true);
+  assert.equal(state.revision, 2);
   assert.equal(document.getElementById('quota-refresh').disabled, false);
+  state.clients = [{id:'k', enabled:true, account_ids:[]}];
+  draft = [{id:'k', enabled:true, account_ids:['a']}];
+  const another = [...updated, {id:'d', name:'D', plan:'Claude', enabled:true, windows:{}, resets:{}, routing:{}}];
+  request = async () => ({accounts:another, query_status:'partial'});
+  await refreshQuota(false);
+  assert.equal(state.revision, 2);
+  assert.equal(draft[0].account_ids[0], 'a');
+  assert.equal(document.getElementById('save').disabled, true);
 })()`, context, {filename: file, timeout: 5000}).then(() => {
   console.log("web quota status: ok");
 }).catch((error) => { console.error(error); process.exitCode = 1; });
