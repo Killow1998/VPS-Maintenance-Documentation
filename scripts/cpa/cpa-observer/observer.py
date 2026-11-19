@@ -765,6 +765,7 @@ class Observer:
                 item.update({k: old[k] for k in ("retry_at", "source_revision", "source_identity") if k in old})
             if active:
                 source_index = None
+                same_source = False
                 try:
                     source = self.quota_source(entry, by_name)
                     source_index = source.get("auth_index")
@@ -777,7 +778,9 @@ class Observer:
                     item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
                     item['source_verified'] = True
                     item['binding_name'], item['binding_revision'] = self.binding_fingerprints(entry.get('name'))
-                    same_source = old.get("source_revision") == revision
+                    same_source = (old.get("source_revision") == revision and old.get('source_verified') is True and
+                                   old.get('binding_name') == item['binding_name'] and
+                                   old.get('binding_revision') == item['binding_revision'])
                     retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
                     if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
@@ -808,7 +811,6 @@ class Observer:
                         item["resets"] = grants(quota)
                         self.actions.recover(entry, item)
                 except Exception as error:
-                    same_source = bool(item.get('source_revision') and old.get('source_revision') == item['source_revision'])
                     item.update(windows=old.get("windows", {}) if same_source else {},
                                 as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
@@ -855,6 +857,14 @@ class Observer:
         backoff_active = False
         unverified_active = False
         bindings = self.config.get('quota_bindings', {})
+        helper_names = set()
+        if isinstance(bindings, dict):
+            helper_names = {self.store.digest('quota-binding-name:' + binding['credential'])
+                            for binding in bindings.values() if isinstance(binding, dict) and
+                            isinstance(binding.get('credential'), str) and binding['credential']}
+        current_accounts = [account for account in accounts if account.get('binding_name') not in helper_names]
+        pool_reconfigured = len(current_accounts) != len(accounts)
+        accounts = current_accounts
         current_bindings = {self.binding_fingerprints(name)[0]: self.binding_fingerprints(name)[1]
                             for name in bindings} if isinstance(bindings, dict) else {}
         default_binding = self.store.digest('quota-binding-value:null') if isinstance(bindings, dict) else None
@@ -926,7 +936,7 @@ class Observer:
                              "max_remaining_percent": max(values) if values else None,
                              "resets_at": accounts[0]["windows"][name]["resets_at"] if len(accounts) == 1 else None}
         query_status = self.store.meta("quota_status") or "starting"
-        if (backoff_active or unverified_active) and query_status in ("ok", "partial", "unavailable", "starting"):
+        if (backoff_active or unverified_active or pool_reconfigured) and query_status in ("ok", "partial", "unavailable", "starting"):
             enabled = [a for a in accounts if a["enabled"]]
             query_status = "unavailable" if all(a["stale"] for a in enabled) else "partial"
         return {"scope": "shared_pool", "provider": "claude", "checked_at": data.get("checked_at"),

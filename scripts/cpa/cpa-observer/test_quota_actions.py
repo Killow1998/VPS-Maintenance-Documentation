@@ -294,6 +294,75 @@ class ResetTests(unittest.TestCase):
                     self.assertTrue(account['stale'])
                     self.assertEqual(result['accounts_with_fresh_quota'], 0)
 
+    def test_changed_binding_refresh_never_reuses_scheduled_quota(self):
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {**grant_body(), 'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota(scheduled=True)
+        self.config['quota_bindings']['main']['expected_email'] = 'b@example.invalid'
+        self.entries[1]['email'] = 'b@example.invalid'
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        self.obs.backend.quota.return_value = {'five_hour': {'utilization': 15}}
+        restarted = Observer(self.config)
+        restarted.backend = self.obs.backend
+        restarted.refresh_quota(scheduled=True)
+        account = restarted.quota_response(admin=True)['accounts'][0]
+        self.assertEqual(self.obs.backend.quota.call_count, 2)
+        self.assertEqual(account['windows']['five_hour']['remaining_percent'], 85)
+        self.assertEqual(account['resets']['status'], 'unknown')
+
+    def test_changed_binding_retains_backoff_without_old_quota(self):
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {**grant_body(), 'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota(scheduled=True)
+        deadline = retry_at_after(3600)
+        self.obs.store.quota_backoff('profile', deadline)
+        self.config['quota_bindings']['main']['expected_email'] = 'b@example.invalid'
+        self.entries[1]['email'] = 'b@example.invalid'
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        restarted = Observer(self.config)
+        restarted.backend = self.obs.backend
+        restarted.refresh_quota(scheduled=True)
+        account = restarted.quota_response(admin=True)['accounts'][0]
+        self.assertEqual(self.obs.backend.quota.call_count, 1)
+        self.assertEqual(account['retry_at'], deadline)
+        self.assertEqual(account['windows'], {})
+        self.assertNotIn('resets', account)
+
+    def test_changed_binding_query_failure_does_not_restore_old_quota(self):
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {**grant_body(), 'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota()
+        self.config['quota_bindings']['main']['expected_email'] = 'b@example.invalid'
+        self.entries[1]['email'] = 'b@example.invalid'
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        self.obs.backend.quota.side_effect = QuotaError('synthetic_failure', 500)
+        restarted = Observer(self.config)
+        restarted.backend = self.obs.backend
+        restarted.refresh_quota(scheduled=True)
+        account = restarted.quota_response(admin=True)['accounts'][0]
+        self.assertEqual(account['windows'], {})
+        self.assertEqual(account['reason'], 'synthetic_failure')
+        self.assertNotIn('resets', account)
+
+    def test_new_helper_is_excluded_when_inventory_fails(self):
+        self.config['quota_bindings'] = {}
+        self.obs.backend.accounts.return_value = [self.entries[0]]
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {**grant_body(), 'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota()
+        self.assertEqual(self.obs.quota_response()['accounts_with_fresh_quota'], 1)
+        self.config['quota_bindings'] = {'other': {'credential': 'main', 'expected_email': 'a@example.invalid'}}
+        restarted = Observer(self.config)
+        restarted.backend = Mock()
+        restarted.backend.accounts.side_effect = RuntimeError('synthetic failure')
+        with self.assertRaises(RuntimeError):
+            restarted.refresh_quota()
+        for admin in (False, True):
+            result = restarted.quota_response(admin=admin)
+            self.assertEqual(result['accounts'], [])
+            self.assertEqual(result['accounts_with_fresh_quota'], 0)
+            self.assertEqual(result['query_status'], 'unavailable')
+
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()
         self.answer = 'timeout'

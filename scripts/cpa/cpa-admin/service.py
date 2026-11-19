@@ -33,6 +33,8 @@ def expected_stream_choices(path, body):
     count = body.get('n', 1)
     if type(count) is not int or count < 1:
         return None
+    if count > STREAM_CHOICE_LIMIT:
+        return count
     if path == '/v1/completions':
         prompt = body.get('prompt')
         if isinstance(prompt, str):

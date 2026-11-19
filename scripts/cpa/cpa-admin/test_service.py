@@ -583,6 +583,15 @@ class GatewayTest(unittest.TestCase):
         status, _, _ = self.session_model(stream=True, n=4097)
         self.assertEqual(status, 400)
         self.assertEqual(self.calls, [])
+        for prompt in (None, [], {'invalid': True}):
+            with self.subTest(prompt=prompt):
+                body = {'model': 'claude-test', 'n': 4097, 'stream': True}
+                if prompt is not None:
+                    body['prompt'] = prompt
+                status, _, _ = self.request('/v1/completions', body,
+                    {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+                self.assertEqual(status, 400)
+                self.assertEqual(self.calls, [])
 
     def test_sse_error_does_not_commit_backup_binding(self):
         self.assertEqual(self.session_model()[0], 200)
