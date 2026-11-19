@@ -154,7 +154,9 @@ an inventory check verifies its source. The binding fingerprint is compared with
 configuration, so a changed binding also hides the old balance until reverified; any applicable
 retry deadline remains in force. If inventory is unavailable after upgrade, the interface reports
 quota unavailable rather than publishing an unverified balance. Binding markers use HMACs and are
-not included in public quota responses.
+not included in public quota responses. If a legacy snapshot has no account-name marker and the
+inventory is unavailable, an account later assigned as a helper cannot yet be identified in the
+pool counts; those counts are provisional until a successful inventory refresh.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

@@ -363,6 +363,29 @@ class ResetTests(unittest.TestCase):
             self.assertEqual(result['accounts_with_fresh_quota'], 0)
             self.assertEqual(result['query_status'], 'unavailable')
 
+    def test_failed_identity_then_new_helper_does_not_inflate_pool(self):
+        self.entries = [self.entries[0], {'name': 'other', 'provider': 'claude', 'auth_index': 'other-inference'}]
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota()
+        before = self.obs.quota_response()
+        self.assertEqual(before['accounts_enabled'], 2)
+        self.assertEqual(before['accounts_with_fresh_quota'], 1)
+        self.config['quota_bindings'] = {'third': {'credential': 'main', 'expected_email': 'a@example.invalid'}}
+        restarted = Observer(self.config)
+        restarted.backend = Mock()
+        restarted.backend.accounts.side_effect = RuntimeError('synthetic failure')
+        with self.assertRaises(RuntimeError):
+            restarted.refresh_quota()
+        for admin in (False, True):
+            result = restarted.quota_response(admin=admin)
+            self.assertEqual(result['accounts_total'], 1)
+            self.assertEqual(result['accounts_enabled'], 1)
+            self.assertEqual(result['accounts_with_fresh_quota'], 1)
+            self.assertEqual(result['query_status'], 'partial')
+            self.assertNotIn('binding_name', result['accounts'][0])
+
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()
         self.answer = 'timeout'

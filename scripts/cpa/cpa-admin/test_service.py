@@ -593,6 +593,13 @@ class GatewayTest(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(self.calls, [])
 
+    def test_stream_limit_does_not_change_nonstream_requests(self):
+        status, _, _ = self.request('/v1/completions',
+            {'model': 'claude-test', 'prompt': 'ok', 'n': 4097, 'stream': False},
+            {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.calls), 1)
+
     def test_sse_error_does_not_commit_backup_binding(self):
         self.assertEqual(self.session_model()[0], 200)
         self.failures.add('account-a')

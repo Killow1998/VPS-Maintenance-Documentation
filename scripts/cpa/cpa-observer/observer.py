@@ -760,6 +760,8 @@ class Observer:
             active = not entry.get("disabled", False)
             item = {"id": identity, "enabled": active, "status": "disabled" if not active else "unknown",
                     "windows": {}, "as_of": None, "stale": True}
+            if isinstance(entry.get('name'), str) and entry['name']:
+                item['binding_name'] = self.store.digest('quota-binding-name:' + entry['name'])
             old = known.get(identity, {})
             if not active:
                 item.update({k: old[k] for k in ("retry_at", "source_revision", "source_identity") if k in old})
