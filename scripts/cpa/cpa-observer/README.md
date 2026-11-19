@@ -104,8 +104,11 @@ reset grants and routing details. Do not add a public Nginx route. Implementatio
 [the official management center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/blob/main/src/services/api/claudeResetGrants.ts)
 and [maintainer guidance](https://github.com/router-for-me/CLIProxyAPI/issues/6507).
 
-Before an irreversible reset claim, persist its server-generated request ID and unknown
-outcome in metadata. Each account and operation ID retains its result across later claims and
+Before an irreversible reset claim, reserve a preflight with a five-minute lease. Immediately
+before sending the POST, atomically persist its server-generated request ID and unknown outcome
+in metadata. An expired preflight may be replaced; a late worker cannot send that old request.
+Once the POST may have been sent, an unknown outcome remains blocked for manual review.
+Each account and operation ID retains its result across later claims and
 restarts; ambiguous outcomes block new claims pending review. The old version stored only the
 last operation, so older IDs cannot be reconstructed: drain in-flight operations before upgrade
 and do not replay old requests. A rollback to the old version loses per-operation protection;
@@ -116,9 +119,13 @@ unconditional and cannot guard against concurrent model-state changes, so this o
 clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
 diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
 credential metadata changes and account disable/enable cycles.
-On the first upgrade, a previous snapshot's retry deadline is conservatively carried to the
-current bound source even if its revision changed; this may delay a newly replaced source but
-avoids an early retry. Stored windows retain numeric-only compatibility with older readers;
+On the first upgrade, an old snapshot without a source identity conservatively carries its
+retry deadline to the current bound source, even if its revision changed. Later source changes
+do not transfer a new-format deadline to a different credential. Usage, profile and reset
+responses all preserve upstream retry deadlines; active backoff marks cached quota stale.
+After rollback, old code will not enforce the new source-level backoff: pause reset operations
+and wait for the last recorded deadline before permitting a manual refresh.
+Stored windows retain numeric-only compatibility with older readers;
 unknown windows live separately in the snapshot and are combined in new API responses. An
 older reader after rollback may omit those unknown windows, but must not treat them as zero.
 

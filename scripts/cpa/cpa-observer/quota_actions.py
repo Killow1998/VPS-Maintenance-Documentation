@@ -67,10 +67,14 @@ def recoverable(entry, windows):
 
 
 class QuotaActions:
+    PREFLIGHT_LEASE_SECONDS = 300
+
     def __init__(self, observer):
         self.observer = observer
 
     def upstream(self, source, path, data=None):
+        if data is None:
+            self.observer.require_source_ready(source["auth_index"])
         response = self.observer.backend.request("/v8/management/requests/api-call", {
             "auth_index": source["auth_index"], "method": "GET" if data is None else "POST",
             "url": "https://api.anthropic.com" + path,
@@ -78,6 +82,7 @@ class QuotaActions:
                        "Content-Type": "application/json", "anthropic-beta": "oauth-2025-04-20",
                        "User-Agent": "claude-cli/2.1.321 (external, cli)"},
             **({"data": json.dumps(data)} if data is not None else {})})
+        self.observer.record_response_backoff(source["auth_index"], response)
         body = response.get("body")
         try:
             body = json.loads(body) if isinstance(body, str) else body
@@ -119,18 +124,44 @@ class QuotaActions:
                 saved = json.loads(saved_raw)
                 if saved.get("grant_id") != grant_id:
                     raise ValueError("reset_selection_changed")
+                if saved.get("result") == "preflight" and at - saved.get("created", 0) >= self.PREFLIGHT_LEASE_SECONDS:
+                    saved["result"] = "preflight_expired"
+                    self._put(con, record_key, json.dumps(saved))
+                    if legacy.get("request_id") == saved.get("request_id"):
+                        self._put(con, latest_key, json.dumps(saved))
                 return saved, False, None
+            if legacy.get("result") == "preflight":
+                if at - legacy.get("created", 0) < self.PREFLIGHT_LEASE_SECONDS:
+                    raise ValueError("reset_pending_or_recent")
+                legacy["result"] = "preflight_expired"
+                legacy_raw = json.dumps(legacy)
+                self._put(con, latest_key, legacy_raw)
+                self._put(con, "reset_operation_id:" + account_id + ":" + legacy["id"], legacy_raw)
             if legacy.get("result") == "unknown" or at - legacy.get("created", 0) < 30:
                 raise ValueError("reset_pending_or_recent")
             if at - float(self._get(con, attempt_key) or "0") < 30:
                 raise ValueError("reset_preflight_rate_limited")
             operation = {"id": operation_id, "grant_id": grant_id, "created": at, "actor": str(actor)[:120],
-                         "request_id": uuid.uuid4().hex, "result": "unknown"}
+                         "request_id": uuid.uuid4().hex, "result": "preflight"}
             raw = json.dumps(operation)
             self._put(con, record_key, raw)
             self._put(con, latest_key, raw)
             self._put(con, attempt_key, str(at))
         return operation, True, legacy_raw
+
+    def _begin_post(self, account_id, operation):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            if (current.get("request_id") != operation["request_id"] or current.get("result") != "preflight"
+                    or time.time() - operation["created"] >= self.PREFLIGHT_LEASE_SECONDS):
+                raise ValueError("reset_preflight_expired")
+            operation["result"] = "unknown"
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
 
     def _finish(self, account_id, operation):
         latest_key = "reset_operation:" + account_id
@@ -150,7 +181,7 @@ class QuotaActions:
         with self.observer.store.db() as con:
             con.execute("BEGIN IMMEDIATE")
             current = json.loads(self._get(con, latest_key) or "{}")
-            if current.get("request_id") != operation["request_id"]:
+            if current.get("request_id") != operation["request_id"] or current.get("result") != "preflight":
                 return
             con.execute("DELETE FROM metadata WHERE key=?", (record_key,))
             if legacy_raw is None:
@@ -175,7 +206,7 @@ class QuotaActions:
                 raise ValueError("account_not_available")
             entry = targets[0]
             source = obs.quota_source(entry, {e["name"]: e for e in entries})
-            body = obs.query_quota(source["auth_index"])
+            body = obs.query_quota(source["auth_index"], account_id)
             if not isinstance(body, dict):
                 raise ValueError("reset_status_unavailable")
             current = grants(body)
@@ -190,6 +221,8 @@ class QuotaActions:
                 raise ValueError("reset_identity_unavailable") from None
             if status != 200:
                 raise ValueError("reset_identity_unavailable")
+            obs.require_source_ready(source["auth_index"], account_id)
+            self._begin_post(account_id, operation)
         except Exception:
             self._cancel_preflight(account_id, operation, legacy_raw)
             raise

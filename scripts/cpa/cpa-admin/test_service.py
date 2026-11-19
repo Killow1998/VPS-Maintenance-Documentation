@@ -193,9 +193,9 @@ class FakeBackend:
 class GatewayTest(unittest.TestCase):
     def setUp(self):
         self.calls, self.failures, self.statuses, self.session_headers = [], set(), {}, []
-        self.broken_errors, self.empty_successes = set(), set()
+        self.broken_errors, self.empty_successes, self.truncated = set(), set(), set()
         calls, failures, statuses, session_headers = self.calls, self.failures, self.statuses, self.session_headers
-        broken_errors, empty_successes = self.broken_errors, self.empty_successes
+        broken_errors, empty_successes, truncated = self.broken_errors, self.empty_successes, self.truncated
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_POST(self):
@@ -205,6 +205,15 @@ class GatewayTest(unittest.TestCase):
                 account = data["model"].split('/')[0]
                 code = statuses.get(account, 429 if account in failures else 200)
                 body = b'data: {"type":"message_stop"}\n\n' if data.get("stream") else b'{"ok":true}'
+                if account in truncated:
+                    self.send_response(code)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Retry-After', '173')
+                    self.send_header('Content-Length', '100')
+                    self.end_headers()
+                    self.wfile.write(b'{')
+                    self.close_connection = True
+                    return
                 if account in broken_errors:
                     self.send_response(code)
                     self.send_header('Content-Type', 'application/json')
@@ -239,11 +248,12 @@ class GatewayTest(unittest.TestCase):
         con = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         headers = {"Content-Type": "application/json", **(headers or {})}
         payload = raw if raw is not None else json.dumps(body) if body is not None else None
-        con.request("POST" if payload else "GET", path, payload, headers)
-        res = con.getresponse()
-        result = res.status, res.read(), dict(res.getheaders())
-        con.close()
-        return result
+        try:
+            con.request("POST" if payload else "GET", path, payload, headers)
+            res = con.getresponse()
+            return res.status, res.read(), dict(res.getheaders())
+        finally:
+            con.close()
 
     def model(self, model="claude-test", **extra):
         return self.request('/v1/messages', {"model": model, "messages": [], **extra}, {"Authorization": "Bearer test-client"})
@@ -365,6 +375,21 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(headers['Retry-After'], '173')
         self.assertIn('error', json.loads(body))
 
+    def test_truncated_429_body_is_not_forwarded_as_complete_json(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.statuses['account-a'] = 429
+        self.truncated.add('account-a')
+        original = self.backend.allowed
+        count = [0]
+        def allowed(identity):
+            count[0] += 1
+            return [a for a in original(identity) if count[0] < 3 or a['id'] != 'account-b']
+        with patch.object(self.backend, 'allowed', side_effect=allowed):
+            code, body, headers = self.session_model()
+        self.assertEqual(code, 429)
+        self.assertEqual(headers['Retry-After'], '173')
+        self.assertIn('error', json.loads(body))
+
     def test_primary_revoked_after_selection_migrates_only_after_backup_success(self):
         self.assertEqual(self.session_model()[0], 200)
         original = self.backend.allowed
@@ -391,6 +416,17 @@ class GatewayTest(unittest.TestCase):
         with patch.object(self.backend, 'allowed', side_effect=allowed):
             self.assertEqual(self.session_model(stream=True)[0], 200)
         self.empty_successes.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
+    def test_truncated_backup_response_is_not_completed_or_migrated(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.statuses['account-a'] = 429
+        self.truncated.add('account-b')
+        with self.assertRaises(http.client.IncompleteRead):
+            self.session_model(stream=True)
+        self.truncated.clear()
+        self.statuses.clear()
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 

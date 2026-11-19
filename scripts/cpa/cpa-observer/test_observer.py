@@ -621,6 +621,10 @@ class APITests(unittest.TestCase):
                 self.observer.store.meta('quota_snapshot', '{}')
                 self.observer.refresh_quota()
                 self.assertEqual(len(backend.calls), 1)
+                snapshot = json.loads(self.observer.store.meta('quota_snapshot'))
+                for account in snapshot['accounts']:
+                    account.pop('source_identity', None)
+                self.observer.store.meta('quota_snapshot', json.dumps(snapshot))
                 with self.observer.store.db() as con:
                     con.execute('DELETE FROM metadata WHERE key=?', (key,))
                 source['updated_at'] = 'second'
@@ -629,6 +633,27 @@ class APITests(unittest.TestCase):
                 source['disabled'] = False
                 self.observer.refresh_quota()
                 self.assertEqual(len(backend.calls), 1)
+
+    def test_replacing_a_source_does_not_inherit_new_format_backoff(self):
+        backend = self.paired_backend()
+        original_accounts = backend.accounts
+        source = {'index': 'quota-index'}
+        def accounts():
+            entries = original_accounts()
+            entries[1]['auth_index'] = source['index']
+            return entries
+        backend.accounts = accounts
+        def quota(index):
+            backend.calls.append(index)
+            if index == 'quota-index':
+                raise QuotaError('upstream_http_429', 429, 3600)
+            return {'five_hour': {'utilization': 20}}
+        backend.quota = quota
+        self.observer.refresh_quota()
+        source['index'] = 'new-quota-index'
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, ['quota-index', 'new-quota-index'])
+        self.assertIsNone(self.observer.store.quota_backoff('new-quota-index'))
 
     def test_manual_refresh_reports_rate_limit_and_local_throttle(self):
         backend = self.paired_backend()

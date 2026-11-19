@@ -59,4 +59,19 @@ vm.runInContext(source + `
   assert.equal(document.getElementById("quota-refresh").disabled, false);
   assert.match(document.getElementById("account-cards").innerHTML, /部分额度未知/);
 `, context, {filename: file, timeout: 5000});
-console.log("web quota status: ok");
+vm.runInContext(`(async () => {
+  state.accounts[0].quota_reason = 'quota_backoff';
+  state.accounts[0].retry_at = new Date(Date.now() + 60000).toISOString();
+  state.accounts.push({id:'b', name:'B', plan:'Claude', enabled:false, stale:true,
+    windows:{}, resets:{status:'unknown'}, routing:{}});
+  const updated = [{...state.accounts[0]}, {...state.accounts[1], enabled:true, stale:false},
+    {id:'c', name:'C', plan:'Claude', enabled:true, stale:false, windows:{}, resets:{}, routing:{}}];
+  request = async () => ({accounts:updated, query_status:'partial'});
+  renderMetrics = renderMatrix = renderSelects = () => {};
+  await refreshQuota(false);
+  assert.equal(state.accounts.find((a) => a.id === 'b').enabled, true);
+  assert.equal(state.accounts.some((a) => a.id === 'c'), true);
+  assert.equal(document.getElementById('quota-refresh').disabled, false);
+})()`, context, {filename: file, timeout: 5000}).then(() => {
+  console.log("web quota status: ok");
+}).catch((error) => { console.error(error); process.exitCode = 1; });

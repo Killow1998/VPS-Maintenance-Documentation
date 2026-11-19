@@ -3,6 +3,8 @@ import copy
 import datetime as dt
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -147,6 +149,14 @@ class ResetTests(unittest.TestCase):
         self.obs.backend.request.assert_not_called()
         self.assertFalse(self.spends)
 
+    def test_reset_migrates_legacy_backoff_before_first_poll(self):
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': self.account, 'retry_at': retry_at_after(3600)}]}))
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(self.account, 'full-test', 'legacy-blocked')
+        self.obs.backend.request.assert_not_called()
+        self.assertFalse(self.spends)
+
     def test_reset_preflight_429_persists_retry_after_without_spending(self):
         original = self.obs.backend.request.side_effect
         def limited(path, data):
@@ -161,12 +171,97 @@ class ResetTests(unittest.TestCase):
         self.assertGreater((dt.datetime.fromisoformat(deadline) - dt.datetime.now(dt.timezone.utc)).total_seconds(), 7190)
         self.assertFalse(self.spends)
 
+    def test_profile_429_backoff_prevents_post(self):
+        original = self.obs.backend.request.side_effect
+        def limited(path, data):
+            if '/profile' in data['url']:
+                return {'status_code': 429, 'body': '{}', 'header': {'Retry-After': ['3600']}}
+            return original(path, data)
+        self.obs.backend.request.side_effect = limited
+        with self.assertRaises(ValueError):
+            self.obs.actions.redeem(self.account, 'full-test', 'profile-limited')
+        self.assertIsNotNone(self.obs.store.quota_backoff('profile'))
+        self.assertFalse(self.spends)
+
+    def test_post_429_backoff_prevents_immediate_quota_refresh(self):
+        original = self.obs.backend.request.side_effect
+        def limited(path, data):
+            if 'reset_rate_limits' in data['url']:
+                return {'status_code': 429, 'body': '{}', 'header': {'Retry-After': ['3600']}}
+            return original(path, data)
+        self.obs.backend.request.side_effect = limited
+        result = self.obs.quota_control({'action': 'redeem', 'account_id': self.account,
+                                         'grant_id': 'full-test', 'operation_id': 'post-limited'})
+        self.assertEqual(result['result'], 'rate_limited')
+        self.assertIsNotNone(self.obs.store.quota_backoff('profile'))
+        usage = [call for call in self.obs.backend.request.call_args_list if '/usage' in call.args[1]['url']]
+        self.assertEqual(len(usage), 1)
+
+    def test_abandoned_preflight_expires_without_allowing_old_worker_to_post(self):
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            old, _, _ = self.obs.actions._reserve(self.account, 'full-test', 'abandoned', 'admin')
+            self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [{'id': self.account, 'enabled': True,
+                'windows': {}, 'as_of': None, 'stale': True}]}))
+            self.assertTrue(self.obs.quota_response(admin=True)['accounts'][0]['reset_pending'])
+            clock.return_value = 10401
+            self.assertFalse(self.obs.quota_response(admin=True)['accounts'][0]['reset_pending'])
+            with self.assertRaises(ValueError):
+                self.obs.actions._begin_post(self.account, old)
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'new')['result'], 'reset')
+            with self.assertRaises(ValueError):
+                self.obs.actions._begin_post(self.account, old)
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'abandoned')['result'], 'preflight_expired')
+        self.assertEqual(len(self.spends), 1)
+
+    def test_concurrent_processes_reserve_the_same_operation_once(self):
+        gate = Path(self.temp.name) / 'start'
+        code = '''
+import json, pathlib, sys, time
+from observer import Observer
+config, account, gate = json.loads(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+observer = Observer(config)
+deadline = time.monotonic() + 15
+while not gate.exists() and time.monotonic() < deadline:
+    time.sleep(.01)
+operation, fresh, _ = observer.actions._reserve(account, "full-test", "same-process-id", "admin")
+print(json.dumps({"fresh": fresh, "request_id": operation["request_id"]}))
+'''
+        processes = [subprocess.Popen([sys.executable, '-B', '-c', code, json.dumps(self.config), self.account, str(gate)],
+                     cwd=Path(__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        try:
+            gate.touch()
+            results = []
+            for process in processes:
+                output, error = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, error)
+                results.append(json.loads(output))
+            self.assertEqual(sum(result['fresh'] for result in results), 1)
+            self.assertEqual(results[0]['request_id'], results[1]['request_id'])
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    def test_active_backoff_marks_previously_fresh_snapshot_stale(self):
+        self.obs.backend.quota.side_effect = lambda _: {**grant_body(),
+            'five_hour': {'utilization': 20}, 'seven_day': {'utilization': 30}}
+        self.obs.refresh_quota()
+        self.assertFalse(self.obs.quota_response(admin=True)['accounts'][0]['stale'])
+        self.obs.store.quota_backoff('profile', retry_at_after(3600))
+        self.obs.refresh_quota()
+        account = self.obs.quota_response(admin=True)['accounts'][0]
+        self.assertTrue(account['stale'])
+        self.assertEqual(account['reason'], 'quota_backoff')
+
     def test_ambiguous_redemption_blocks_new_operation_without_retrying(self):
         self.answer = "timeout"
-        self.assertEqual(self.obs.actions.redeem(self.account, "full-test", "one")["result"], "unknown")
-        self.assertEqual(self.obs.actions.redeem(self.account, "full-test", "one")["result"], "unknown")
-        with self.assertRaises(ValueError):
-            self.obs.actions.redeem(self.account, "full-test", "two")
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            self.assertEqual(self.obs.actions.redeem(self.account, "full-test", "one")["result"], "unknown")
+            clock.return_value = 20000
+            self.assertEqual(self.obs.actions.redeem(self.account, "full-test", "one")["result"], "unknown")
+            with self.assertRaises(ValueError):
+                self.obs.actions.redeem(self.account, "full-test", "two")
         self.assertEqual(len(self.spends), 1)
 
     def test_wrong_account_and_mismatched_profile_never_spend(self):

@@ -305,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
                         if len(failure_body) > 1024 * 1024:
                             failure_body = b'{"error":{"message":"Upstream error response exceeded the safety limit"}}'
                             content_type = "application/json"
+                        elif response.length is not None and response.length > 0:
+                            raise http.client.IncompleteRead(failure_body)
                     except (http.client.HTTPException, OSError):
                         failure_body = b'{"error":{"message":"Upstream error response unavailable"}}'
                         content_type = "application/json"
@@ -323,20 +325,23 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if connection.sock:
                         connection.sock.settimeout(3600)
-                    binding_saved = False
+                    has_body = False
                     while True:
                         chunk = response.read1(65536)
                         if not chunk:
                             break
+                        has_body = True
                         self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
                         self.wfile.flush()
-                        if not binding_saved and 200 <= response.status < 300:
-                            try:
-                                self.server.router.succeeded(selection, account["id"], migrate=migrate)
-                            except sqlite3.Error as error:
-                                logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
-                            binding_saved = True
+                    if response.length is not None and response.length > 0:
+                        raise http.client.IncompleteRead(b"")
                     self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                    if has_body and 200 <= response.status < 300:
+                        try:
+                            self.server.router.succeeded(selection, account["id"], migrate=migrate)
+                        except sqlite3.Error as error:
+                            logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
                 except Exception:
                     self.close_connection = True
                 return

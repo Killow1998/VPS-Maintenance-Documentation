@@ -113,6 +113,7 @@ function quotaBackoff(a) {
 function resetUnavailableReason(a) {
   if (!live) return "演示模式不能兑换 reset";
   if (!a.enabled) return "账号已停用";
+  if (Date.parse(a.retry_at) > Date.now()) return "额度查询等待重试，倒计时结束后再试";
   if (a.stale) return quotaBackoff(a) ? "额度查询等待重试，倒计时结束后再试" : "当前为旧快照，请刷新额度后再试";
   if (a.reset_pending) return "上次重置结果未确认，请核对官方状态，勿重复兑换";
   if (a.resets?.status !== "ok") return "官方 reset 信息未取得，请刷新额度";
@@ -226,11 +227,24 @@ async function refreshQuota(manual = false) {
     const answer = await request("/api/quota", manual ? {action: "refresh"} : undefined);
     const snapshot = manual ? answer.quota : answer;
     const byId = new Map(snapshot.accounts.map((a) => [a.id, a]));
+    let inventoryChanged = false;
     for (const account of state.accounts) {
       const current = byId.get(account.id);
-      if (!current) { account.stale = true; continue; }
-      for (const field of ["windows", "stale", "as_of", "quota_status", "quota_reason", "retry_at", "resets", "routing", "reset_pending"]) account[field] = current[field];
+      if (!current) {
+        inventoryChanged ||= account.enabled || account.route_ready;
+        account.enabled = false; account.route_ready = false; account.stale = true;
+        continue;
+      }
+      inventoryChanged ||= ["enabled", "route_ready", "name", "plan"].some((field) => account[field] !== current[field]);
+      Object.assign(account, current);
     }
+    for (const account of snapshot.accounts) {
+      if (!state.accounts.some((old) => old.id === account.id)) {
+        state.accounts.push({...account});
+        inventoryChanged = true;
+      }
+    }
+    if (inventoryChanged) { renderMetrics(); renderMatrix(); renderSelects(); }
     const {accounts, ...meta} = snapshot;
     state.quota = meta;
     const limited = snapshot.accounts.some((a) => a.enabled && quotaBackoff(a));
@@ -279,7 +293,7 @@ async function load(preserve = false) {
     $("logout").classList.toggle("hidden", !live);
     $("mode-badge").textContent = live ? "管理员 · VPS" : "本地原型 · 未连接 VPS";
     $("mode-notice").textContent = live ? "网页与 TUI 共用权限配置。保存后约束新请求；已发出的请求和历史用量保留。新 Key 默认没有账号权限。" : "当前展示模拟账号、用量和额度。保存只更新本机策略，尚未改变线上 CPA 的调用权限。";
-    quotaError = state.accounts.some((a) => a.enabled && quotaBackoff(a)) ? "额度查询等待重试；请等待按钮倒计时。" : state.quota?.query_status === "unavailable" ? "额度查询服务暂不可用；账号启用状态不受此查询结果影响。" : "";
+    quotaError = state.accounts.some((a) => a.enabled && quotaBackoff(a)) ? "部分账号额度查询等待重试；其他账号可继续刷新。" : state.quota?.query_status === "unavailable" ? "额度查询服务暂不可用；账号启用状态不受此查询结果影响。" : "";
     if (!keepDraft) draft = structuredClone(state.clients);
     render();
     document.body.dataset.ready = "true";

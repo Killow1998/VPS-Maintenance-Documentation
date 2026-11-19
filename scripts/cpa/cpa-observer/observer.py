@@ -106,6 +106,19 @@ def retry_after_seconds(value):
         return None
 
 
+def response_retry_after(data):
+    retry = None
+    headers = data.get("header") or data.get("headers") or {}
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if key.lower() == "retry-after":
+                for candidate in value if isinstance(value, list) else [value]:
+                    seconds = retry_after_seconds(candidate)
+                    if seconds is not None:
+                        retry = max(retry or 0, seconds)
+    return retry
+
+
 def retry_at_after(delay):
     try:
         return (dt.datetime.now(UTC) + dt.timedelta(seconds=delay)).isoformat()
@@ -170,16 +183,7 @@ class Backend:
             error = body.get("error", {}) if isinstance(body, dict) else {}
             message = str(error.get("message", "")) if isinstance(error, dict) else ""
             reason = "missing_scope" if status == 403 and "user:profile" in message else "upstream_http_" + str(status)
-            retry = None
-            headers = data.get("header") or data.get("headers") or {}
-            if isinstance(headers, dict):
-                for key, value in headers.items():
-                    if key.lower() == "retry-after":
-                        for candidate in value if isinstance(value, list) else [value]:
-                            seconds = retry_after_seconds(candidate)
-                            if seconds is not None:
-                                retry = max(retry or 0, seconds)
-            raise QuotaError(reason, status, retry)
+            raise QuotaError(reason, status, response_retry_after(data))
         body = data.get("body")
         return json.loads(body) if isinstance(body, str) else body
 
@@ -536,16 +540,37 @@ class Observer:
             raise QuotaError("quota_identity_mismatch")
         return source
 
-    def query_quota(self, source_index):
+    def source_backoff(self, source_index, account_id=None):
         retry_at = self.store.quota_backoff(source_index)
+        if account_id:
+            snapshot = json.loads(self.store.meta("quota_snapshot") or "{}")
+            old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
+            identity = self.store.digest("quota-source:" + str(source_index))
+            if old.get("retry_at") and old.get("source_identity") in (None, identity):
+                retry_at = self.store.quota_backoff(source_index, old["retry_at"])
+        return retry_at
+
+    def require_source_ready(self, source_index, account_id=None):
+        retry_at = self.source_backoff(source_index, account_id)
         if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
             raise QuotaError("quota_backoff")
+
+    def remember_backoff(self, source_index, status, retry_after):
+        if status == 429 or retry_after:
+            delay = max(120 if status == 429 else 1, retry_after or 0)
+            self.store.quota_backoff(source_index, retry_at_after(delay))
+
+    def record_response_backoff(self, source_index, data):
+        status = data.get("status_code")
+        if type(status) is int and status >= 400:
+            self.remember_backoff(source_index, status, response_retry_after(data))
+
+    def query_quota(self, source_index, account_id=None):
+        self.require_source_ready(source_index, account_id)
         try:
             return self.backend.quota(source_index)
         except QuotaError as error:
-            if error.status == 429 or error.retry_after:
-                delay = max(120 if error.status == 429 else 1, error.retry_after or 0)
-                self.store.quota_backoff(source_index, retry_at_after(delay))
+            self.remember_backoff(source_index, error.status, error.retry_after)
             raise
 
     def quota_control(self, data):
@@ -643,7 +668,7 @@ class Observer:
                     "windows": {}, "as_of": None, "stale": True}
             old = known.get(identity, {})
             if not active:
-                item.update({k: old[k] for k in ("retry_at", "source_revision") if k in old})
+                item.update({k: old[k] for k in ("retry_at", "source_revision", "source_identity") if k in old})
             if active:
                 source_index = None
                 try:
@@ -655,27 +680,26 @@ class Observer:
                     # removed or changed binding after a configuration update.
                     revision = self.store.digest("quota-source:" + str(source_index) + ":" + str(source.get("updated_at", "")))
                     item["source_revision"] = revision
+                    item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
                     same_source = old.get("source_revision") == revision
-                    retry_at = self.store.quota_backoff(source_index)
-                    if old.get("retry_at"):
-                        retry_at = self.store.quota_backoff(source_index, old["retry_at"])
+                    retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
                     if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
                         if same_source:
                             item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
-                        else:
-                            item.update(status="unavailable", reason="quota_backoff")
+                        item.update(status="unavailable", stale=True,
+                                    reason=old.get("reason") if same_source and old.get("reason") == "upstream_http_429" else "quota_backoff")
                         item["retry_at"] = retry_at
                     elif same_source and next_poll and dt.datetime.fromisoformat(next_poll) > dt.datetime.now(UTC):
                         item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                     else:
                         try:
-                            quota = self.query_quota(source_index)
+                            quota = self.query_quota(source_index, identity)
                         except QuotaError as error:
                             if error.status != 401 or error.retry_after or not source.get("name"):
                                 raise
                             self.backend.refresh_credential(source["name"])
-                            quota = self.query_quota(source_index)
+                            quota = self.query_quota(source_index, identity)
                         windows = quota_windows(quota)
                         item.update(windows={k: v for k, v in windows.items() if v["remaining_percent"] is not None},
                                     unknown_windows={k: v for k, v in windows.items() if v["remaining_percent"] is None},
@@ -729,13 +753,16 @@ class Observer:
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         for account in accounts:
             account.pop("source_revision", None)
+            account.pop("source_identity", None)
             account["windows"].update(account.pop("unknown_windows", {}))
             if not admin:
                 account.pop("resets", None)
                 account.pop("routing", None)
             else:
                 op = json.loads(self.store.meta("reset_operation:" + account["id"]) or "{}")
-                account["reset_pending"] = op.get("result") == "unknown"
+                account["reset_pending"] = (op.get("result") == "unknown" or
+                    (op.get("result") == "preflight" and
+                     time.time() - op.get("created", 0) < self.actions.PREFLIGHT_LEASE_SECONDS))
             as_of = account.get("as_of")
             age_limit = max(max_age, account.get("poll_interval_seconds", 0) * 2 + 30)
             if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > age_limit:
