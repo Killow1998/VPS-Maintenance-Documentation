@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import threading
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -61,6 +61,83 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(len(self.spends), 1)
         self.assertEqual(self.spends[0]["program"], "cedar_ember")
 
+    def test_old_operation_replay_after_another_operation_never_spends_again(self):
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            first = self.obs.actions.redeem(self.account, 'full-test', 'operation-a')
+            clock.return_value = 10031
+            self.obs.actions.redeem(self.account, 'full-test', 'operation-b')
+            clock.return_value = 10062
+            restarted = Observer(self.config)
+            restarted.backend = self.obs.backend
+            replay = restarted.actions.redeem(self.account, 'full-test', 'operation-a')
+            with self.assertRaises(ValueError):
+                restarted.actions.redeem(self.account, 'different-grant', 'operation-a')
+        self.assertEqual(replay, first)
+        self.assertEqual(len(self.spends), 2)
+
+    def test_legacy_last_operation_remains_replayable_after_upgrade(self):
+        legacy = {'id': 'legacy', 'grant_id': 'full-test', 'created': 10000,
+                  'actor': 'admin', 'request_id': 'synthetic', 'result': 'reset'}
+        self.obs.store.meta('reset_operation:' + self.account, json.dumps(legacy))
+        with patch('quota_actions.time.time', return_value=10031) as clock:
+            self.obs.actions.redeem(self.account, 'full-test', 'new')
+            clock.return_value = 10062
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'legacy'), legacy)
+        self.assertEqual(len(self.spends), 1)
+
+    def test_concurrent_observers_reserve_operation_before_spending(self):
+        started, release = threading.Event(), threading.Event()
+        original = self.obs.backend.request.side_effect
+        def delayed(path, data):
+            if 'reset_rate_limits' in data['url']:
+                started.set()
+                if not release.wait(5): raise TimeoutError('test wait')
+            return original(path, data)
+        self.obs.backend.request.side_effect = delayed
+        other = Observer(self.config)
+        other.backend = self.obs.backend
+        results, errors = [], []
+        def first():
+            try:
+                results.append(self.obs.actions.redeem(self.account, 'full-test', 'one'))
+            except Exception as error:
+                errors.append(error)
+        with patch('quota_actions.time.time', return_value=10000):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(5))
+                replay = other.actions.redeem(self.account, 'full-test', 'one')
+                self.assertEqual(replay['result'], 'unknown')
+                with self.assertRaises(ValueError):
+                    other.actions.redeem(self.account, 'full-test', 'two')
+            finally:
+                release.set()
+                thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]['result'], 'reset')
+        self.assertEqual(len(self.spends), 1)
+
+    def test_failed_preflight_keeps_old_history_and_allows_later_retry(self):
+        original = self.obs.backend.request.side_effect
+        def fail_preflight(path, data):
+            if '/usage' in data['url']:
+                return {'status_code': 403, 'body': '{}'}
+            return original(path, data)
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            previous = self.obs.actions.redeem(self.account, 'full-test', 'previous')
+            clock.return_value = 10031
+            self.obs.backend.request.side_effect = fail_preflight
+            with self.assertRaises(ValueError):
+                self.obs.actions.redeem(self.account, 'full-test', 'retry')
+            self.assertEqual(json.loads(self.obs.store.meta('reset_operation:' + self.account)), previous)
+            clock.return_value = 10062
+            self.obs.backend.request.side_effect = original
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'retry')['result'], 'reset')
+            self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'previous'), previous)
+        self.assertEqual(len(self.spends), 2)
+
     def test_ambiguous_redemption_blocks_new_operation_without_retrying(self):
         self.answer = "timeout"
         self.assertEqual(self.obs.actions.redeem(self.account, "full-test", "one")["result"], "unknown")
@@ -116,14 +193,22 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(windows["seven_day_fable"]["remaining_percent"], 0)
         self.assertFalse(recoverable({"cooldowns": [{"scope": "credential", "reason": "quota"}]}, windows))
 
-    def test_recovery_targets_inference_not_helper_and_public_hides_grants(self):
+    def test_invalid_reported_window_is_unknown_and_cannot_be_recovered(self):
+        windows = quota_windows({'five_hour': {'utilization': 20}, 'seven_day': {'utilization': 30},
+                                 'seven_day_opus': {'utilization': None}, 'seven_day_sonnet': None})
+        self.assertIsNone(windows['seven_day_opus']['remaining_percent'])
+        self.assertIsNone(windows['seven_day_sonnet']['remaining_percent'])
+        self.assertFalse(recoverable({'cooldowns': [{'scope': 'credential', 'reason': 'quota'}]}, windows))
+
+    def test_recovery_never_clears_stale_snapshot_and_public_hides_grants(self):
         entry = {"auth_index": "inference", "cooldowns": [{"scope": "credential", "reason": "quota"}]}
         item = {"id": self.account, "enabled": True, "as_of": "2099-01-01T00:00:00+00:00", "stale": False,
                 "windows": {"five_hour": {"remaining_percent": 100, "resets_at": None},
                             "seven_day": {"remaining_percent": 90, "resets_at": None}}, "resets": grants(grant_body())}
         self.obs.backend.request = Mock(return_value={"status": "ok"})
         self.obs.actions.recover(entry, item)
-        self.obs.backend.request.assert_called_once_with("/v8/management/routing/cooldown/reset", {"auth_index": "inference"})
+        self.obs.backend.request.assert_not_called()
+        self.assertEqual(item['routing']['recovery'], 'manual')
         self.obs.store.meta("quota_snapshot", json.dumps({"accounts": [item]}))
         self.assertNotIn("resets", self.obs.quota_response()["accounts"][0])
         self.assertIn("resets", self.obs.quota_response(admin=True)["accounts"][0])

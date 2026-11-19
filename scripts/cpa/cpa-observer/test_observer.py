@@ -375,6 +375,15 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["accounts_with_fresh_quota"], 0)
         self.assertIsNone(body["windows"]["five_hour"]["remaining_percent"])
 
+    def test_unknown_reported_model_window_does_not_break_aggregate(self):
+        self.observer.backend.quota = lambda _: {'five_hour': {'utilization': 25},
+            'seven_day': {'utilization': 30}, 'seven_day_opus': {'utilization': None}}
+        self.observer.refresh_quota()
+        body = self.observer.quota_response()
+        self.assertIsNone(body['accounts'][0]['windows']['seven_day_opus']['remaining_percent'])
+        self.assertEqual(body['windows']['seven_day_opus']['known_accounts'], 0)
+        self.assertIsNone(body['windows']['seven_day_opus']['min_remaining_percent'])
+
     def test_multiple_accounts_do_not_add_percentages(self):
         data = json.loads(self.observer.store.meta("quota_snapshot"))
         data["accounts"].append(copy.deepcopy(data["accounts"][0]))
@@ -472,6 +481,8 @@ class APITests(unittest.TestCase):
             data = json.loads(self.observer.store.meta('quota_snapshot'))
             data['accounts'][0].pop('retry_at', None)
             self.observer.store.meta('quota_snapshot', json.dumps(data))
+            key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+            self.observer.store.meta(key, '2000-01-01T00:00:00+00:00')
             with self.subTest(header=header[:8]), patch.object(transport, 'request', return_value={
                     'status_code': 429, 'body': '{}', 'header': {'Retry-After': [header]}}):
                 self.observer.refresh_quota()
@@ -512,17 +523,54 @@ class APITests(unittest.TestCase):
         data = json.loads(restarted.store.meta("quota_snapshot"))
         data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
         restarted.store.meta("quota_snapshot", json.dumps(data))
+        key = 'quota_backoff:' + restarted.store.digest('quota-source:quota-index')
+        restarted.store.meta(key, '2000-01-01T00:00:00+00:00')
         restarted.refresh_quota()
         self.assertEqual(restarted.quota_response()["accounts"][0]["poll_interval_seconds"], 240)
         data = json.loads(restarted.store.meta("quota_snapshot"))
         data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
         restarted.store.meta("quota_snapshot", json.dumps(data))
+        restarted.store.meta(key, '2000-01-01T00:00:00+00:00')
         backend.quota = original
         restarted.refresh_quota()
         self.assertFalse(restarted.quota_response()["stale"])
         before = len(backend.calls)
         restarted.refresh_quota(scheduled=True)
         self.assertEqual(len(backend.calls), before)
+
+    def test_backoff_survives_source_metadata_change_and_disable_reenable(self):
+        backend = self.paired_backend()
+        original_accounts = backend.accounts
+        source = {'updated_at': 'first', 'disabled': False}
+        def accounts():
+            entries = original_accounts()
+            entries[0]['disabled'] = source['disabled']
+            entries[1]['updated_at'] = source['updated_at']
+            return entries
+        backend.accounts = accounts
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError('upstream_http_429', 429, 172800)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+        self.assertNotIn('quota-index', key)
+        with self.observer.store.db() as con:
+            con.execute('DELETE FROM metadata WHERE key=?', (key,))
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        self.assertIsNotNone(self.observer.store.meta(key))
+        source['updated_at'] = 'second'
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        source['disabled'] = True
+        self.observer.refresh_quota()
+        source['disabled'] = False
+        restarted = Observer(self.observer.config)
+        restarted.backend = backend
+        restarted.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
 
     def test_manual_refresh_reports_rate_limit_and_local_throttle(self):
         backend = self.paired_backend()

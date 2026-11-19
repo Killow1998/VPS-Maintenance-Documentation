@@ -115,6 +115,7 @@ scripts/cpa/cpa-admin/web/*
 !scripts/cpa/cpa-admin/test_policy.py
 !scripts/cpa/cpa-admin/test_service.py
 !scripts/cpa/cpa-admin/test_session_routing.py
+!scripts/cpa/cpa-admin/test_web.js
 !scripts/cpa/cpa-admin/web/index.html
 !scripts/cpa/cpa-admin/web/style.css
 !scripts/cpa/cpa-admin/web/app.js

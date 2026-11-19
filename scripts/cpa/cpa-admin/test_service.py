@@ -206,6 +206,7 @@ class GatewayTest(unittest.TestCase):
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Content-Type", "text/event-stream" if data.get("stream") else "application/json")
+                if code == 429: self.send_header("Retry-After", "173")
                 self.end_headers()
                 self.wfile.write(body)
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
@@ -319,6 +320,37 @@ class GatewayTest(unittest.TestCase):
         before = len(self.calls)
         self.assertEqual(self.session_model()[0], 429)
         self.assertEqual(len(self.calls), before + 1)
+
+    def test_backup_revoked_after_primary_429_preserves_upstream_error(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.statuses['account-a'] = 429
+        original = self.backend.allowed
+        count = [0]
+        def allowed(identity):
+            count[0] += 1
+            result = original(identity)
+            return [a for a in result if count[0] < 3 or a['id'] != 'account-b']
+        before = len(self.calls)
+        with patch.object(self.backend, 'allowed', side_effect=allowed):
+            code, _, headers = self.session_model()
+        self.assertEqual(code, 429)
+        self.assertEqual(headers['Retry-After'], '173')
+        self.assertEqual([c['model'] for c in self.calls[before:]], ['account-a/claude-test'])
+
+    def test_primary_revoked_after_selection_migrates_only_after_backup_success(self):
+        self.assertEqual(self.session_model()[0], 200)
+        original = self.backend.allowed
+        count = [0]
+        def allowed(identity):
+            count[0] += 1
+            result = original(identity)
+            return [a for a in result if count[0] == 1 or a['id'] != 'account-a']
+        before = len(self.calls)
+        with patch.object(self.backend, 'allowed', side_effect=allowed):
+            self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual([c['model'] for c in self.calls[before:]], ['account-b/claude-test'])
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
 
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)

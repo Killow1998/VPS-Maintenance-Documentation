@@ -1,4 +1,4 @@
-"""Claude reset grants and conservative recovery of local quota cooldowns."""
+"""Claude reset grants and safe reporting of local quota cooldowns."""
 import datetime as dt
 import json
 import re
@@ -53,7 +53,7 @@ def usable(status, grant):
 
 
 def recoverable(entry, windows):
-    """CPA's reset clears ALL model states: refuse mixed/non-quota failures."""
+    """Report whether an account cooldown appears eligible for manual review."""
     cooling = entry.get("cooldowns") or []
     if not cooling or any(c.get("reason") not in ("quota", "credential_quota") for c in cooling):
         return False
@@ -89,57 +89,110 @@ class QuotaActions:
         item["routing"] = {"blocked": bool(entry.get("unavailable")),
                            "retry_at": entry.get("next_retry_after"), "recovery": "unchanged"}
         if recoverable(entry, item["windows"]):
-            try:
-                self.observer.backend.request("/v8/management/routing/cooldown/reset",
-                                              {"auth_index": entry["auth_index"]})
-                item["routing"] = {"blocked": False, "retry_at": None, "recovery": "cleared"}
-            except Exception:
-                item["routing"]["recovery"] = "failed"
+            # CPA's reset is unconditional; a snapshot cannot rule out a new model cooldown.
+            item["routing"]["recovery"] = "manual"
+
+    @staticmethod
+    def _get(con, key):
+        row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _put(con, key, value):
+        con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, value))
+
+    def _reserve(self, account_id, grant_id, operation_id, actor):
+        latest_key = "reset_operation:" + account_id
+        attempt_key = "reset_attempt:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation_id
+        at = time.time()
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            legacy_raw = self._get(con, latest_key)
+            legacy = json.loads(legacy_raw or "{}")
+            if isinstance(legacy.get("id"), str) and ID.fullmatch(legacy["id"]):
+                legacy_key = "reset_operation_id:" + account_id + ":" + legacy["id"]
+                if not self._get(con, legacy_key):
+                    self._put(con, legacy_key, legacy_raw)
+            saved_raw = self._get(con, record_key)
+            if saved_raw:
+                saved = json.loads(saved_raw)
+                if saved.get("grant_id") != grant_id:
+                    raise ValueError("reset_selection_changed")
+                return saved, False, None
+            if legacy.get("result") == "unknown" or at - legacy.get("created", 0) < 30:
+                raise ValueError("reset_pending_or_recent")
+            if at - float(self._get(con, attempt_key) or "0") < 30:
+                raise ValueError("reset_preflight_rate_limited")
+            operation = {"id": operation_id, "grant_id": grant_id, "created": at, "actor": str(actor)[:120],
+                         "request_id": uuid.uuid4().hex, "result": "unknown"}
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
+            self._put(con, attempt_key, str(at))
+        return operation, True, legacy_raw
+
+    def _finish(self, account_id, operation):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            if current.get("request_id") != operation["request_id"]:
+                raise ValueError("reset_operation_changed")
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
+
+    def _cancel_preflight(self, account_id, operation, legacy_raw):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            if current.get("request_id") != operation["request_id"]:
+                return
+            con.execute("DELETE FROM metadata WHERE key=?", (record_key,))
+            if legacy_raw is None:
+                con.execute("DELETE FROM metadata WHERE key=?", (latest_key,))
+            else:
+                self._put(con, latest_key, legacy_raw)
 
     def redeem(self, account_id, grant_id, operation_id, actor="admin"):
         if not all(isinstance(v, str) and ID.fullmatch(v) for v in (account_id, grant_id, operation_id)):
             raise ValueError("invalid_reset_selection")
         obs = self.observer
-        key = "reset_operation:" + account_id
-        saved = json.loads(obs.store.meta(key) or "{}")
-        if saved.get("id") == operation_id:
-            if saved.get("grant_id") != grant_id:
-                raise ValueError("reset_selection_changed")
-            return saved
-        if saved.get("result") == "unknown" or time.time() - saved.get("created", 0) < 30:
-            raise ValueError("reset_pending_or_recent")
-        last_attempt = float(obs.store.meta("reset_attempt:" + account_id) or "0")
-        if time.time() - last_attempt < 30:
-            raise ValueError("reset_preflight_rate_limited")
-        obs.store.meta("reset_attempt:" + account_id, str(time.time()))
-        entries = obs.backend.accounts()
-        helpers = {b.get("credential") for b in obs.config.get("quota_bindings", {}).values()}
-        targets = [e for e in entries if e.get("provider") == "claude" and e.get("name") not in helpers
-                   and not e.get("disabled") and e.get("auth_index")
-                   and "account-" + obs.store.digest("account:" + e["auth_index"])[:12] == account_id]
-        if len(targets) != 1:
-            raise ValueError("account_not_available")
-        entry = targets[0]
-        source = obs.quota_source(entry, {e["name"]: e for e in entries})
-        status, body = self.upstream(source, "/api/oauth/usage?cedar_ember=1&skip_spend=1")
-        if status != 200 or not isinstance(body, dict):
-            raise ValueError("reset_status_unavailable")
-        current = grants(body)
-        grant = next((g for g in current["grants"] if g["id"] == grant_id), None)
-        if not grant or not usable(current, grant):
-            raise ValueError("reset_not_usable")
-        status, profile = self.upstream(source, "/api/oauth/profile")
-        organization = profile.get("organization", {}).get("uuid") if isinstance(profile, dict) else None
+        operation, fresh, legacy_raw = self._reserve(account_id, grant_id, operation_id, actor)
+        if not fresh:
+            return operation
         try:
-            organization = str(uuid.UUID(organization))
-        except (ValueError, TypeError, AttributeError):
-            raise ValueError("reset_identity_unavailable") from None
-        if status != 200:
-            raise ValueError("reset_identity_unavailable")
-        operation = {"id": operation_id, "grant_id": grant_id, "created": time.time(), "actor": str(actor)[:120],
-                     "request_id": uuid.uuid4().hex, "result": "unknown"}
-        # Commit BEFORE sending. Ambiguous outcomes survive process restarts and never re-spend.
-        obs.store.meta(key, json.dumps(operation))
+            entries = obs.backend.accounts()
+            helpers = {b.get("credential") for b in obs.config.get("quota_bindings", {}).values()}
+            targets = [e for e in entries if e.get("provider") == "claude" and e.get("name") not in helpers
+                       and not e.get("disabled") and e.get("auth_index")
+                       and "account-" + obs.store.digest("account:" + e["auth_index"])[:12] == account_id]
+            if len(targets) != 1:
+                raise ValueError("account_not_available")
+            entry = targets[0]
+            source = obs.quota_source(entry, {e["name"]: e for e in entries})
+            status, body = self.upstream(source, "/api/oauth/usage?cedar_ember=1&skip_spend=1")
+            if status != 200 or not isinstance(body, dict):
+                raise ValueError("reset_status_unavailable")
+            current = grants(body)
+            grant = next((g for g in current["grants"] if g["id"] == grant_id), None)
+            if not grant or not usable(current, grant):
+                raise ValueError("reset_not_usable")
+            status, profile = self.upstream(source, "/api/oauth/profile")
+            organization = profile.get("organization", {}).get("uuid") if isinstance(profile, dict) else None
+            try:
+                organization = str(uuid.UUID(organization))
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError("reset_identity_unavailable") from None
+            if status != 200:
+                raise ValueError("reset_identity_unavailable")
+        except Exception:
+            self._cancel_preflight(account_id, operation, legacy_raw)
+            raise
         try:
             status, answer = self.upstream(source, "/api/organizations/" + organization + "/reset_rate_limits",
                 {"program": "cedar_ember", "grant_id": grant_id, "request_id": operation["request_id"]})
@@ -150,5 +203,5 @@ class QuotaActions:
                 operation["result"] = result
         except Exception:
             pass
-        obs.store.meta(key, json.dumps(operation))
+        self._finish(account_id, operation)
         return operation

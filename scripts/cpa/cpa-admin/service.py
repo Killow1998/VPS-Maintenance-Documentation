@@ -277,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
     def forward_model(self, key, identity, body, model, selection):
         candidates = selection.candidates
         migrate = False
+        last_failure = None
         headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "Accept-Encoding": "identity"}
         for name, value in self.headers.items():
             lower = name.lower()
@@ -285,6 +286,8 @@ class Handler(BaseHTTPRequestHandler):
         for index, account in enumerate(candidates):
             # Every new attempt rechecks the committed policy. No fallback can widen its scope.
             if account["id"] not in {a["id"] for a in self.backend.allowed(identity) if a["enabled"] and a["route_ready"]}:
+                if account["id"] == selection.primary:
+                    migrate = True
                 continue
             connection = http.client.HTTPConnection(self.backend.host, self.backend.port, timeout=60)
             body["model"] = account["prefix"] + "/" + model
@@ -293,7 +296,14 @@ class Handler(BaseHTTPRequestHandler):
                 response = connection.getresponse()
                 if response.status in (401, 403, 429, 503) and index < len(candidates) - 1:
                     migrate = migrate or (account["id"] == selection.primary and response.status in (401, 403, 429))
-                    response.read(1024 * 1024)
+                    failure_body = response.read(1024 * 1024 + 1)
+                    if len(failure_body) > 1024 * 1024:
+                        failure_body = b'{"error":{"message":"Upstream error response exceeded the safety limit"}}'
+                    failure_headers = {name: value for name, value in response.getheaders()
+                                       if name.lower() in ("retry-after", "request-id", "x-request-id")
+                                       or name.lower().startswith("anthropic-ratelimit-")}
+                    last_failure = (response.status, failure_body,
+                                    response.getheader("Content-Type", "application/json"), failure_headers)
                     continue
                 if 200 <= response.status < 300:
                     try:
@@ -326,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             finally:
                 connection.close()
+        if last_failure is not None:
+            return self.answer(*last_failure)
         raise PolicyError(403, "账号权限已变更，请重新请求。")
 
 

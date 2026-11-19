@@ -104,13 +104,17 @@ reset grants and routing details. Do not add a public Nginx route. Implementatio
 and [maintainer guidance](https://github.com/router-for-me/CLIProxyAPI/issues/6507).
 
 Before an irreversible reset claim, persist its server-generated request ID and unknown
-outcome in metadata. Duplicate operation IDs return saved results across restarts. Ambiguous
-outcomes block new claims pending operator review; never retry with a fresh request ID.
-The bound profile credential performs official queries/redemption; local cooldown recovery
-targets the inference credential. Automatic recovery requires all reported applicable windows
-to have quota and no non-quota failures. Mixed or model-only cooldowns remain for diagnosis
-because CPA's current reset primitive clears every model state. A five-hour recovery alone
-never clears an exhausted weekly limit. Production tests must not spend real reset grants.
+outcome in metadata. Each account and operation ID retains its result across later claims and
+restarts; ambiguous outcomes block new claims pending review. The old version stored only the
+last operation, so older IDs cannot be reconstructed: drain in-flight operations before upgrade
+and do not replay old requests. A rollback to the old version loses per-operation protection;
+pause reset retries and inspect results. Production tests must not spend real reset grants.
+
+The bound profile credential performs official queries/redemption. CPA's cooldown reset is
+unconditional and cannot guard against concurrent model-state changes, so this observer never
+clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
+diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
+credential metadata changes and account disable/enable cycles.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

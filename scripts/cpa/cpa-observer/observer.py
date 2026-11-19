@@ -247,6 +247,24 @@ class Store:
             row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
             return row[0] if row else None
 
+    def quota_backoff(self, source, proposed=None):
+        key = "quota_backoff:" + self.digest("quota-source:" + str(source))
+        if proposed is None:
+            current = self.meta(key)
+            return stamp(current) if current else None
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            current = row[0] if row else None
+            if current:
+                current = stamp(current)
+            if proposed:
+                proposed = stamp(proposed)
+                if not current or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(current):
+                    con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, proposed))
+                    current = proposed
+            return current
+
     def normalize(self, event):
         key = event.get("api_key")
         if not isinstance(key, str) or not key:
@@ -474,10 +492,12 @@ def quota_windows(body):
     for name, value in body.items():
         if name == "iguana_necktie":
             name = "seven_day_fable"
-        if not re.fullmatch(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?", name) or not isinstance(value, dict):
+        if not re.fullmatch(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?", name):
             continue
+        value = value if isinstance(value, dict) else {}
         used = value.get("utilization")
         if not isinstance(used, (int, float)) or isinstance(used, bool) or not math.isfinite(used) or not 0 <= used <= 100:
+            result[name] = {"used_percent": None, "remaining_percent": None, "resets_at": None}
             continue
         reset = value.get("resets_at")
         try:
@@ -485,7 +505,7 @@ def quota_windows(body):
         except (ValueError, TypeError):
             reset = None
         result[name] = {"used_percent": used, "remaining_percent": round(100 - used, 4), "resets_at": reset}
-    if not result:
+    if not any(w["remaining_percent"] is not None for w in result.values()):
         raise ValueError("no quota windows returned")
     return result
 
@@ -611,6 +631,7 @@ class Observer:
                     "windows": {}, "as_of": None, "stale": True}
             if active:
                 old = known.get(identity, {})
+                source_index = None
                 try:
                     source = self.quota_source(entry, by_name)
                     source_index = source.get("auth_index")
@@ -620,11 +641,19 @@ class Observer:
                     # removed or changed binding after a configuration update.
                     revision = self.store.digest("quota-source:" + str(source_index) + ":" + str(source.get("updated_at", "")))
                     item["source_revision"] = revision
-                    retry_at = old.get("retry_at")
                     same_source = old.get("source_revision") == revision
+                    retry_at = self.store.quota_backoff(source_index)
+                    if same_source and old.get("retry_at"):
+                        retry_at = self.store.quota_backoff(source_index, old["retry_at"])
                     next_poll = old.get("next_poll_at") if scheduled else None
-                    if same_source and any(t and dt.datetime.fromisoformat(t) > dt.datetime.now(UTC) for t in (retry_at, next_poll)):
-                        item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "retry_at", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                    if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+                        if same_source:
+                            item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                        else:
+                            item.update(status="unavailable", reason="quota_backoff")
+                        item["retry_at"] = retry_at
+                    elif same_source and next_poll and dt.datetime.fromisoformat(next_poll) > dt.datetime.now(UTC):
+                        item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                     else:
                         try:
                             quota = self.backend.quota(source_index)
@@ -651,8 +680,12 @@ class Observer:
                         item["poll_interval_seconds"] = interval
                         delay = max(interval, error.retry_after or 0)
                         item["retry_at"] = retry_at_after(delay)
+                        if source_index:
+                            item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
                     elif isinstance(error, QuotaError) and error.retry_after:
                         item["retry_at"] = retry_at_after(error.retry_after)
+                        if source_index:
+                            item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
         enabled = [a for a in accounts if a["enabled"]]
@@ -685,7 +718,8 @@ class Observer:
         names = sorted({w for account in accounts for w in account["windows"]})
         windows = {}
         for name in names:
-            values = [a["windows"][name]["remaining_percent"] for a in accounts if name in a["windows"] and not a["stale"]]
+            values = [a["windows"][name]["remaining_percent"] for a in accounts if name in a["windows"]
+                      and not a["stale"] and type(a["windows"][name].get("remaining_percent")) in (int, float)]
             windows[name] = {"known_accounts": len(values),
                              "remaining_percent": values[0] if len(accounts) == 1 and len(values) == 1 else None,
                              "min_remaining_percent": min(values) if values else None,

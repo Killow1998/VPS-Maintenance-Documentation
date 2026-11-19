@@ -37,7 +37,7 @@ python3 cpa-tools/api_keys.py permissions
 
 账号卡片展示官方 reset 的剩余/总次数、北京时间到期时间和 `2d3h left` 倒计时。完整重置与 Fable 用量返还分别展示；后者不退还其他模型周用量。点“重置 Claude 额度”，选择类型并确认后才消耗次数。停用、旧快照、未知次数和待确认操作不提供兑换。禁用按钮下方显示原因；选择框内也说明各类型不可用的原因，例如次数已用完、暂无可返还的 Fable 用量、尚未达到使用条件或已到期。服务端重新核对账号绑定、官方可用性和组织身份，生成并持久保存 request_id；结果不明时禁止自动重复兑换。官方 HTTP 200 不是成功证明，必须识别业务 result。真实验收只读，不兑换 reset。
 
-官方 reset 与本地冷却为独立状态。五小时、七天及所有已报告窗口都有额度，且 CPA 只有账号级额度冷却时，后台自动恢复目标推理凭据。不会清除 profile helper，也不会仅因五小时恢复而解除七天限制。CPA 当前接口会清除所有模型状态，因此只要存在模型级冷却或其他错误，就保守保留并由管理员另行诊断；网页不提供普通用户“清除冷却”按钮。额度查询的 429 等待时间遵守上游返回的秒数或 HTTP 日期，过长时不会缩短到一天。
+官方 reset 与 CPA 本地冷却为独立状态。CPA 当前接口只能无条件清除所有模型状态，不能防止检查后新增冷却，因此后台不自动清除，需等待 CPA 的冷却到期；如长期未恢复，由管理员核对实际状态。网页不提供普通用户“清除冷却”按钮。额度查询遵守上游返回的等待时间，即使凭据元数据更新或账号暂时停用也不会提前重试；上游返回但无法解析的窗口显示为未知。
 
 新建或轮换 Key 后，其新身份默认没有账号权限。管理员在 `p` 权限页或网页授权后才能调用。已有 Key 改名保留权限。既有 Key 值与本机原 `.cpa-env` 路径不变。
 
@@ -63,13 +63,18 @@ python3 cpa-tools/api_keys.py permissions
 
 ### 既有部署升级与验收
 
-先核对实际运行文件，确认此前 reset/刷新修复是否已存在，保留现场定制。备份将要替换的 `service.py`、`session_routing.py`（已有时）、`observer.py`、`quota_actions.py`、配置、unit 和用量/策略一致 SQLite 快照，连接以数据库所属用户运行。先用临时库预检，再安装或更新会话调度文件及 observer 两个文件；按实际变更在确认的维护窗口只重启对应的 `cpa-observer` 和 `cpa-admin`。admin 是转发网关，重启可能中断流式调用，需检查活跃任务并与用户确认。不更换 CPA 二进制，不重启 Nginx、XBoard，不改 HTTPS/代理，不运行首次部署脚本或重新导入权限。
+先核对实际运行文件及版本，保留现场定制。升级有两条路径：
+
+- **从尚未安装 reset/刷新版本的 main 升级**：更新 admin 的 `backend.py`、`service.py`、`session_routing.py` 和 `web/app.js`、`web/index.html`、`web/style.css`，以及 observer 的 `observer.py`、`quota_actions.py`
+- **已完整安装 PR #12 版本**：更新 admin 的 `service.py`、`session_routing.py`、`web/app.js`、`web/index.html`，以及 observer 的 `observer.py`、`quota_actions.py`；其余文件先核对实际版本
+
+备份将要替换的全部文件、配置、unit 和用量/策略一致 SQLite 快照，连接以数据库所属用户运行；此前不存在的文件记录为新增。先用临时库预检，再安装 companion 文件并替换其余文件，确认维护窗口后仅重启有变更的 `cpa-observer` 和 `cpa-admin`。admin 是转发网关，重启可能中断流式调用，需检查活跃任务并与用户确认。不更换 CPA 二进制，不重启 Nginx、XBoard，不改 HTTPS/代理，不运行首次部署脚本或重新导入权限。
 
 合成测试运行 `python3 -B -m unittest discover -s cpa-admin -p 'test_*.py'`，覆盖同会话固定、新会话分配、相同 ID 跨 Key 隔离、Claude metadata、无 ID 降级、并发首请求、重启持久化、权限撤销、额度迁移与 503 回退。生产先验证只读接口、权限与历史保留；通过后续正常调用观察路由及实际 cache-read/cache-write，不发付费探测或预热请求。没有正常新调用就记为待验证，不用合成测试代替缓存节省证据。
 
 Windows CI 额外安装固定版本的 `tzdata`，为权限审计时间提供 `Asia/Shanghai` IANA 数据；这是跨平台测试环境依赖，不增加 Linux VPS 的 Python 包依赖或改写系统时区。
 
-回滚恢复实际变更前的 admin 文件及 observer 文件，并只重启对应服务，**保留当前数据库**。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。只添加 companion 的失败可在服务切换前停止，不删除正在被新版 service 导入的模块。
+回滚恢复实际变更前的全部 admin、web 和 observer 文件，并只重启对应服务，**保留当前数据库**。新增附表可保留，旧版本会忽略；不以升级前快照覆盖新用量、管理员登录或权限。旧版没有逐操作防重放，回滚后须暂停 reset 重试并由管理员核对；不删除正在被新版服务导入的 companion 文件。
 
 ## 新增 Claude 账号
 
@@ -122,9 +127,9 @@ TUI → 原 SSH 管理连接 → 仅回环 /internal/* → 同一策略库
 
 ### 既有服务修复
 
-额度刷新与 reset 版本需要一起更新 admin 的 `backend.py`、`service.py`、三个 `web/` 文件，以及 observer 的 `observer.py` 和新增同目录文件 `quota_actions.py`。先安装 companion，再替换 observer，避免导入失败。保留价格、TTL 采集、OAuth、权限和历史；只重启 admin/observer，不运行首次部署脚本。admin 重启可能中断转发中的流，切换前检查活跃请求并安排空闲窗口。
+额度刷新、reset 与会话调度需要一起核对依赖文件，按上方[既有部署升级与验收](#既有部署升级与验收)选择完整升级路径。先安装 companion，避免导入失败。保留价格、TTL 采集、OAuth、权限和历史；只重启有变更的 admin/observer，不运行首次部署脚本。admin 重启可能中断转发中的流，切换前检查活跃请求并安排空闲窗口。
 
-新增仅回环管理接口 `POST /internal/quota`，复用 management secret，支持 read/refresh/redeem。admin 通过现有管理员会话和 Origin 校验访问；普通 Key 无权访问，Nginx 不增加公共路由。公开 `/v1/quota` 不含 reset grant 或调度详情。操作记录在 observer metadata 的 `reset_operation:account-ID` 下，不修改 records/cache_ttl 表。unknown 结果需管理员核对后处理，不删除记录盲重试。
+新增仅回环管理接口 `POST /internal/quota`，复用 management secret，支持 read/refresh/redeem。admin 通过现有管理员会话和 Origin 校验访问；普通 Key 无权访问，Nginx 不增加公共路由。公开 `/v1/quota` 不含 reset grant 或调度详情。操作按账号和操作 ID 保存在 observer metadata，不修改 records/cache_ttl 表。旧版只保留最后一笔，升级只能迁移仍存在的记录，无法恢复更早的操作 ID；切换前应等待进行中操作结束，不重放旧请求。unknown 结果需管理员核对后处理，不删除记录盲重试。
 
 回滚仅恢复旧源码、原 `quota_poll_seconds` 并重启 admin/observer，保留当前数据库、reset 操作日志和新增用量。不能用维护前快照覆盖数据库，也不能恢复旧 OAuth 文件覆盖新 token。已兑换的官方 reset 无法撤销。
 
