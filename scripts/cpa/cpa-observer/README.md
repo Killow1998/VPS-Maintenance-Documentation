@@ -81,7 +81,7 @@ If the inference token cannot read account data, obtain a companion grant for th
 
 The source must be a disabled Claude credential with matching email. Binding supplements the existing inference credential; it never replaces its token. Source entries are excluded from logical account counts, so one model credential plus its quota helper remains one account. Email, filenames, auth indexes and internal source revisions are omitted from the public response. A mismatch fails closed and does not reuse another account's cached windows. Unbound ordinary OAuth credentials continue to use their own quota source.
 
-On upstream 401, the observer calls CPA's local `/v8/management/credentials/refresh` for only the quota source, discards the response without reading credential-bearing metadata and retries quota once. Missing scope on 403 does not trigger repeated refreshes. A 429 honors the upstream retry delay and uses cached data with its age/status. Failures report safe reasons and unknown or stale data, never a fabricated balance. Restart only the observer after changing bindings; preserve its database and HMAC secret.
+On upstream 401 without a Retry-After deadline, the observer calls CPA's local `/v8/management/credentials/refresh` for only the quota source, discards the response without reading credential-bearing metadata and retries quota once. A 401 with Retry-After waits instead. Missing scope on 403 does not trigger repeated refreshes. A 429 honors the upstream retry delay and uses cached data with its age/status. Failures report safe reasons and unknown or stale data, never a fabricated balance. Restart only the observer after changing bindings; preserve its database and HMAC secret.
 
 ## Operation
 
@@ -93,7 +93,8 @@ per-account interval to 120/240/480/900 seconds, waiting at least the upstream R
 This interval persists in the snapshot across restarts and remains after recovery. Scheduled
 passes respect it; manual refresh can bypass a successful polling interval, but never an
 active upstream backoff. Manual refresh is coalesced and limited to one attempt per 30 seconds.
-The web button is disabled with a seconds countdown while waiting. Failed queries retain
+The web button counts down if all enabled sources are waiting; another available source can
+still be refreshed. Reset preflight uses the same source backoff. Failed queries retain
 same-source quota/reset metadata marked stale, and report rate_limited/unavailable rather
 than successful refresh. Ordinary reads never query Claude. Usage collection is independent.
 
@@ -115,6 +116,11 @@ unconditional and cannot guard against concurrent model-state changes, so this o
 clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
 diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
 credential metadata changes and account disable/enable cycles.
+On the first upgrade, a previous snapshot's retry deadline is conservatively carried to the
+current bound source even if its revision changed; this may delay a newly replaced source but
+avoids an early retry. Stored windows retain numeric-only compatibility with older readers;
+unknown windows live separately in the snapshot and are combined in new API responses. An
+older reader after rollback may omit those unknown windows, but must not treat them as zero.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

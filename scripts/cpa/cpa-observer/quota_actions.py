@@ -88,7 +88,7 @@ class QuotaActions:
     def recover(self, entry, item):
         item["routing"] = {"blocked": bool(entry.get("unavailable")),
                            "retry_at": entry.get("next_retry_after"), "recovery": "unchanged"}
-        if recoverable(entry, item["windows"]):
+        if not item.get("unknown_windows") and recoverable(entry, item["windows"]):
             # CPA's reset is unconditional; a snapshot cannot rule out a new model cooldown.
             item["routing"]["recovery"] = "manual"
 
@@ -175,8 +175,8 @@ class QuotaActions:
                 raise ValueError("account_not_available")
             entry = targets[0]
             source = obs.quota_source(entry, {e["name"]: e for e in entries})
-            status, body = self.upstream(source, "/api/oauth/usage?cedar_ember=1&skip_spend=1")
-            if status != 200 or not isinstance(body, dict):
+            body = obs.query_quota(source["auth_index"])
+            if not isinstance(body, dict):
                 raise ValueError("reset_status_unavailable")
             current = grants(body)
             grant = next((g for g in current["grants"] if g["id"] == grant_id), None)

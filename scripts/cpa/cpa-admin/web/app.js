@@ -106,7 +106,8 @@ function grantUnavailableReason(g, status) {
 }
 
 function quotaBackoff(a) {
-  return ["upstream_http_429", "quota_backoff"].includes(a.quota_reason);
+  return ["upstream_http_429", "quota_backoff"].includes(a.quota_reason)
+    || Date.parse(a.retry_at) > Date.now();
 }
 
 function resetUnavailableReason(a) {
@@ -204,9 +205,12 @@ function renderAccounts() {
 }
 
 function updateQuotaRefreshButton() {
-  const retryTimes = (state?.accounts || []).filter((a) => a.enabled && quotaBackoff(a))
-    .map((a) => Date.parse(a.retry_at)).filter(Number.isFinite);
-  const seconds = Math.max(0, Math.ceil((Math.max(quotaRefreshAfter, ...retryTimes) - Date.now()) / 1000));
+  const enabled = (state?.accounts || []).filter((a) => a.enabled);
+  const now = Date.now();
+  const retryTimes = enabled.map((a) => quotaBackoff(a) ? Date.parse(a.retry_at) : NaN);
+  const allWaiting = retryTimes.length > 0 && retryTimes.every((at) => Number.isFinite(at) && at > now);
+  const nextRetry = allWaiting ? Math.min(...retryTimes) : 0;
+  const seconds = Math.max(0, Math.ceil((Math.max(quotaRefreshAfter, nextRetry) - now) / 1000));
   $("quota-refresh").disabled = quotaLoading || seconds > 0;
   $("quota-refresh").textContent = quotaLoading ? "正在刷新…" : seconds > 0 ? `还需 ${seconds} 秒` : "刷新额度";
 }
@@ -231,7 +235,7 @@ async function refreshQuota(manual = false) {
     state.quota = meta;
     const limited = snapshot.accounts.some((a) => a.enabled && quotaBackoff(a));
     const stale = snapshot.accounts.some((a) => a.enabled && a.stale);
-    quotaError = limited ? "额度查询等待重试，本次未取得全部最新状态；请等待按钮倒计时。"
+    quotaError = limited ? "部分账号额度查询等待重试；其他账号可继续刷新。"
       : stale ? "本次未取得全部最新额度，保留旧值；请查看账号卡片中的原因。"
       : manual && answer.status === "busy" ? "后台正在采集，本次未发起新查询。"
       : manual && answer.status === "throttled" ? "查询间隔未到，本次未发起新查询；请等待按钮倒计时。" : "";

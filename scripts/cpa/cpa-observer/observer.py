@@ -496,7 +496,7 @@ def quota_windows(body):
             continue
         value = value if isinstance(value, dict) else {}
         used = value.get("utilization")
-        if not isinstance(used, (int, float)) or isinstance(used, bool) or not math.isfinite(used) or not 0 <= used <= 100:
+        if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= used <= 100 or not math.isfinite(used):
             result[name] = {"used_percent": None, "remaining_percent": None, "resets_at": None}
             continue
         reset = value.get("resets_at")
@@ -505,7 +505,7 @@ def quota_windows(body):
         except (ValueError, TypeError):
             reset = None
         result[name] = {"used_percent": used, "remaining_percent": round(100 - used, 4), "resets_at": reset}
-    if not any(w["remaining_percent"] is not None for w in result.values()):
+    if not result:
         raise ValueError("no quota windows returned")
     return result
 
@@ -535,6 +535,18 @@ class Observer:
         if str(source.get("email", "")).casefold() != binding["expected_email"].casefold():
             raise QuotaError("quota_identity_mismatch")
         return source
+
+    def query_quota(self, source_index):
+        retry_at = self.store.quota_backoff(source_index)
+        if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+            raise QuotaError("quota_backoff")
+        try:
+            return self.backend.quota(source_index)
+        except QuotaError as error:
+            if error.status == 429 or error.retry_after:
+                delay = max(120 if error.status == 429 else 1, error.retry_after or 0)
+                self.store.quota_backoff(source_index, retry_at_after(delay))
+            raise
 
     def quota_control(self, data):
         action = data.get("action")
@@ -629,8 +641,10 @@ class Observer:
             active = not entry.get("disabled", False)
             item = {"id": identity, "enabled": active, "status": "disabled" if not active else "unknown",
                     "windows": {}, "as_of": None, "stale": True}
+            old = known.get(identity, {})
+            if not active:
+                item.update({k: old[k] for k in ("retry_at", "source_revision") if k in old})
             if active:
-                old = known.get(identity, {})
                 source_index = None
                 try:
                     source = self.quota_source(entry, by_name)
@@ -643,26 +657,31 @@ class Observer:
                     item["source_revision"] = revision
                     same_source = old.get("source_revision") == revision
                     retry_at = self.store.quota_backoff(source_index)
-                    if same_source and old.get("retry_at"):
+                    if old.get("retry_at"):
                         retry_at = self.store.quota_backoff(source_index, old["retry_at"])
                     next_poll = old.get("next_poll_at") if scheduled else None
                     if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
                         if same_source:
-                            item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                            item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                         else:
                             item.update(status="unavailable", reason="quota_backoff")
                         item["retry_at"] = retry_at
                     elif same_source and next_poll and dt.datetime.fromisoformat(next_poll) > dt.datetime.now(UTC):
-                        item.update({k: old[k] for k in ("windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                        item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                     else:
                         try:
-                            quota = self.backend.quota(source_index)
+                            quota = self.query_quota(source_index)
                         except QuotaError as error:
-                            if error.status != 401 or not source.get("name"):
+                            if error.status != 401 or error.retry_after or not source.get("name"):
                                 raise
                             self.backend.refresh_credential(source["name"])
-                            quota = self.backend.quota(source_index)
-                        item.update(windows=quota_windows(quota), status="ok", as_of=now(), stale=False)
+                            quota = self.query_quota(source_index)
+                        windows = quota_windows(quota)
+                        item.update(windows={k: v for k, v in windows.items() if v["remaining_percent"] is not None},
+                                    unknown_windows={k: v for k, v in windows.items() if v["remaining_percent"] is None},
+                                    status="ok", as_of=now(), stale=False)
+                        if not item["windows"]:
+                            item.update(status="unavailable", reason="quota_windows_unknown", stale=True)
                         interval = old.get("poll_interval_seconds", self.config.get("quota_poll_seconds", 60)) if same_source else self.config.get("quota_poll_seconds", 60)
                         item["poll_interval_seconds"] = interval
                         item["next_poll_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=interval)).isoformat()
@@ -674,7 +693,7 @@ class Observer:
                                 as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
                     if same_source:
-                        item.update({k: old[k] for k in ("resets", "routing", "poll_interval_seconds") if k in old})
+                        item.update({k: old[k] for k in ("unknown_windows", "resets", "routing", "poll_interval_seconds") if k in old})
                     if isinstance(error, QuotaError) and error.status == 429:
                         interval = min(900, max(120, item.get("poll_interval_seconds", 60) * 2))
                         item["poll_interval_seconds"] = interval
@@ -686,6 +705,11 @@ class Observer:
                         item["retry_at"] = retry_at_after(error.retry_after)
                         if source_index:
                             item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
+            # Keep stored windows numeric for older readers during a rollback.
+            unknown = item.setdefault("unknown_windows", {})
+            for name, window in list(item["windows"].items()):
+                if window.get("remaining_percent") is None:
+                    unknown[name] = item["windows"].pop(name)
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
         enabled = [a for a in accounts if a["enabled"]]
@@ -705,6 +729,7 @@ class Observer:
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         for account in accounts:
             account.pop("source_revision", None)
+            account["windows"].update(account.pop("unknown_windows", {}))
             if not admin:
                 account.pop("resets", None)
                 account.pop("routing", None)

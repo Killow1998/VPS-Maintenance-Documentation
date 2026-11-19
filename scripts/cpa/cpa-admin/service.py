@@ -296,21 +296,20 @@ class Handler(BaseHTTPRequestHandler):
                 response = connection.getresponse()
                 if response.status in (401, 403, 429, 503) and index < len(candidates) - 1:
                     migrate = migrate or (account["id"] == selection.primary and response.status in (401, 403, 429))
-                    failure_body = response.read(1024 * 1024 + 1)
-                    if len(failure_body) > 1024 * 1024:
-                        failure_body = b'{"error":{"message":"Upstream error response exceeded the safety limit"}}'
                     failure_headers = {name: value for name, value in response.getheaders()
                                        if name.lower() in ("retry-after", "request-id", "x-request-id")
                                        or name.lower().startswith("anthropic-ratelimit-")}
-                    last_failure = (response.status, failure_body,
-                                    response.getheader("Content-Type", "application/json"), failure_headers)
-                    continue
-                if 200 <= response.status < 300:
+                    content_type = response.getheader("Content-Type", "application/json")
                     try:
-                        self.server.router.succeeded(selection, account["id"], migrate=migrate)
-                    except sqlite3.Error as error:
-                        # Do not discard a successful inference if its binding cannot be saved.
-                        logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
+                        failure_body = response.read(1024 * 1024 + 1)
+                        if len(failure_body) > 1024 * 1024:
+                            failure_body = b'{"error":{"message":"Upstream error response exceeded the safety limit"}}'
+                            content_type = "application/json"
+                    except (http.client.HTTPException, OSError):
+                        failure_body = b'{"error":{"message":"Upstream error response unavailable"}}'
+                        content_type = "application/json"
+                    last_failure = (response.status, failure_body, content_type, failure_headers)
+                    continue
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
                 self.send_header("Cache-Control", "no-store")
@@ -324,12 +323,19 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if connection.sock:
                         connection.sock.settimeout(3600)
+                    binding_saved = False
                     while True:
                         chunk = response.read1(65536)
                         if not chunk:
                             break
                         self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
                         self.wfile.flush()
+                        if not binding_saved and 200 <= response.status < 300:
+                            try:
+                                self.server.router.succeeded(selection, account["id"], migrate=migrate)
+                            except sqlite3.Error as error:
+                                logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
+                            binding_saved = True
                     self.wfile.write(b"0\r\n\r\n")
                 except Exception:
                     self.close_connection = True

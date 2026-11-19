@@ -1,5 +1,6 @@
 """Synthetic reset spending, durable replay protection and cooldown recovery."""
 import copy
+import datetime as dt
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +10,7 @@ import threading
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from observer import Observer, Server, quota_windows
+from observer import Backend, Observer, QuotaError, Server, quota_windows, retry_at_after
 from quota_actions import grants, recoverable
 
 
@@ -51,6 +52,7 @@ class ResetTests(unittest.TestCase):
                 body = {"result": self.answer}
             return {"status_code": 200, "body": json.dumps(body)}
         self.obs.backend.request.side_effect = request
+        self.obs.backend.quota.side_effect = lambda index: Backend.quota(self.obs.backend, index)
 
     def test_duplicate_confirmation_spends_once_even_after_process_restart(self):
         first = self.obs.actions.redeem(self.account, "full-test", "operation-one")
@@ -137,6 +139,27 @@ class ResetTests(unittest.TestCase):
             self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'retry')['result'], 'reset')
             self.assertEqual(self.obs.actions.redeem(self.account, 'full-test', 'previous'), previous)
         self.assertEqual(len(self.spends), 2)
+
+    def test_reset_preflight_respects_persisted_source_backoff(self):
+        self.obs.store.quota_backoff('profile', retry_at_after(3600))
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(self.account, 'full-test', 'blocked')
+        self.obs.backend.request.assert_not_called()
+        self.assertFalse(self.spends)
+
+    def test_reset_preflight_429_persists_retry_after_without_spending(self):
+        original = self.obs.backend.request.side_effect
+        def limited(path, data):
+            if '/usage' in data['url']:
+                return {'status_code': 429, 'body': '{}', 'header': {'Retry-After': ['7200']}}
+            return original(path, data)
+        self.obs.backend.request.side_effect = limited
+        self.obs.backend.quota.side_effect = lambda index: Backend.quota(self.obs.backend, index)
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(self.account, 'full-test', 'limited')
+        deadline = self.obs.store.quota_backoff('profile')
+        self.assertGreater((dt.datetime.fromisoformat(deadline) - dt.datetime.now(dt.timezone.utc)).total_seconds(), 7190)
+        self.assertFalse(self.spends)
 
     def test_ambiguous_redemption_blocks_new_operation_without_retrying(self):
         self.answer = "timeout"

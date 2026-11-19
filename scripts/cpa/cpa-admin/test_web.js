@@ -42,6 +42,16 @@ vm.runInContext(source + `
   assert.equal(document.getElementById("quota-refresh").disabled, true);
   assert.match(document.getElementById("account-cards").innerHTML, /Opus 7 天额度未知/);
   assert.match(document.getElementById("account-cards").innerHTML, /额度查询等待重试/);
+  state.accounts.push({id: "b", name: "B", plan: "Claude", enabled: true, stale: false,
+    windows: {}, resets: {status: "unknown"}, routing: {}});
+  renderAccounts();
+  assert.equal(document.getElementById("quota-refresh").disabled, false);
+  state.accounts[1].quota_reason = "upstream_http_429";
+  state.accounts[1].retry_at = new Date(Date.now() + 30000).toISOString();
+  updateQuotaRefreshButton();
+  assert.equal(document.getElementById("quota-refresh").disabled, true);
+  assert.match(document.getElementById("quota-refresh").textContent, /还需 (?:2[0-9]|30) 秒/);
+  state.accounts.pop();
   state.accounts[0].quota_reason = "other";
   state.accounts[0].retry_at = null;
   state.accounts[0].stale = false;
