@@ -768,6 +768,7 @@ class Observer:
                     revision = self.store.digest("quota-source:" + str(source_index) + ":" + str(source.get("updated_at", "")))
                     item["source_revision"] = revision
                     item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
+                    item['source_verified'] = True
                     same_source = old.get("source_revision") == revision
                     retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
@@ -857,11 +858,15 @@ class Observer:
         for account in accounts:
             account.pop("source_revision", None)
             snapshot_source = account.pop("source_identity", None)
+            source_verified = account.pop('source_verified', False) is True
             source_identity = self.store.meta("quota_account_source:" + account["id"]) or snapshot_source
             retry_at = account.get("retry_at") if not snapshot_source or snapshot_source == source_identity else None
-            if snapshot_source and source_identity and snapshot_source != source_identity:
-                account.update(windows={}, stale=True, status="unavailable", reason="quota_source_changed", as_of=None)
-                account.pop("retry_at", None)
+            if not snapshot_source or not source_verified or source_identity and snapshot_source != source_identity:
+                reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified
+                          else 'quota_source_changed')
+                account.update(windows={}, stale=True, status="unavailable", reason=reason, as_of=None)
+                if snapshot_source:
+                    account.pop("retry_at", None)
                 account.pop("unknown_windows", None)
                 account.pop("resets", None)
                 account.pop("routing", None)

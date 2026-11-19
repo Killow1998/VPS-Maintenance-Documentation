@@ -79,7 +79,11 @@ class SSECompletionGate:
                 value.get('type') in ('error', 'response.failed', 'response.incomplete')):
             self.failed = True
             return True
-        if (kind in ('message_stop', 'response.completed') or payload == b'[DONE]' or
+        if payload == b'[DONE]':
+            self.completed = (self.expected_choices == 1 or
+                              self.expected_choices is not None and len(self.finished_choices) == self.expected_choices)
+            return True
+        if (kind in ('message_stop', 'response.completed') or
                 isinstance(value, dict) and value.get('type') in ('message_stop', 'response.completed')):
             self.completed = True
             return True
@@ -98,11 +102,11 @@ class SSECompletionGate:
                 return True
         return False
 
-    def feed(self, chunk):
+    def feed(self, chunk, *, final=False):
         self.pending.extend(chunk)
         ready = []
         while match := SSE_BOUNDARY.search(self.pending):
-            if match.end() == len(self.pending) and self.pending[-1] == 13:
+            if not final and match.end() == len(self.pending) and self.pending[-1] == 13:
                 break
             event = bytes(self.pending[:match.end()])
             del self.pending[:match.end()]
@@ -120,7 +124,8 @@ class SSECompletionGate:
         return ready
 
     def finish(self):
-        return bytes((self.held or b'') + self.pending)
+        ready = self.feed(b'', final=True)
+        return b''.join(ready) + bytes((self.held or b'') + self.pending)
 
 
 def unique_object(pairs):

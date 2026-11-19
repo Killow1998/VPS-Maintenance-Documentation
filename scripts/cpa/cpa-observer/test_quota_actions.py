@@ -238,6 +238,27 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(account['reason'], 'quota_identity_mismatch')
         self.obs.backend.quota.assert_not_called()
 
+    def test_unverified_legacy_quota_is_not_published_when_inventory_fails(self):
+        deadline = retry_at_after(3600)
+        old = {
+            'id': self.account, 'enabled': True, 'status': 'ok', 'stale': False,
+            'as_of': dt.datetime.now(dt.timezone.utc).isoformat(), 'retry_at': deadline,
+            'windows': {'five_hour': {'remaining_percent': 63, 'resets_at': None}}}
+        self.obs.backend.accounts.side_effect = RuntimeError('synthetic failure')
+        for source in (None, 'unverified-source'):
+            with self.subTest(source=source):
+                snapshot = dict(old)
+                if source:
+                    snapshot['source_identity'] = source
+                self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [snapshot]}))
+                with self.assertRaises(RuntimeError):
+                    self.obs.refresh_quota()
+                for admin in (False, True):
+                    account = self.obs.quota_response(admin=admin)['accounts'][0]
+                    self.assertTrue(account['stale'])
+                    self.assertEqual(account['windows'], {})
+                    self.assertEqual(account['retry_at'], deadline)
+
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()
         self.answer = 'timeout'
@@ -618,6 +639,8 @@ print(json.dumps({"fresh": fresh, "request_id": operation["request_id"]}))
         self.obs.actions.recover(entry, item)
         self.obs.backend.request.assert_not_called()
         self.assertEqual(item['routing']['recovery'], 'manual')
+        item['source_identity'] = self.obs.store.digest('quota-source:profile')
+        item['source_verified'] = True
         self.obs.store.meta("quota_snapshot", json.dumps({"accounts": [item]}))
         self.assertNotIn("resets", self.obs.quota_response()["accounts"][0])
         self.assertIn("resets", self.obs.quota_response(admin=True)["accounts"][0])

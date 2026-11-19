@@ -608,6 +608,28 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 
+    def test_batch_done_does_not_hide_missing_choice(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        self.stream_events['account-b'] = (b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+                                            b'data: [DONE]\n\n')
+        status, _, _ = self.request('/v1/completions', {'model': 'claude-test', 'prompt': ['a', 'b'],
+            'n': 1, 'stream': True}, {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+        self.assertEqual(status, 200)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
+    def test_cr_terminated_late_error_does_not_migrate(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        self.stream_events['account-b'] = (b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+                                            b'event: error\rdata: {"type":"error"}\r\r')
+        self.assertEqual(self.session_model(stream=True)[0], 200)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)
         self.assertEqual(self.calls, [{"model": "account-a/claude-test", "key": "Bearer test-client"}])
