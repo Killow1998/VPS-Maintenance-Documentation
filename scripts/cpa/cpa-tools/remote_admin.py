@@ -304,11 +304,17 @@ class Admin:
         spec = importlib.util.spec_from_file_location("cpa_quota_observer", self.j.get("observer_script", "/opt/cpa-observer/observer.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        with sqlite3.connect("file:" + self.c["database"] + "?mode=ro", uri=True, timeout=2) as connection:
-            metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('quota_snapshot','quota_status')"))
+        connection = sqlite3.connect("file:" + self.c["database"] + "?mode=ro", uri=True, timeout=2)
+        try:
+            metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('quota_snapshot','quota_status') "
+                "OR key LIKE 'quota_account_source:%' OR key LIKE 'quota_backoff:%' OR key LIKE 'quota_legacy_backoff:%'"))
+        finally:
+            connection.close()
         reader = module.Observer.__new__(module.Observer)
         reader.config = self.c
-        reader.store = SimpleNamespace(meta=lambda key: metadata.get(key))
+        reader.store = SimpleNamespace(meta=lambda key: metadata.get(key),
+            legacy_quota_backoff=lambda account: metadata.get('quota_legacy_backoff:' + account),
+            digest=lambda value: hmac.new(self.c['hmac_secret'].encode(), value.encode(), hashlib.sha256).hexdigest())
         quota = reader.quota_response()
         identities = {}
         for credential in self.files():

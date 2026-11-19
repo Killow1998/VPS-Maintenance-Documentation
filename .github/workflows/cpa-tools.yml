@@ -22,10 +22,15 @@ jobs:
         with:
           python-version: '3.11'
       - if: runner.os == 'Windows'
-        run: python -m pip install pywinpty==2.0.15
+        run: python -m pip install pywinpty==2.0.15 tzdata==2026.6
+      - run: node scripts/cpa/cpa-admin/test_web.js
       - run: python -B -m unittest discover -s scripts/cpa -p "test_quota_*.py" -v
+      - if: runner.os != 'Linux'
+        run: |
+          python -B -m unittest discover -s scripts/cpa/cpa-admin -p 'test_session_routing.py' -v
+          python -B -m unittest discover -s scripts/cpa/cpa-admin -p 'test_service.py' -v
       - if: runner.os == 'Linux'
         run: |
           python -B -m unittest discover -s scripts/cpa/cpa-admin -p 'test_*.py' -v
-          python -B -m unittest discover -s scripts/cpa/cpa-observer -p 'test_observer.py' -v
+          python -B -m unittest discover -s scripts/cpa/cpa-observer -p 'test_*.py' -v
           python -B -m unittest discover -s scripts/cpa/cpa-tools -p 'test_*.py' -v

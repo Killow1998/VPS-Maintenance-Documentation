@@ -20,11 +20,18 @@ import signal
 import sqlite3
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from zoneinfo import ZoneInfo
+import importlib.util
+
+_quota_spec = importlib.util.spec_from_file_location("cpa_quota_actions", Path(__file__).with_name("quota_actions.py"))
+_quota_module = importlib.util.module_from_spec(_quota_spec)
+_quota_spec.loader.exec_module(_quota_module)
+QuotaActions, grants = _quota_module.QuotaActions, _quota_module.grants
 
 UTC = dt.timezone.utc
 
@@ -82,6 +89,43 @@ class QuotaError(ValueError):
         self.reason, self.status, self.retry_after = reason, status, retry_after
 
 
+def retry_after_seconds(value):
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    value = str(value).strip()
+    if re.fullmatch(r"[0-9]+", value):
+        digits = value.lstrip("0") or "0"
+        # Keep extreme valid delays beyond the largest representable deadline.
+        return max(1, int(digits) if len(digits) <= 18 else 10**18)
+    try:
+        target = parsedate_to_datetime(value)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        return max(1, math.ceil((target.astimezone(UTC) - dt.datetime.now(UTC)).total_seconds()))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def response_retry_after(data):
+    retry = None
+    headers = data.get("header") or data.get("headers") or {}
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if key.lower() == "retry-after":
+                for candidate in value if isinstance(value, list) else [value]:
+                    seconds = retry_after_seconds(candidate)
+                    if seconds is not None:
+                        retry = max(retry or 0, seconds)
+    return retry
+
+
+def retry_at_after(delay):
+    try:
+        return (dt.datetime.now(UTC) + dt.timedelta(seconds=delay)).isoformat()
+    except OverflowError:
+        return dt.datetime.max.replace(tzinfo=UTC).isoformat()
+
+
 class Backend:
     def __init__(self, base, management_key):
         self.base = base.rstrip("/")
@@ -125,9 +169,10 @@ class Backend:
     def quota(self, auth_index):
         data = self.request("/v8/management/requests/api-call", {
             "auth_index": auth_index, "method": "GET",
-            "url": "https://api.anthropic.com/api/oauth/usage",
+            "url": "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
             "header": {"Authorization": "Bearer $TOKEN$",
-                       "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"}})
+                       "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json",
+                       "User-Agent": "claude-cli/2.1.321 (external, cli)"}})
         status = data.get("status_code")
         if status != 200:
             raw = data.get("body")
@@ -138,17 +183,7 @@ class Backend:
             error = body.get("error", {}) if isinstance(body, dict) else {}
             message = str(error.get("message", "")) if isinstance(error, dict) else ""
             reason = "missing_scope" if status == 403 and "user:profile" in message else "upstream_http_" + str(status)
-            retry = None
-            headers = data.get("header") or data.get("headers") or {}
-            if isinstance(headers, dict):
-                for key, value in headers.items():
-                    if key.lower() == "retry-after":
-                        value = value[0] if isinstance(value, list) and value else value
-                        try:
-                            retry = max(1, min(86400, int(value)))
-                        except (ValueError, TypeError):
-                            pass
-            raise QuotaError(reason, status, retry)
+            raise QuotaError(reason, status, response_retry_after(data))
         body = data.get("body")
         return json.loads(body) if isinstance(body, str) else body
 
@@ -215,6 +250,76 @@ class Store:
                 return value
             row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
             return row[0] if row else None
+
+    def quota_backoff(self, source, proposed=None):
+        key = "quota_backoff:" + self.digest("quota-source:" + str(source))
+        return self._latest_deadline(key, proposed)
+
+    def legacy_quota_backoff(self, account, proposed=None):
+        key = "quota_legacy_backoff:" + account
+        if proposed is None:
+            return self._latest_deadline(key)
+        proposed = stamp(proposed)
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            migrated = con.execute("SELECT value FROM metadata WHERE key=?", ("quota_legacy_consumed:" + account,)).fetchone()
+            row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            current = stamp(row[0]) if row else None
+            if (not migrated or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(stamp(migrated[0]))) and (
+                    not current or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(current)):
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, proposed))
+                current = proposed
+            return current
+
+    def bind_quota_source(self, account, source, old):
+        identity = self.digest("quota-source:" + str(source))
+        source_key = "quota_backoff:" + identity
+        pending_key = "quota_legacy_backoff:" + account
+        consumed_key = "quota_legacy_consumed:" + account
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            def get(key):
+                row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+                return stamp(row[0]) if row else None
+            def later(first, second):
+                if not first:
+                    return second
+                if not second:
+                    return first
+                return first if dt.datetime.fromisoformat(first) >= dt.datetime.fromisoformat(second) else second
+            current, pending, consumed = get(source_key), get(pending_key), get(consumed_key)
+            old_retry = stamp(old["retry_at"]) if old.get("retry_at") else None
+            if old_retry and old.get("source_identity") is None and (
+                    not consumed or dt.datetime.fromisoformat(old_retry) > dt.datetime.fromisoformat(consumed)):
+                pending = later(pending, old_retry)
+            elif old_retry and old.get("source_identity") == identity:
+                current = later(current, old_retry)
+            if pending:
+                current = later(current, pending)
+                consumed = later(consumed, pending)
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (consumed_key, consumed))
+                con.execute("DELETE FROM metadata WHERE key=?", (pending_key,))
+            if current:
+                con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (source_key, current))
+            con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", ("quota_account_source:" + account, identity))
+            return current
+
+    def _latest_deadline(self, key, proposed=None):
+        if proposed is None:
+            current = self.meta(key)
+            return stamp(current) if current else None
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            current = row[0] if row else None
+            if current:
+                current = stamp(current)
+            if proposed:
+                proposed = stamp(proposed)
+                if not current or dt.datetime.fromisoformat(proposed) > dt.datetime.fromisoformat(current):
+                    con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, proposed))
+                    current = proposed
+            return current
 
     def normalize(self, event):
         key = event.get("api_key")
@@ -441,10 +546,14 @@ def quota_windows(body):
     if not isinstance(body, dict):
         raise ValueError("invalid quota response")
     for name, value in body.items():
-        if not re.fullmatch(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?", name) or not isinstance(value, dict):
+        if name == "iguana_necktie":
+            name = "seven_day_fable"
+        if not re.fullmatch(r"(?:five_hour|seven_day)(?:_[a-z0-9_]+)?", name):
             continue
+        value = value if isinstance(value, dict) else {}
         used = value.get("utilization")
-        if not isinstance(used, (int, float)) or isinstance(used, bool) or not math.isfinite(used) or not 0 <= used <= 100:
+        if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= used <= 100 or not math.isfinite(used):
+            result[name] = {"used_percent": None, "remaining_percent": None, "resets_at": None}
             continue
         reset = value.get("resets_at")
         try:
@@ -466,6 +575,123 @@ class Observer:
         self.stop = threading.Event()
         self.auth_cache, self.rate = {}, collections.OrderedDict()
         self.lock = threading.Lock()
+        self.quota_lock = threading.Lock()
+        self.quota_last_attempt = 0.0
+        self.actions = QuotaActions(self)
+
+    def quota_source(self, entry, by_name):
+        binding = self.config.get("quota_bindings", {}).get(entry.get("name"))
+        if binding is None:
+            return entry
+        if not isinstance(binding, dict) or not binding.get("credential") or not binding.get("expected_email"):
+            raise QuotaError("invalid_quota_binding")
+        expected = binding['expected_email']
+        if not isinstance(expected, str) or not expected.strip():
+            raise QuotaError('invalid_quota_binding')
+        logical_email = entry.get('email')
+        if logical_email is not None and (not isinstance(logical_email, str) or
+                logical_email.strip() and logical_email.strip().casefold() != expected.strip().casefold()):
+            raise QuotaError('quota_identity_mismatch')
+        source = by_name.get(binding["credential"])
+        if not source or source.get("provider") != "claude" or not source.get("disabled"):
+            raise QuotaError("quota_source_must_be_disabled")
+        if str(source.get("email", "")).strip().casefold() != expected.strip().casefold():
+            raise QuotaError("quota_identity_mismatch")
+        return source
+
+    def binding_fingerprints(self, name):
+        bindings = self.config.get('quota_bindings', {})
+        if not isinstance(bindings, dict) or not isinstance(name, str) or not name:
+            raise ValueError('invalid_quota_binding')
+        value = json.dumps(bindings.get(name), sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        return self.store.digest('quota-binding-name:' + name), self.store.digest('quota-binding-value:' + value)
+
+    def source_backoff(self, source_index, account_id=None):
+        if not account_id:
+            return self.store.quota_backoff(source_index)
+        snapshot = json.loads(self.store.meta("quota_snapshot") or "{}")
+        old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
+        return self.store.bind_quota_source(account_id, source_index, old)
+
+    def migrate_known_backoffs(self, entries, previous=None):
+        previous = previous if previous is not None else json.loads(self.store.meta('quota_snapshot') or '{}')
+        for old in previous.get('accounts', []):
+            if old.get('retry_at') and not old.get('source_identity'):
+                self.store.legacy_quota_backoff(old['id'], old['retry_at'])
+        by_name = {entry.get('name'): entry for entry in entries if entry.get('name')}
+        bindings = self.config.get('quota_bindings', {})
+        sources = {binding.get('credential') for binding in bindings.values() if isinstance(binding, dict)}
+        for entry in entries:
+            if entry.get('provider') != 'claude' or entry.get('name') in sources or not entry.get('auth_index'):
+                continue
+            try:
+                source = self.quota_source(entry, by_name)
+                if source.get('auth_index'):
+                    identity = 'account-' + self.store.digest('account:' + entry['auth_index'])[:12]
+                    self.source_backoff(source['auth_index'], identity)
+                    binding = bindings.get(entry.get('name')) or {}
+                    email = binding.get('expected_email') or source.get('email')
+                    logical_email = entry.get('email')
+                    if (isinstance(email, str) and email.strip() and
+                            (logical_email is None or isinstance(logical_email, str) and
+                             (not logical_email.strip() or logical_email.strip().casefold() == email.strip().casefold()))):
+                        principal = self.store.digest('reset-principal:' + email.strip().casefold())
+                        self.store.meta('reset_account_principal:' + identity, principal)
+                    else:
+                        self.store.meta('reset_account_principal:' + identity, '')
+            except QuotaError:
+                continue
+
+    def require_source_ready(self, source_index, account_id=None):
+        retry_at = self.source_backoff(source_index, account_id)
+        if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+            raise QuotaError("quota_backoff")
+
+    def remember_backoff(self, source_index, status, retry_after):
+        if status == 429 or retry_after:
+            delay = max(120 if status == 429 else 1, retry_after or 0)
+            self.store.quota_backoff(source_index, retry_at_after(delay))
+
+    def record_response_backoff(self, source_index, data):
+        status = data.get("status_code")
+        if type(status) is int and status >= 400:
+            self.remember_backoff(source_index, status, response_retry_after(data))
+
+    def query_quota(self, source_index, account_id=None):
+        self.require_source_ready(source_index, account_id)
+        try:
+            return self.backend.quota(source_index)
+        except QuotaError as error:
+            self.remember_backoff(source_index, error.status, error.retry_after)
+            raise
+
+    def quota_control(self, data):
+        action = data.get("action")
+        if action == "read":
+            return self.quota_response(admin=True)
+        if action not in ("refresh", "redeem"):
+            raise ValueError("invalid_action")
+        if not self.quota_lock.acquire(blocking=False):
+            return {"status": "busy", "snapshot": self.quota_response(admin=True)}
+        try:
+            if action == "refresh":
+                if time.monotonic() - self.quota_last_attempt < 30:
+                    return {"status": "throttled", "snapshot": self.quota_response(admin=True)}
+                self._refresh_quota()
+                snapshot = self.quota_response(admin=True)
+                failed = [a for a in snapshot["accounts"] if a["enabled"] and a["stale"]]
+                status = "rate_limited" if any(a.get("reason") == "upstream_http_429" for a in failed) else "unavailable" if failed else "ok"
+                return {"status": status, "snapshot": snapshot}
+            operation, fresh = self.actions.redeem(data.get("account_id"), data.get("grant_id"), data.get("operation_id"), data.get("actor", "admin"), include_fresh=True)
+            # Refresh even after an ambiguous answer, but NEVER retry redemption automatically.
+            if fresh:
+                try:
+                    self._refresh_quota()
+                except Exception:
+                    self.store.meta("quota_status", "error:reset_refresh_failed")
+            return {"status": "ok", "result": operation["result"], "snapshot": self.quota_response(admin=True)}
+        finally:
+            self.quota_lock.release()
 
     def allowed_request(self, key):
         identity = self.store.client(key)
@@ -508,11 +734,17 @@ class Observer:
                 self.store.meta("collector_status", "error:" + type(error).__name__)
             self.stop.wait(self.config.get("usage_poll_seconds", 3))
 
-    def refresh_quota(self):
+    def refresh_quota(self, *, scheduled=False):
+        with self.quota_lock:
+            self._refresh_quota(scheduled=scheduled)
+
+    def _refresh_quota(self, *, scheduled=False):
+        self.quota_last_attempt = time.monotonic()
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
         accounts = []
         entries = self.backend.accounts()
+        self.migrate_known_backoffs(entries, previous)
         by_name = {entry.get("name"): entry for entry in entries if entry.get("name")}
         bindings = self.config.get("quota_bindings", {})
         sources = {binding.get("credential") for binding in bindings.values() if isinstance(binding, dict)}
@@ -528,19 +760,16 @@ class Observer:
             active = not entry.get("disabled", False)
             item = {"id": identity, "enabled": active, "status": "disabled" if not active else "unknown",
                     "windows": {}, "as_of": None, "stale": True}
+            if isinstance(entry.get('name'), str) and entry['name']:
+                item['binding_name'] = self.store.digest('quota-binding-name:' + entry['name'])
+            old = known.get(identity, {})
+            if not active:
+                item.update({k: old[k] for k in ("retry_at", "source_revision", "source_identity") if k in old})
             if active:
-                old = known.get(identity, {})
+                source_index = None
+                same_source = False
                 try:
-                    source = entry
-                    binding = bindings.get(entry.get("name"))
-                    if binding is not None:
-                        if not isinstance(binding, dict) or not binding.get("credential") or not binding.get("expected_email"):
-                            raise QuotaError("invalid_quota_binding")
-                        source = by_name.get(binding["credential"])
-                        if source is None or source.get("provider") != "claude" or not source.get("disabled"):
-                            raise QuotaError("quota_source_must_be_disabled")
-                        if str(source.get("email", "")).casefold() != str(binding["expected_email"]).casefold():
-                            raise QuotaError("quota_identity_mismatch")
+                    source = self.quota_source(entry, by_name)
                     source_index = source.get("auth_index")
                     if not source_index:
                         raise QuotaError("quota_source_missing")
@@ -548,62 +777,176 @@ class Observer:
                     # removed or changed binding after a configuration update.
                     revision = self.store.digest("quota-source:" + str(source_index) + ":" + str(source.get("updated_at", "")))
                     item["source_revision"] = revision
-                    retry_at = old.get("retry_at")
-                    if old.get("source_revision") == revision and retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
-                        item.update(windows=old.get("windows", {}), as_of=old.get("as_of"),
-                                    status=old.get("status", "unavailable"), reason=old.get("reason"), retry_at=retry_at)
+                    item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
+                    item['source_verified'] = True
+                    item['binding_name'], item['binding_revision'] = self.binding_fingerprints(entry.get('name'))
+                    same_source = (old.get("source_revision") == revision and old.get('source_verified') is True and
+                                   old.get('binding_name') == item['binding_name'] and
+                                   old.get('binding_revision') == item['binding_revision'])
+                    retry_at = self.source_backoff(source_index, identity)
+                    next_poll = old.get("next_poll_at") if scheduled else None
+                    if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+                        if same_source:
+                            item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                        item.update(status="unavailable", stale=True,
+                                    reason=old.get("reason") if same_source and old.get("reason") == "upstream_http_429" else "quota_backoff")
+                        item["retry_at"] = retry_at
+                    elif same_source and next_poll and dt.datetime.fromisoformat(next_poll) > dt.datetime.now(UTC):
+                        item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
                     else:
                         try:
-                            quota = self.backend.quota(source_index)
+                            quota = self.query_quota(source_index, identity)
                         except QuotaError as error:
-                            if error.status != 401 or not source.get("name"):
+                            if error.status != 401 or error.retry_after or not source.get("name"):
                                 raise
                             self.backend.refresh_credential(source["name"])
-                            quota = self.backend.quota(source_index)
-                        item.update(windows=quota_windows(quota), status="ok", as_of=now(), stale=False)
+                            quota = self.query_quota(source_index, identity)
+                        windows = quota_windows(quota)
+                        item.update(windows={k: v for k, v in windows.items() if v["remaining_percent"] is not None},
+                                    unknown_windows={k: v for k, v in windows.items() if v["remaining_percent"] is None},
+                                    status="ok", as_of=now(), stale=False)
+                        if not item["windows"]:
+                            item.update(status="unavailable", reason="quota_windows_unknown", stale=True)
+                        interval = old.get("poll_interval_seconds", self.config.get("quota_poll_seconds", 60)) if same_source else self.config.get("quota_poll_seconds", 60)
+                        item["poll_interval_seconds"] = interval
+                        item["next_poll_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=interval)).isoformat()
+                        item["resets"] = grants(quota)
+                        self.actions.recover(entry, item)
                 except Exception as error:
-                    same_source = old.get("source_revision") == item.get("source_revision")
                     item.update(windows=old.get("windows", {}) if same_source else {},
-                                as_of=old.get("as_of") if same_source else None, status="unavailable",
+                                as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
-                    if isinstance(error, QuotaError) and error.retry_after:
-                        item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=error.retry_after)).isoformat()
+                    if old.get("retry_at") and (not source_index or not old.get("source_identity")
+                                                or old.get("source_identity") == item.get("source_identity")):
+                        item["retry_at"] = old["retry_at"]
+                        if not source_index:
+                            item.update({k: old[k] for k in ("source_revision", "source_identity") if k in old})
+                    if same_source:
+                        item.update({k: old[k] for k in ("unknown_windows", "resets", "routing", "poll_interval_seconds") if k in old})
+                    if isinstance(error, QuotaError) and error.status == 429:
+                        interval = min(900, max(120, item.get("poll_interval_seconds", 60) * 2))
+                        item["poll_interval_seconds"] = interval
+                        delay = max(interval, error.retry_after or 0)
+                        item["retry_at"] = retry_at_after(delay)
+                        if source_index:
+                            item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
+                    elif isinstance(error, QuotaError) and error.retry_after:
+                        item["retry_at"] = retry_at_after(error.retry_after)
+                        if source_index:
+                            item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
+            # Keep stored windows numeric for older readers during a rollback.
+            unknown = item.setdefault("unknown_windows", {})
+            for name, window in list(item["windows"].items()):
+                if window.get("remaining_percent") is None:
+                    unknown[name] = item["windows"].pop(name)
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
+        enabled = [a for a in accounts if a["enabled"]]
+        self.store.meta("quota_status", "unavailable" if enabled and all(a["stale"] for a in enabled) else "partial" if any(a["stale"] for a in enabled) else "ok")
 
     def quota_worker(self):
         while not self.stop.is_set():
             try:
-                self.refresh_quota()
-                self.store.meta("quota_status", "ok")
+                self.refresh_quota(scheduled=True)
             except Exception as error:
                 self.store.meta("quota_status", "error:" + type(error).__name__)
-            self.stop.wait(self.config.get("quota_poll_seconds", 300))
+            self.stop.wait(self.config.get("quota_poll_seconds", 60))
 
-    def quota_response(self):
+    def quota_response(self, admin=False):
         data = json.loads(self.store.meta("quota_snapshot") or "{}")
         accounts = data.get("accounts", [])
-        max_age = self.config.get("quota_poll_seconds", 300) * 2 + 30
+        max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
+        backoff_active = False
+        unverified_active = False
+        bindings = self.config.get('quota_bindings', {})
+        helper_names = set()
+        if isinstance(bindings, dict):
+            helper_names = {self.store.digest('quota-binding-name:' + binding['credential'])
+                            for binding in bindings.values() if isinstance(binding, dict) and
+                            isinstance(binding.get('credential'), str) and binding['credential']}
+        current_accounts = [account for account in accounts if account.get('binding_name') not in helper_names]
+        pool_reconfigured = len(current_accounts) != len(accounts)
+        accounts = current_accounts
+        current_bindings = {self.binding_fingerprints(name)[0]: self.binding_fingerprints(name)[1]
+                            for name in bindings} if isinstance(bindings, dict) else {}
+        default_binding = self.store.digest('quota-binding-value:null') if isinstance(bindings, dict) else None
+        legacy_reset_pending = False
+        if admin:
+            with self.store.db() as con:
+                for (raw,) in con.execute("SELECT value FROM metadata WHERE key LIKE 'reset_operation:%'"):
+                    prior = json.loads(raw)
+                    if not prior.get('reset_principal') and (prior.get('result') == 'unknown' or
+                            prior.get('result') == 'preflight' and prior.get('ledger_version') != 2 and
+                            time.time() - prior.get('created', 0) < self.actions.PREFLIGHT_LEASE_SECONDS):
+                        legacy_reset_pending = True
+                        break
         for account in accounts:
             account.pop("source_revision", None)
+            snapshot_source = account.pop("source_identity", None)
+            source_verified = account.pop('source_verified', False) is True
+            binding_name = account.pop('binding_name', None)
+            binding_revision = account.pop('binding_revision', None)
+            binding_verified = bool(binding_name and binding_revision and
+                                    current_bindings.get(binding_name, default_binding) == binding_revision)
+            source_identity = self.store.meta("quota_account_source:" + account["id"]) or snapshot_source
+            retry_at = account.get("retry_at") if not snapshot_source or snapshot_source == source_identity else None
+            if not snapshot_source or not source_verified or not binding_verified or source_identity and snapshot_source != source_identity:
+                reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified or not binding_verified
+                          else 'quota_source_changed')
+                account.update(windows={}, stale=True, status="unavailable", reason=reason, as_of=None)
+                unverified_active = unverified_active or account.get('enabled', False)
+                if snapshot_source:
+                    account.pop("retry_at", None)
+                account.pop("unknown_windows", None)
+                account.pop("resets", None)
+                account.pop("routing", None)
+            legacy = self.store.legacy_quota_backoff(account["id"])
+            if legacy and (not retry_at or dt.datetime.fromisoformat(legacy) > dt.datetime.fromisoformat(retry_at)):
+                retry_at = legacy
+            if source_identity:
+                current = self.store.meta("quota_backoff:" + source_identity)
+                if current and (not retry_at or dt.datetime.fromisoformat(current) > dt.datetime.fromisoformat(retry_at)):
+                    retry_at = current
+            if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+                account.update(retry_at=retry_at, stale=True, status="unavailable",
+                               reason=account.get("reason") if account.get("reason") == "upstream_http_429" else "quota_backoff")
+                backoff_active = backoff_active or account.get("enabled", False)
+            account["windows"].update(account.pop("unknown_windows", {}))
+            if not admin:
+                account.pop("resets", None)
+                account.pop("routing", None)
+            else:
+                op = json.loads(self.store.meta("reset_operation:" + account["id"]) or "{}")
+                principal = self.store.meta('reset_account_principal:' + account['id'])
+                shared = json.loads(self.store.meta('reset_principal:' + principal) or '{}') if principal else {}
+                account["reset_pending"] = legacy_reset_pending or any(item.get('result') == 'unknown' or
+                    (item.get('result') == 'preflight' and
+                     time.time() - item.get('created', 0) < self.actions.PREFLIGHT_LEASE_SECONDS)
+                    for item in (op, shared))
             as_of = account.get("as_of")
-            if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > max_age:
+            age_limit = max(max_age, account.get("poll_interval_seconds", 0) * 2 + 30)
+            if not as_of or (dt.datetime.now(UTC) - dt.datetime.fromisoformat(as_of)).total_seconds() > age_limit:
                 account["stale"] = True
         names = sorted({w for account in accounts for w in account["windows"]})
         windows = {}
         for name in names:
-            values = [a["windows"][name]["remaining_percent"] for a in accounts if name in a["windows"] and not a["stale"]]
+            values = [a["windows"][name]["remaining_percent"] for a in accounts if name in a["windows"]
+                      and not a["stale"] and type(a["windows"][name].get("remaining_percent")) in (int, float)]
             windows[name] = {"known_accounts": len(values),
                              "remaining_percent": values[0] if len(accounts) == 1 and len(values) == 1 else None,
                              "min_remaining_percent": min(values) if values else None,
                              "max_remaining_percent": max(values) if values else None,
                              "resets_at": accounts[0]["windows"][name]["resets_at"] if len(accounts) == 1 else None}
+        query_status = self.store.meta("quota_status") or "starting"
+        if (backoff_active or unverified_active or pool_reconfigured) and query_status in ("ok", "partial", "unavailable", "starting"):
+            enabled = [a for a in accounts if a["enabled"]]
+            query_status = "unavailable" if all(a["stale"] for a in enabled) else "partial"
         return {"scope": "shared_pool", "provider": "claude", "checked_at": data.get("checked_at"),
                 "stale": not accounts or any(a["enabled"] and a["stale"] for a in accounts),
                 "accounts_total": len(accounts), "accounts_enabled": sum(a["enabled"] for a in accounts),
                 "accounts_with_fresh_quota": sum(not a["stale"] for a in accounts),
                 "windows": windows, "accounts": accounts,
-                "query_status": self.store.meta("quota_status") or "starting",
+                "query_status": query_status,
                 "unit": "percentage_of_provider_usage_window; not tokens or cash balance"}
 
 
@@ -703,7 +1046,26 @@ class Handler(BaseHTTPRequestHandler):
             self.answer(503, {"error": "backend_unavailable"})
 
     def do_POST(self):
-        self.answer(405, {"error": "method_not_allowed"})
+        observer = self.server.observer
+        if self.path != "/internal/quota":
+            return self.answer(405, {"error": "method_not_allowed"})
+        auth = self.headers.get("Authorization", "")
+        if not hmac.compare_digest(auth.encode(), ("Bearer " + observer.config["management_key"]).encode()):
+            return self.answer(401, {"error": "unauthorized"})
+        try:
+            if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
+                raise ValueError("invalid_body")
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096 or self.headers.get("Content-Type") != "application/json":
+                raise ValueError("invalid_body")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("invalid_body")
+            self.answer(200, observer.quota_control(data))
+        except ValueError:
+            self.answer(400, {"error": "invalid_reset_or_refresh"})
+        except Exception:
+            self.answer(503, {"error": "quota_control_unavailable"})
 
 
 def main():

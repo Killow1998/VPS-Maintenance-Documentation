@@ -1,5 +1,6 @@
 import copy
 import datetime as dt
+from email.utils import format_datetime
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +10,40 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from observer import Observer, QuotaError, Server, Store, now, period_bounds, quota_windows
+from observer import (Backend, Observer, QuotaError, Server, Store, now, period_bounds, quota_windows,
+                      retry_after_seconds, retry_at_after)
+
+
+class RetryAfterTests(unittest.TestCase):
+    def test_backend_parses_seconds_and_http_date_without_shortening(self):
+        backend = Backend('http://127.0.0.1:1', 'synthetic')
+        future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)
+        cases = [('172800', 172800, 172800),
+                 (format_datetime(future, usegmt=True), 259198, 259201),
+                 ('invalid', None, None),
+                 ('0', 1, 1)]
+        for header, minimum, maximum in cases:
+            with self.subTest(header=header), patch.object(backend, 'request', return_value={
+                    'status_code': 429, 'body': '{}', 'header': {'Retry-After': [header]}}):
+                with self.assertRaises(QuotaError) as error:
+                    backend.quota('synthetic')
+                actual = error.exception.retry_after
+                if minimum is None:
+                    self.assertIsNone(actual)
+                else:
+                    self.assertGreaterEqual(actual, minimum)
+                    self.assertLessEqual(actual, maximum)
+
+    def test_extreme_and_multiple_retry_after_values_remain_safe(self):
+        self.assertEqual(retry_after_seconds('000000000000000000000'), 1)
+        self.assertEqual(retry_after_seconds('9' * 5000), 10**18)
+        self.assertEqual(retry_at_after(10**18), dt.datetime.max.replace(tzinfo=dt.timezone.utc).isoformat())
+        backend = Backend('http://127.0.0.1:1', 'synthetic')
+        with patch.object(backend, 'request', return_value={'status_code': 429, 'body': '{}',
+                'header': {'Retry-After': ['120', '172800']}}):
+            with self.assertRaises(QuotaError) as error:
+                backend.quota('synthetic')
+        self.assertEqual(error.exception.retry_after, 172800)
 
 
 def event(key="test-key-a", execution="execution-a"):
@@ -229,7 +263,7 @@ class FakeBackend:
         return key in self.keys
 
     def accounts(self):
-        return [{"auth_index": "private-index", "provider": "claude", "disabled": False}]
+        return [{"name": "synthetic.json", "auth_index": "private-index", "provider": "claude", "disabled": False}]
 
     def quota(self, _):
         if self.fail_quota:
@@ -341,6 +375,31 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["accounts_with_fresh_quota"], 0)
         self.assertIsNone(body["windows"]["five_hour"]["remaining_percent"])
 
+    def test_unknown_reported_model_window_does_not_break_aggregate(self):
+        self.observer.backend.quota = lambda _: {'five_hour': {'utilization': 25},
+            'seven_day': {'utilization': 30}, 'seven_day_opus': {'utilization': None}}
+        self.observer.refresh_quota()
+        body = self.observer.quota_response()
+        self.assertIsNone(body['accounts'][0]['windows']['seven_day_opus']['remaining_percent'])
+        self.assertEqual(body['windows']['seven_day_opus']['known_accounts'], 0)
+        self.assertIsNone(body['windows']['seven_day_opus']['min_remaining_percent'])
+        stored = json.loads(self.observer.store.meta('quota_snapshot'))['accounts'][0]
+        self.assertNotIn('seven_day_opus', stored['windows'])
+        self.assertIn('seven_day_opus', stored['unknown_windows'])
+
+    def test_all_reported_unknown_and_huge_window_remain_visible(self):
+        self.observer.backend.quota = lambda _: {'seven_day': None}
+        self.observer.refresh_quota()
+        body = self.observer.quota_response()
+        self.assertIsNone(body['accounts'][0]['windows']['seven_day']['remaining_percent'])
+        self.assertEqual(body['accounts_with_fresh_quota'], 0)
+        self.observer.backend.quota = lambda _: {'five_hour': {'utilization': 20},
+                                                 'seven_day_opus': {'utilization': 10**400}}
+        self.observer.refresh_quota()
+        body = self.observer.quota_response()
+        self.assertEqual(body['accounts'][0]['windows']['five_hour']['remaining_percent'], 80)
+        self.assertIsNone(body['accounts'][0]['windows']['seven_day_opus']['remaining_percent'])
+
     def test_multiple_accounts_do_not_add_percentages(self):
         data = json.loads(self.observer.store.meta("quota_snapshot"))
         data["accounts"].append(copy.deepcopy(data["accounts"][0]))
@@ -426,6 +485,232 @@ class APITests(unittest.TestCase):
         self.observer.refresh_quota()
         self.assertEqual(len(backend.calls), before)
         self.assertIn("retry_at", self.observer.quota_response()["accounts"][0])
+
+    def test_401_with_retry_after_does_not_refresh_and_requery_early(self):
+        backend = self.paired_backend()
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError('upstream_http_401', 401, 3600)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, ['quota-index'])
+        self.assertEqual(backend.refreshes, [])
+        self.assertIsNotNone(self.observer.store.quota_backoff('quota-index'))
+
+    def test_retry_after_from_backend_persists_full_delay_and_survives_restart(self):
+        backend = self.paired_backend()
+        transport = Backend('http://127.0.0.1:1', 'synthetic')
+        def quota(index):
+            backend.calls.append(index)
+            return transport.quota(index)
+        backend.quota = quota
+        for header, minimum in [('172800', 172795), ('9' * 5000, 30000000000)]:
+            data = json.loads(self.observer.store.meta('quota_snapshot'))
+            data['accounts'][0].pop('retry_at', None)
+            self.observer.store.meta('quota_snapshot', json.dumps(data))
+            key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+            self.observer.store.meta(key, '2000-01-01T00:00:00+00:00')
+            with self.subTest(header=header[:8]), patch.object(transport, 'request', return_value={
+                    'status_code': 429, 'body': '{}', 'header': {'Retry-After': [header]}}):
+                self.observer.refresh_quota()
+                item = self.observer.quota_response(admin=True)['accounts'][0]
+                delay = (dt.datetime.fromisoformat(item['retry_at']) - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                self.assertGreaterEqual(delay, minimum)
+                before = len(backend.calls)
+                restarted = Observer(self.observer.config)
+                restarted.backend = backend
+                restarted.refresh_quota()
+                self.assertEqual(len(backend.calls), before)
+
+    def test_rate_limit_preserves_grants_and_persists_adaptive_backoff(self):
+        backend = self.paired_backend()
+        original = backend.quota
+        backend.quota = lambda index: dict(original(index), cedar_ember={"eligible": True, "grants": [{
+            "id": "test-grant", "resets_total": 1, "resets_left": 1}]})
+        self.observer.refresh_quota()
+        fresh = self.observer.quota_response(admin=True)["accounts"][0]
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError("upstream_http_429", 429, 1)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        failed = self.observer.quota_response(admin=True)["accounts"][0]
+        self.assertTrue(failed["stale"])
+        self.assertEqual(failed["resets"], fresh["resets"])
+        self.assertEqual(failed["poll_interval_seconds"], 120)
+        self.assertGreater((dt.datetime.fromisoformat(failed["retry_at"]) - dt.datetime.now(dt.timezone.utc)).total_seconds(), 115)
+        self.assertEqual(self.observer.quota_response()["query_status"], "unavailable")
+        self.assertNotIn("resets", self.observer.quota_response()["accounts"][0])
+        before = len(backend.calls)
+        restarted = Observer(self.observer.config)
+        restarted.backend = backend
+        restarted.refresh_quota()
+        self.assertEqual(len(backend.calls), before)
+        self.assertEqual(restarted.quota_response(admin=True)["accounts"][0]["resets"], fresh["resets"])
+        data = json.loads(restarted.store.meta("quota_snapshot"))
+        data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
+        restarted.store.meta("quota_snapshot", json.dumps(data))
+        key = 'quota_backoff:' + restarted.store.digest('quota-source:quota-index')
+        restarted.store.meta(key, '2000-01-01T00:00:00+00:00')
+        restarted.refresh_quota()
+        self.assertEqual(restarted.quota_response()["accounts"][0]["poll_interval_seconds"], 240)
+        data = json.loads(restarted.store.meta("quota_snapshot"))
+        data["accounts"][0]["retry_at"] = "2000-01-01T00:00:00+00:00"
+        restarted.store.meta("quota_snapshot", json.dumps(data))
+        restarted.store.meta(key, '2000-01-01T00:00:00+00:00')
+        backend.quota = original
+        restarted.refresh_quota()
+        self.assertFalse(restarted.quota_response()["stale"])
+        before = len(backend.calls)
+        restarted.refresh_quota(scheduled=True)
+        self.assertEqual(len(backend.calls), before)
+
+    def test_backoff_survives_source_metadata_change_and_disable_reenable(self):
+        backend = self.paired_backend()
+        original_accounts = backend.accounts
+        source = {'updated_at': 'first', 'disabled': False}
+        def accounts():
+            entries = original_accounts()
+            entries[0]['disabled'] = source['disabled']
+            entries[1]['updated_at'] = source['updated_at']
+            return entries
+        backend.accounts = accounts
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError('upstream_http_429', 429, 172800)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+        self.assertNotIn('quota-index', key)
+        with self.observer.store.db() as con:
+            con.execute('DELETE FROM metadata WHERE key=?', (key,))
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        self.assertIsNotNone(self.observer.store.meta(key))
+        source['updated_at'] = 'second'
+        self.observer.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+        source['disabled'] = True
+        self.observer.refresh_quota()
+        source['disabled'] = False
+        restarted = Observer(self.observer.config)
+        restarted.backend = backend
+        restarted.refresh_quota()
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_legacy_backoff_migrates_even_if_revision_changed_or_account_disabled(self):
+        for disabled_first in (False, True):
+            with self.subTest(disabled_first=disabled_first):
+                backend = self.paired_backend()
+                original_accounts = backend.accounts
+                source = {'updated_at': 'first', 'disabled': False}
+                def accounts():
+                    entries = original_accounts()
+                    entries[0]['disabled'] = source['disabled']
+                    entries[1]['updated_at'] = source['updated_at']
+                    return entries
+                backend.accounts = accounts
+                def limited(index):
+                    backend.calls.append(index)
+                    raise QuotaError('upstream_http_429', 429, 3600)
+                backend.quota = limited
+                key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+                account = 'account-' + self.observer.store.digest('account:model-index')[:12]
+                legacy_key = 'quota_legacy_backoff:' + account
+                consumed_key = 'quota_legacy_consumed:' + account
+                with self.observer.store.db() as con:
+                    con.execute('DELETE FROM metadata WHERE key IN (?,?,?)', (key, legacy_key, consumed_key))
+                self.observer.store.meta('quota_snapshot', '{}')
+                self.observer.refresh_quota()
+                self.assertEqual(len(backend.calls), 1)
+                snapshot = json.loads(self.observer.store.meta('quota_snapshot'))
+                for account in snapshot['accounts']:
+                    account.pop('source_identity', None)
+                self.observer.store.meta('quota_snapshot', json.dumps(snapshot))
+                with self.observer.store.db() as con:
+                    con.execute('DELETE FROM metadata WHERE key=?', (key,))
+                source['updated_at'] = 'second'
+                source['disabled'] = disabled_first
+                self.observer.refresh_quota()
+                source['disabled'] = False
+                self.observer.refresh_quota()
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_replacing_a_source_does_not_inherit_new_format_backoff(self):
+        backend = self.paired_backend()
+        original_accounts = backend.accounts
+        source = {'index': 'quota-index'}
+        def accounts():
+            entries = original_accounts()
+            entries[1]['auth_index'] = source['index']
+            return entries
+        backend.accounts = accounts
+        def quota(index):
+            backend.calls.append(index)
+            if index == 'quota-index':
+                raise QuotaError('upstream_http_429', 429, 3600)
+            return {'five_hour': {'utilization': 20}}
+        backend.quota = quota
+        self.observer.refresh_quota()
+        source['index'] = 'new-quota-index'
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, ['quota-index', 'new-quota-index'])
+        self.assertIsNone(self.observer.store.quota_backoff('new-quota-index'))
+
+    def test_migrated_legacy_backoff_does_not_follow_later_rebinding(self):
+        backend = self.paired_backend()
+        account = 'account-' + self.observer.store.digest('account:model-index')[:12]
+        self.observer.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': account, 'retry_at': retry_at_after(3600)}]}))
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, [])
+        original = backend.accounts
+        def rebound():
+            entries = original()
+            entries[1]['auth_index'] = 'new-quota-index'
+            return entries
+        backend.accounts = rebound
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, ['new-quota-index'])
+        self.assertIsNone(self.observer.store.quota_backoff('new-quota-index'))
+
+    def test_shared_source_migrates_all_legacy_deadlines_before_query(self):
+        backend = self.paired_backend()
+        original = backend.accounts
+        backend.accounts = lambda: [
+            {'name':'other.json', 'auth_index':'other-model', 'provider':'claude', 'disabled':False},
+            *original()]
+        self.observer.config['quota_bindings']['other.json'] = {
+            'credential':'quota.json', 'expected_email':'owner@example.invalid'}
+        account = 'account-' + self.observer.store.digest('account:model-index')[:12]
+        self.observer.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id':account, 'retry_at':retry_at_after(3600)}]}))
+        self.observer.refresh_quota()
+        self.assertEqual(backend.calls, [])
+
+    def test_rebound_source_does_not_display_previous_sources_deadline(self):
+        backend = self.paired_backend()
+        def limited(index):
+            raise QuotaError('upstream_http_429', 429, 7200 if index == 'quota-index' else 180)
+        backend.quota = limited
+        self.observer.refresh_quota()
+        account = 'account-' + self.observer.store.digest('account:model-index')[:12]
+        with self.assertRaises(QuotaError):
+            self.observer.query_quota('new-quota-index', account)
+        for admin in (False, True):
+            result = self.observer.quota_response(admin=admin)
+            retry = dt.datetime.fromisoformat(result['accounts'][0]['retry_at'])
+            self.assertLess((retry - dt.datetime.now(dt.timezone.utc)).total_seconds(), 200)
+
+    def test_manual_refresh_reports_rate_limit_and_local_throttle(self):
+        backend = self.paired_backend()
+        def limited(index):
+            raise QuotaError("upstream_http_429", 429)
+        backend.quota = limited
+        self.observer.quota_last_attempt = 0
+        self.assertEqual(self.observer.quota_control({"action": "refresh"})["status"], "rate_limited")
+        self.assertEqual(self.observer.quota_control({"action": "refresh"})["status"], "throttled")
 
 
 if __name__ == "__main__":

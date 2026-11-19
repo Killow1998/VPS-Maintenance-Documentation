@@ -1,5 +1,7 @@
 # VPS + CLIProxyAPI + Claude Code
 
+管理员网页支持官方 reset 次数、有效期和确认兑换，完整重置与 Fable 用量返还分别显示。后台按配置采集，遇到官方 429 时自动延长间隔；“刷新额度”至少间隔 30 秒，等待期间置灰并显示秒数，不能绕过官方退避。失败保留额度及 reset 旧值，不冒充实时状态；普通查询只读缓存。官方重置后不会自动清除 CPA 本地冷却，需等待冷却到期或由管理员核对状态。更新已有服务需同步 admin 与 observer companion 模块，见 [后台维护说明](../scripts/cpa/cpa-admin/README.md#既有服务修复)。不通过消耗真实 reset 验收，不覆盖用量库或 OAuth。
+
 在 Linux VPS 上部署 CLIProxyAPI（CPA），通过 Nginx 提供 HTTPS 入口，让 Claude Code 使用独立 API Key 调用模型。CPA 由 systemd 管理。
 
 服务端需要具备 sudo 权限的 Debian/Ubuntu。Python 工具统一使用 Python 3.10+，请分别检查本机和 VPS 的版本。管理员工具在 macOS、Linux 或 Windows WSL 中运行；Windows 个人查询使用 PowerShell。
@@ -414,6 +416,12 @@ $env:ANTHROPIC_AUTH_TOKEN = [System.Net.NetworkCredential]::new('', $secureKey).
 5 分钟缓存不是每隔 5 分钟固定清空：命中会刷新有效期。`1h` 缓存写入价格比 `5m` 高 60%，适合减少长停顿后的重写；持续高频使用通常选 `5m`。更换模型、上游账号或提示词前缀仍可能未命中。[缓存时长与费用](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
 
 用一次原本就要进行的调用观察 `usage.cache_creation.ephemeral_1h_input_tokens`；非零表示发生过 1 小时缓存写入。已经命中时，写入数可为零，结合缓存读取量判断，不额外发付费探测请求。observer 按上游返回的 `5m/1h` 写入量计价，不根据客户端推荐值猜测时长。CPA 透传与采集端升级见[缓存时长更新](../scripts/cpa/cpa-observer/CACHE_TTL_UPDATE.md)。[缓存用量字段](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)
+
+### 7.2 会话固定账号与切号缓存
+
+新版权限网关按新会话分配账号，同一 Key、会话和基础模型的后续请求保持原账号；认证或额度错误后在白名单内迁移，成功后不自动跳回。没有可靠会话 ID 时按 Key 与模型固定，不退回逐请求轮询。Claude Code 使用其现有 metadata；通用客户端可发送稳定的 `X-Session-ID`，不要每轮重新生成。具体识别、24 小时空闲绑定、并发与升级边界见[会话调度](../scripts/cpa/cpa-admin/README.md#会话调度)。
+
+旧轮询可能让同一上下文在 A、B 分别建立缓存，新方案减少这部分重复写入，不减少首次请求本身需要的上下文。真正迁移到未缓存的独立账号仍可能冷启动。绑定期限不等于上游缓存 TTL；总输入 token 包含缓存读取，美元估算不等于订阅额度扣减。对比正常调用中的缓存读取与 5m/1h 写入，不主动预热或为验收调用付费模型。
 
 ## 8. 验证鉴权、模型与真实生成
 

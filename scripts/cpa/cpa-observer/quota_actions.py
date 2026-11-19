@@ -1,0 +1,368 @@
+"""Claude reset grants and safe reporting of local quota cooldowns."""
+import datetime as dt
+import json
+import re
+import time
+import uuid
+
+UTC = dt.timezone.utc
+ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def future(value):
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")) > dt.datetime.now(UTC)
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def grants(body):
+    block = body.get("cedar_ember")
+    if not isinstance(block, dict) or type(block.get("eligible")) is not bool:
+        return {"status": "unknown", "grants": []}
+    result = []
+    for raw in block.get("grants", []):
+        if not isinstance(raw, dict) or not ID.fullmatch(str(raw.get("id", ""))):
+            return {"status": "unknown", "grants": []}
+        total, left = raw.get("resets_total"), raw.get("resets_left")
+        if type(total) is not int or type(left) is not int or not 0 <= left <= total:
+            return {"status": "unknown", "grants": []}
+        item = {key: raw.get(key) for key in (
+            "id", "resets_total", "resets_left", "starts_at", "ends_at", "paused",
+            "usable_now", "use_requires_limit", "gives_back_weekly", "percent_used")}
+        item["clears"] = [x for x in raw.get("clears", []) if x in
+                          ("five_hour", "seven_day", "seven_day_overage_included")]
+        # The upstream 'full' type also covers Fable-only refunds; use its scope flags.
+        item["kind"] = "fable" if raw.get("gives_back_weekly") is True else (
+            "full" if "seven_day" in item["clears"] else "session")
+        result.append(item)
+    return {"status": "ok", "eligible": block["eligible"],
+            "at_limit": block.get("at_limit") is True, "grants": result}
+
+
+def usable(status, grant):
+    percentages = grant.get("percent_used")
+    if grant.get("gives_back_weekly") and isinstance(percentages, dict) and percentages and all(v == 0 for v in percentages.values()):
+        return False
+    return (status.get("status") == "ok" and status.get("eligible") is True
+            and grant.get("usable_now") is True and not grant.get("paused")
+            and grant["resets_left"] > 0
+            and (not grant.get("ends_at") or future(grant["ends_at"]))
+            and (not grant.get("starts_at") or not future(grant["starts_at"]))
+            and (grant.get("use_requires_limit") is False or status.get("at_limit") is True))
+
+
+def recoverable(entry, windows):
+    """Report whether an account cooldown appears eligible for manual review."""
+    cooling = entry.get("cooldowns") or []
+    if not cooling or any(c.get("reason") not in ("quota", "credential_quota") for c in cooling):
+        return False
+    if any(c.get("scope") != "credential" for c in cooling):
+        return False  # Model limits cannot be reliably mapped to account usage windows.
+    # Every reported applicable account window must be known and available.
+    if not all(k in windows for k in ("five_hour", "seven_day")):
+        return False
+    return all(type(w.get("remaining_percent")) in (int, float)
+               and w["remaining_percent"] > 0 for w in windows.values())
+
+
+class QuotaActions:
+    PREFLIGHT_LEASE_SECONDS = 300
+
+    def __init__(self, observer):
+        self.observer = observer
+
+    def upstream(self, source, path, data=None):
+        if data is None:
+            self.observer.require_source_ready(source["auth_index"])
+        response = self.observer.backend.request("/v8/management/requests/api-call", {
+            "auth_index": source["auth_index"], "method": "GET" if data is None else "POST",
+            "url": "https://api.anthropic.com" + path,
+            "header": {"Authorization": "Bearer $TOKEN$", "Accept": "application/json",
+                       "Content-Type": "application/json", "anthropic-beta": "oauth-2025-04-20",
+                       "User-Agent": "claude-cli/2.1.321 (external, cli)"},
+            **({"data": json.dumps(data)} if data is not None else {})})
+        self.observer.record_response_backoff(source["auth_index"], response)
+        body = response.get("body")
+        try:
+            body = json.loads(body) if isinstance(body, str) else body
+        except ValueError:
+            body = None
+        return response.get("status_code"), body
+
+    def recover(self, entry, item):
+        item["routing"] = {"blocked": bool(entry.get("unavailable")),
+                           "retry_at": entry.get("next_retry_after"), "recovery": "unchanged"}
+        if not item.get("unknown_windows") and recoverable(entry, item["windows"]):
+            # CPA's reset is unconditional; a snapshot cannot rule out a new model cooldown.
+            item["routing"]["recovery"] = "manual"
+
+    @staticmethod
+    def _get(con, key):
+        row = con.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _put(con, key, value):
+        con.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, value))
+
+    def _reserve(self, account_id, grant_id, operation_id, actor):
+        latest_key = "reset_operation:" + account_id
+        attempt_key = "reset_attempt:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation_id
+        at = time.time()
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            legacy_raw = self._get(con, latest_key)
+            legacy = json.loads(legacy_raw or "{}")
+            if isinstance(legacy.get("id"), str) and ID.fullmatch(legacy["id"]):
+                legacy_key = "reset_operation_id:" + account_id + ":" + legacy["id"]
+                if not self._get(con, legacy_key):
+                    self._put(con, legacy_key, legacy_raw)
+            saved_raw = self._get(con, record_key)
+            if saved_raw:
+                saved = json.loads(saved_raw)
+                if saved.get("grant_id") != grant_id:
+                    raise ValueError("reset_selection_changed")
+                if saved.get("result") == "preflight" and at - saved.get("created", 0) >= self.PREFLIGHT_LEASE_SECONDS:
+                    saved["result"] = "preflight_expired"
+                    self._put(con, record_key, json.dumps(saved))
+                    if legacy.get("request_id") == saved.get("request_id"):
+                        self._put(con, latest_key, json.dumps(saved))
+                return saved, False, None
+            if legacy.get("result") == "preflight":
+                if at - legacy.get("created", 0) < self.PREFLIGHT_LEASE_SECONDS:
+                    raise ValueError("reset_pending_or_recent")
+                legacy["result"] = "preflight_expired"
+                legacy_raw = json.dumps(legacy)
+                self._put(con, latest_key, legacy_raw)
+                self._put(con, "reset_operation_id:" + account_id + ":" + legacy["id"], legacy_raw)
+            if legacy.get("result") == "unknown" or at - legacy.get("created", 0) < 30:
+                raise ValueError("reset_pending_or_recent")
+            if at - float(self._get(con, attempt_key) or "0") < 30:
+                raise ValueError("reset_preflight_rate_limited")
+            operation = {"id": operation_id, "grant_id": grant_id, "created": at, "actor": str(actor)[:120],
+                         "request_id": uuid.uuid4().hex, "result": "preflight", "ledger_version": 2}
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
+            self._put(con, attempt_key, str(at))
+        return operation, True, legacy_raw
+
+    def _begin_post(self, account_id, operation):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            source_key = 'reset_principal:' + operation.get('reset_principal', '')
+            source = json.loads(self._get(con, source_key) or '{}')
+            if (current.get("request_id") != operation["request_id"] or current.get("result") != "preflight"
+                    or source.get('request_id') != operation['request_id'] or source.get('result') != 'preflight'
+                    or time.time() - operation["created"] >= self.PREFLIGHT_LEASE_SECONDS):
+                raise ValueError("reset_preflight_expired")
+            operation["result"] = "unknown"
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
+            self._put(con, source_key, raw)
+            self._put(con, 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id'], raw)
+
+    def _claim_principal(self, account_id, source_index, expected_email, operation, aliases):
+        identity = self.observer.store.digest('reset-principal:' + expected_email.strip().casefold())
+        quota_identity = self.observer.store.digest('quota-source:' + str(source_index))
+        source_key = 'reset_principal:' + identity
+        latest_key = 'reset_operation:' + account_id
+        record_key = 'reset_operation_id:' + account_id + ':' + operation['id']
+        at = time.time()
+        with self.observer.store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            own = json.loads(self._get(con, latest_key) or '{}')
+            if (own.get('request_id') != operation['request_id'] or own.get('result') != 'preflight'
+                    or at - operation['created'] >= self.PREFLIGHT_LEASE_SECONDS):
+                raise ValueError('reset_preflight_expired')
+            principal_operation = 'reset_principal_operation:' + identity + ':' + operation['id']
+            saved = json.loads(self._get(con, principal_operation) or '{}')
+            if not saved:
+                matches = []
+                for (raw,) in con.execute("SELECT value FROM metadata WHERE key LIKE ? OR key LIKE 'reset_operation:%'",
+                                          ('reset_operation_id:%:' + operation['id'],)):
+                    prior = json.loads(raw)
+                    if prior.get('id') != operation['id'] or prior.get('request_id') == operation['request_id']:
+                        continue
+                    if prior.get('reset_principal') == identity:
+                        matches.append(prior)
+                    elif not prior.get('reset_principal'):
+                        if prior.get('ledger_version') == 2 and prior.get('result') == 'preflight':
+                            continue
+                        raise ValueError('reset_ambiguous_history')
+                if (any(not isinstance(item.get('request_id'), str) or not item['request_id'] for item in matches) or
+                        len({item.get('request_id') for item in matches}) > 1 or
+                        len({item.get('grant_id') for item in matches}) > 1):
+                    raise ValueError('reset_ambiguous_history')
+                if matches:
+                    saved = next((item for item in matches if item.get('result') == 'unknown'), matches[0])
+                    self._put(con, principal_operation, json.dumps(saved))
+            if saved:
+                if saved.get('grant_id') != operation['grant_id']:
+                    raise ValueError('reset_selection_changed')
+                if saved.get('result') == 'preflight' and at - saved.get('created', 0) >= self.PREFLIGHT_LEASE_SECONDS:
+                    saved['result'] = 'preflight_expired'
+                    self._put(con, principal_operation, json.dumps(saved))
+                return saved
+            previous = json.loads(self._get(con, source_key) or '{}')
+            prefix = 'quota_account_source:'
+            aliases = set(aliases)
+            aliases.update(row[0][len(prefix):] for row in con.execute(
+                "SELECT key FROM metadata WHERE key LIKE 'quota_account_source:%' AND value=?", (quota_identity,)))
+            for key, raw in con.execute("SELECT key,value FROM metadata WHERE key LIKE 'reset_operation:%'"):
+                prior = json.loads(raw)
+                age = at - prior.get('created', 0)
+                if (key.removeprefix('reset_operation:') != account_id and not prior.get('reset_principal')
+                        and (prior.get('result') == 'unknown' or
+                             prior.get('result') == 'preflight' and prior.get('ledger_version') != 2 and
+                             age < self.PREFLIGHT_LEASE_SECONDS)):
+                    raise ValueError('reset_unresolved_legacy')
+            candidates = [previous]
+            candidates.extend(json.loads(self._get(con, 'reset_operation:' + alias) or '{}')
+                              for alias in aliases if alias != account_id)
+            for candidate in candidates:
+                if candidate.get('result') == 'preflight' and candidate.get('ledger_version') == 2 and not candidate.get('reset_principal'):
+                    continue
+                elapsed = at - candidate.get('created', 0)
+                if (candidate.get('result') == 'unknown' or
+                        candidate.get('result') == 'preflight' and elapsed < self.PREFLIGHT_LEASE_SECONDS or
+                        candidate.get('result') and elapsed < 30):
+                    raise ValueError('reset_pending_or_recent')
+            operation['reset_principal'] = identity
+            raw = json.dumps(operation)
+            self._put(con, latest_key, raw)
+            self._put(con, record_key, raw)
+            self._put(con, source_key, raw)
+            self._put(con, principal_operation, raw)
+            for alias in aliases | {account_id}:
+                self._put(con, 'reset_account_principal:' + alias, identity)
+
+    def _finish(self, account_id, operation):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            source_key = 'reset_principal:' + operation.get('reset_principal', '')
+            source = json.loads(self._get(con, source_key) or '{}')
+            if (current.get("request_id") != operation["request_id"] or
+                    source.get('request_id') != operation['request_id']):
+                raise ValueError("reset_operation_changed")
+            raw = json.dumps(operation)
+            self._put(con, record_key, raw)
+            self._put(con, latest_key, raw)
+            self._put(con, source_key, raw)
+            self._put(con, 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id'], raw)
+
+    def _cancel_preflight(self, account_id, operation, legacy_raw, *, replay=False):
+        latest_key = "reset_operation:" + account_id
+        record_key = "reset_operation_id:" + account_id + ":" + operation["id"]
+        with self.observer.store.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = json.loads(self._get(con, latest_key) or "{}")
+            if current.get("request_id") != operation["request_id"] or current.get("result") != "preflight":
+                return
+            if operation.get('reset_principal'):
+                source_key = 'reset_principal:' + operation['reset_principal']
+                source = json.loads(self._get(con, source_key) or '{}')
+                if source.get('request_id') == operation['request_id'] and source.get('result') == 'preflight':
+                    con.execute('DELETE FROM metadata WHERE key=?', (source_key,))
+                principal_operation = 'reset_principal_operation:' + operation['reset_principal'] + ':' + operation['id']
+                saved = json.loads(self._get(con, principal_operation) or '{}')
+                if saved.get('request_id') == operation['request_id'] and saved.get('result') == 'preflight':
+                    con.execute('DELETE FROM metadata WHERE key=?', (principal_operation,))
+            con.execute("DELETE FROM metadata WHERE key=?", (record_key,))
+            attempt_key = 'reset_attempt:' + account_id
+            if replay and self._get(con, attempt_key) == str(operation['created']):
+                con.execute('DELETE FROM metadata WHERE key=?', (attempt_key,))
+            if legacy_raw is None:
+                con.execute("DELETE FROM metadata WHERE key=?", (latest_key,))
+            else:
+                self._put(con, latest_key, legacy_raw)
+
+    def redeem(self, account_id, grant_id, operation_id, actor="admin", *, include_fresh=False):
+        if not all(isinstance(v, str) and ID.fullmatch(v) for v in (account_id, grant_id, operation_id)):
+            raise ValueError("invalid_reset_selection")
+        obs = self.observer
+        operation, fresh, legacy_raw = self._reserve(account_id, grant_id, operation_id, actor)
+        if not fresh:
+            return (operation, False) if include_fresh else operation
+        try:
+            entries = obs.backend.accounts()
+            helpers = {b.get("credential") for b in obs.config.get("quota_bindings", {}).values()}
+            targets = [e for e in entries if e.get("provider") == "claude" and e.get("name") not in helpers
+                       and not e.get("disabled") and e.get("auth_index")
+                       and "account-" + obs.store.digest("account:" + e["auth_index"])[:12] == account_id]
+            if len(targets) != 1:
+                raise ValueError("account_not_available")
+            entry = targets[0]
+            by_name = {e["name"]: e for e in entries}
+            source = obs.quota_source(entry, by_name)
+            binding = obs.config.get('quota_bindings', {}).get(entry.get('name')) or {}
+            expected = binding.get('expected_email') or source.get('email')
+            if not isinstance(expected, str) or not expected.strip():
+                raise ValueError('reset_identity_unavailable')
+            logical_email = entry.get('email')
+            if logical_email is not None and (not isinstance(logical_email, str) or
+                    logical_email.strip() and logical_email.strip().casefold() != expected.strip().casefold()):
+                raise ValueError('reset_identity_mismatch')
+            aliases = []
+            for other in entries:
+                if other.get('provider') != 'claude' or other.get('name') in helpers or not other.get('auth_index'):
+                    continue
+                try:
+                    other_source = obs.quota_source(other, by_name)
+                    other_binding = obs.config.get('quota_bindings', {}).get(other.get('name')) or {}
+                    other_email = other_binding.get('expected_email') or other_source.get('email')
+                    other_id = 'account-' + obs.store.digest('account:' + other['auth_index'])[:12]
+                    if (other_source.get('auth_index') == source.get('auth_index') or
+                            isinstance(other_email, str) and other_email.strip().casefold() == expected.strip().casefold()):
+                        aliases.append(other_id)
+                except ValueError:
+                    continue
+            saved = self._claim_principal(account_id, source['auth_index'], expected, operation, aliases)
+            if saved:
+                self._cancel_preflight(account_id, operation, legacy_raw, replay=True)
+                return (saved, False) if include_fresh else saved
+            obs.migrate_known_backoffs(entries)
+            body = obs.query_quota(source["auth_index"], account_id)
+            if not isinstance(body, dict):
+                raise ValueError("reset_status_unavailable")
+            current = grants(body)
+            grant = next((g for g in current["grants"] if g["id"] == grant_id), None)
+            if not grant or not usable(current, grant):
+                raise ValueError("reset_not_usable")
+            status, profile = self.upstream(source, "/api/oauth/profile")
+            actual = profile.get('account', {}).get('email') if isinstance(profile, dict) and isinstance(profile.get('account'), dict) else None
+            if not isinstance(actual, str) or actual.strip().casefold() != expected.strip().casefold():
+                raise ValueError('reset_identity_mismatch')
+            organization = profile.get("organization", {}).get("uuid") if isinstance(profile, dict) else None
+            try:
+                organization = str(uuid.UUID(organization))
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError("reset_identity_unavailable") from None
+            if status != 200:
+                raise ValueError("reset_identity_unavailable")
+            obs.require_source_ready(source["auth_index"], account_id)
+            self._begin_post(account_id, operation)
+        except Exception:
+            self._cancel_preflight(account_id, operation, legacy_raw)
+            raise
+        try:
+            status, answer = self.upstream(source, "/api/organizations/" + organization + "/reset_rate_limits",
+                {"program": "cedar_ember", "grant_id": grant_id, "request_id": operation["request_id"]})
+            result = answer.get("result") if isinstance(answer, dict) else None
+            if status in (401, 403, 429):
+                operation["result"] = "rate_limited" if status == 429 else "auth_error"
+            elif status == 200 and result in ("reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable"):
+                operation["result"] = result
+        except Exception:
+            pass
+        self._finish(account_id, operation)
+        return (operation, True) if include_fresh else operation

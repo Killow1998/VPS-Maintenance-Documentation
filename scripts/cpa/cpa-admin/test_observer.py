@@ -28,6 +28,18 @@ class ObserverIntegrationTest(unittest.TestCase):
         class Observer(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
 
+            def do_POST(self):
+                if self.path != "/internal/quota" or self.headers.get("Authorization") != "Bearer fixture-management":
+                    self.send_error(401)
+                    return
+                self.rfile.read(int(self.headers["Content-Length"]))
+                failed = "/v1/quota" in fixture.failures
+                body = json.dumps(fixture.snapshot if not failed else {"error": "private diagnostic"}).encode()
+                self.send_response(503 if failed else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 key = self.headers.get("Authorization", "")
                 if key not in ("Bearer fixture-a", "Bearer fixture-b"):
@@ -58,6 +70,7 @@ class ObserverIntegrationTest(unittest.TestCase):
         root = Path(self.temp.name)
         config = root / "observer.json"
         config.write_text(json.dumps({"cpa_base_url": "http://127.0.0.1:8317", "port": self.observer.server_port,
+                                      "management_key": "fixture-management",
                                       "database": str(root / "unavailable-observer.sqlite"), "quota_poll_seconds": 300}))
         self.backend = Backend({"observer_config": str(config), "database": str(root / "control.sqlite"), "active": True})
         self.backend.client_keys = {"ca": "fixture-a", "cb": "fixture-b"}
@@ -80,14 +93,23 @@ class ObserverIntegrationTest(unittest.TestCase):
         self.assertFalse(Path(self.backend.c["database"]).exists())
         self.assertNotIn("fixture-a", json.dumps(state))
 
-    def test_observer_failure_is_unknown_and_does_not_disable_accounts(self):
+    def test_quota_failure_does_not_hide_independent_usage_or_disable_accounts(self):
         self.failures.add("/v1/quota")
         state = self.backend.state()
         self.assertEqual(state["quota"]["query_status"], "unavailable")
         self.assertTrue(state["accounts"][0]["enabled"])
         self.assertEqual(state["accounts"][0]["quota_reason"], "observer_unavailable")
-        self.assertIsNone(state["clients"][0]["usage"]["requests"])
+        self.assertEqual(state["clients"][0]["usage"]["requests"], 2)
+        self.assertEqual(state["collection"]["collector_status"], "ok")
         self.assertNotIn("private diagnostic", json.dumps(state))
+
+    def test_upstream_quota_backoff_does_not_hide_independent_usage(self):
+        self.snapshot['query_status'] = 'unavailable'
+        self.snapshot['stale'] = True
+        state = self.backend.state()
+        self.assertEqual(state['quota']['query_status'], 'unavailable')
+        self.assertEqual(state['clients'][0]['usage']['requests'], 2)
+        self.assertEqual(state['collection']['collector_status'], 'ok')
 
     def test_usage_failure_is_not_zero_and_does_not_hide_quota(self):
         self.failures.add("/v1/usage?period=1h")
@@ -108,6 +130,18 @@ class ObserverIntegrationTest(unittest.TestCase):
         self.assertEqual(denied["accounts"], [])
         self.assertEqual(denied["windows"], {})
         self.assertTrue(denied["stale"])
+
+    def test_public_status_uses_only_authorized_accounts(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot['query_status'] = 'partial'
+        snapshot['accounts'][1].update(stale=True, status='unavailable')
+        result = scope_quota(snapshot, {'a'})
+        self.assertEqual(result['query_status'], 'ok')
+        self.assertFalse(result['stale'])
+        self.assertEqual(scope_quota(snapshot, {'b'})['query_status'], 'unavailable')
+        self.assertEqual(scope_quota(snapshot, {'a', 'b'})['query_status'], 'partial')
+        snapshot['query_status'] = 'error:collector'
+        self.assertEqual(scope_quota(snapshot, {'a'})['query_status'], 'error:collector')
 
     def test_stale_and_unknown_values_do_not_become_fresh_aggregates(self):
         snapshot = copy.deepcopy(self.snapshot)

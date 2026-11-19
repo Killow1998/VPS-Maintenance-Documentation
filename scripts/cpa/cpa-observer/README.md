@@ -81,9 +81,89 @@ If the inference token cannot read account data, obtain a companion grant for th
 
 The source must be a disabled Claude credential with matching email. Binding supplements the existing inference credential; it never replaces its token. Source entries are excluded from logical account counts, so one model credential plus its quota helper remains one account. Email, filenames, auth indexes and internal source revisions are omitted from the public response. A mismatch fails closed and does not reuse another account's cached windows. Unbound ordinary OAuth credentials continue to use their own quota source.
 
-On upstream 401, the observer calls CPA's local `/v8/management/credentials/refresh` for only the quota source, discards the response without reading credential-bearing metadata and retries quota once. Missing scope on 403 does not trigger repeated refreshes. A 429 honors the upstream retry delay and uses cached data with its age/status. Failures report safe reasons and unknown or stale data, never a fabricated balance. Restart only the observer after changing bindings; preserve its database and HMAC secret.
+On upstream 401 without a Retry-After deadline, the observer calls CPA's local `/v8/management/credentials/refresh` for only the quota source, discards the response without reading credential-bearing metadata and retries quota once. A 401 with Retry-After waits instead. Missing scope on 403 does not trigger repeated refreshes. A 429 honors the upstream retry delay and uses cached data with its age/status. Failures report safe reasons and unknown or stale data, never a fabricated balance. Restart only the observer after changing bindings; preserve its database and HMAC secret.
 
 ## Operation
+
+### Quota refresh and official resets
+
+Install `observer.py` with sibling `quota_actions.py`. Default quota polling waits 60 seconds
+after each pass; preserve a longer existing private interval. A 429 adaptively increases the
+per-account interval to 120/240/480/900 seconds, waiting at least the upstream Retry-After.
+This interval persists in the snapshot across restarts and remains after recovery. Scheduled
+passes respect it; manual refresh can bypass a successful polling interval, but never an
+active upstream backoff. Manual refresh is coalesced and limited to one attempt per 30 seconds.
+The web button counts down if all enabled sources are waiting; another available source can
+still be refreshed. Reset preflight uses the same source backoff. Failed queries retain
+same-source quota/reset metadata marked stale, and report rate_limited/unavailable rather
+than successful refresh. Ordinary reads never query Claude. Usage collection is independent.
+
+Loopback `POST /internal/quota` requires the existing management secret. The administrator
+gateway uses read/refresh/redeem actions; downstream keys cannot use it. Public quota omits
+reset grants and routing details. Do not add a public Nginx route. Implementation follows
+[the official management center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/blob/main/src/services/api/claudeResetGrants.ts)
+and [maintainer guidance](https://github.com/router-for-me/CLIProxyAPI/issues/6507).
+
+Before an irreversible reset claim, reserve a preflight with a five-minute lease. Immediately
+before sending the POST, atomically persist its server-generated request ID and unknown outcome
+in metadata. An expired preflight may be replaced; a late worker cannot send that old request.
+Once the POST may have been sent, an unknown outcome remains blocked for manual review.
+Each account and operation ID retains its result across later claims and
+restarts; ambiguous outcomes block new claims pending review. The old version stored only the
+last operation, so older IDs cannot be reconstructed: drain in-flight operations before upgrade
+and do not replay old requests. A rollback to the old version loses per-operation protection;
+pause reset retries and inspect results. Production tests must not spend real reset grants.
+
+The bound profile credential performs official queries/redemption. CPA's cooldown reset is
+unconditional and cannot guard against concurrent model-state changes, so this observer never
+clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
+diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
+credential metadata changes and account disable/enable cycles.
+Before a reset POST, the live profile email and any email on the selected logical account must
+match the configured expected identity. A missing or mismatched identity stops the operation.
+Reservations and operation IDs are shared by the HMAC of that identity, so logical accounts and
+separate credentials for the same email cannot bypass an unresolved reset or replay a completed
+operation. The raw email and request bodies are not written to the operation ledger. An older
+unresolved record without its original principal blocks new resets globally until an administrator
+reconciles it; present-day bindings cannot establish who owned that historical operation. Avoid
+rebinding or replacing credentials during a reset: the external CPA API does not provide an atomic
+identity check and redemption in one request.
+Completed old operations that lack a recorded principal also cannot be replayed through a different
+alias using the same operation ID; inspect those ambiguous records before taking further action.
+On the first upgrade, an old snapshot without a source identity conservatively retains its
+retry deadline even if the account or credential temporarily disappears, and carries it to
+the current bound source when it returns. Known legacy deadlines are migrated before querying
+any shared source. Once migrated, the legacy deadline is consumed and is not transferred again
+if the account is later rebound to a different credential. Usage, profile and reset
+responses all preserve upstream retry deadlines; active backoff marks cached quota stale.
+After rollback, old code will not enforce the new source-level backoff, including during its
+scheduled polling. Before restoring old code, stop the observer and check the latest deadline
+in its snapshot and `quota_backoff:*` / `quota_legacy_backoff:*` metadata without publishing account identifiers. Keep
+the old observer stopped until every active deadline has passed; if the deadline cannot be
+determined, keep it stopped or retain the corrected observer instead of claiming a completed
+rollback. Pause reset operations throughout. Check whether admin quota views require the
+observer; stopping it can temporarily make those views unavailable.
+Older public quota handlers may expose administrator-only fields from a newer cached snapshot.
+Block public quota access before rollback and restore it only after verifying a fresh old-format
+snapshot, as described in [the rollback procedure](../cpa-admin/README.md#既有部署升级与验收).
+Stored windows retain numeric-only compatibility with older readers;
+unknown windows live separately in the snapshot and are combined in new API responses. An
+older reader after rollback may omit those unknown windows, but must not treat them as zero.
+An older quota snapshot without the new source and binding verification markers is hidden until
+an inventory check verifies its source. The binding fingerprint is compared with the current
+configuration, so a changed binding also hides the old balance until reverified; any applicable
+retry deadline remains in force. If inventory is unavailable after upgrade, the interface reports
+quota unavailable rather than publishing an unverified balance. Binding markers use HMACs and are
+not included in public quota responses. If a legacy snapshot has no account-name marker and the
+inventory is unavailable, an account later assigned as a helper cannot yet be identified in the
+pool counts; those counts are provisional until a successful inventory refresh.
+
+For an existing installation, back up both source files, config and owner-created consistent
+SQLite snapshots. Update admin and observer together in an idle window; restart only these
+two services, retaining CPA binary, OAuth, prices, ACL and TTL history. Rollback restores
+sources and the old polling value, retaining current databases and operation metadata. Follow
+the backoff procedure above before restarting an old observer.
+Run `python3 -B -m unittest discover -p 'test_*.py'` for usage/TTL and synthetic reset tests.
 
 Paths on the server:
 
@@ -109,7 +189,7 @@ The local `--report` command is for administrators and can summarize all client 
 
 For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart only the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. Account/recent and rolling-overview additions reuse existing columns and require no schema migration. Do not reinstall CPA, restart the forwarding node, reset usage or recreate client Keys. Never run a second usage-queue consumer for testing.
 
-After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, atomically restore the prior source and restart only observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
+After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, restore the prior source and follow the backoff procedure above before starting the old observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
 
 <a id="repair-prompt"></a>
 
@@ -158,7 +238,7 @@ R 刷新只查询两个既有只读接口。不得以客户端更新代替服务
 没有已采集记录时应返回零记录并说明历史覆盖；零记录不证明实际没有调用。
 不得补造采集前的数据，也不得用共享号池或其他 Key 的数据代替。
 
-失败时恢复原源码，只重启 observer；保留当前数据库，不用旧快照覆盖新增用量。
+失败时恢复原源码；启动旧 observer 前先按上方退避步骤确认截止时间。保留当前数据库，不用旧快照覆盖新增用量。
 数据库恢复须另行说明并获得批准。最后报告实际版本、变更文件、测试证据、
 备份位置、回滚命令和历史覆盖缺口。报告与备份留在私有位置，不上传凭据。
 ```

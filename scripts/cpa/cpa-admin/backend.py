@@ -31,6 +31,10 @@ def scope_quota(snapshot, allowed_ids):
                   accounts_total=len(accounts), accounts_enabled=sum(bool(a.get("enabled")) for a in accounts),
                   accounts_with_fresh_quota=sum(not a.get("stale", True) for a in accounts),
                   stale=not accounts or any(a.get("enabled") and a.get("stale", True) for a in accounts))
+    if result.get('query_status') in ('ok', 'partial', 'unavailable'):
+        enabled = [a for a in accounts if a.get('enabled')]
+        fresh = sum(not a.get('stale', True) for a in enabled)
+        result['query_status'] = 'unavailable' if not fresh else 'ok' if fresh == len(enabled) else 'partial'
     return result
 
 
@@ -156,7 +160,7 @@ class Backend:
         self.require_fresh()
         accounts = copy.deepcopy(accounts if accounts is not None else self.store.snapshot()["accounts"])
         try:
-            snapshot = self.quota()
+            snapshot = self.observer_control({"action": "read"})
         except Exception:
             snapshot = {"accounts": [], "checked_at": None, "query_status": "unavailable", "stale": True}
         by_id = {a["id"]: a for a in snapshot.get("accounts", [])}
@@ -165,10 +169,37 @@ class Backend:
             account.update(windows=item.get("windows", {}), stale=item.get("stale", True),
                            as_of=item.get("as_of"), quota_status=item.get("status", "unknown"),
                            quota_reason=item.get("reason") or ("observer_unavailable" if snapshot.get("query_status") == "unavailable" else None),
-                           retry_at=item.get("retry_at"))
+                           retry_at=item.get("retry_at"), resets=item.get("resets", {"status": "unknown", "grants": []}),
+                           routing=item.get("routing", {}), reset_pending=item.get("reset_pending", False))
         return {"accounts": accounts, "checked_at": snapshot.get("checked_at"),
                 "query_status": snapshot.get("query_status", "unknown"), "stale": snapshot.get("stale", True),
-                "poll_seconds": self.c.get("quota_poll_seconds", 300)}
+                "poll_seconds": self.c.get("quota_poll_seconds", 60)}
+
+    def observer_control(self, data):
+        connection = http.client.HTTPConnection("127.0.0.1", self.c.get("port", 8318), timeout=90)
+        try:
+            connection.request("POST", "/internal/quota", json.dumps(data),
+                {"Authorization": "Bearer " + self.c["management_key"], "Content-Type": "application/json"})
+            response = connection.getresponse()
+            raw = response.read(1024 * 1024 + 1)
+            if response.status != 200 or len(raw) > 1024 * 1024:
+                raise PolicyError(503, "额度操作未完成，请查看账号状态后重试。")
+            return json.loads(raw)
+        finally:
+            connection.close()
+
+    def quota_action(self, data, actor):
+        if data.get("action") == "refresh" and set(data) == {"action"}:
+            pass
+        elif data.get("action") == "redeem" and set(data) == {"action", "account_id", "grant_id", "operation_id"}:
+            self.require_fresh()
+            if data["account_id"] not in {a["id"] for a in self.store.snapshot()["accounts"] if a["enabled"]}:
+                raise PolicyError(400, "账号不可用。")
+        else:
+            raise PolicyError(400, "额度操作参数不正确。")
+        result = self.observer_control(dict(data, actor=actor))
+        return {"status": result.get("status"), "result": result.get("result"),
+                "quota": self.account_quota()}
 
     def state(self):
         self.require_fresh()
@@ -183,8 +214,6 @@ class Backend:
         for client in state["clients"]:
             counts = {"requests": None, "tokens": None, "period": "1h"}
             try:
-                if quota["query_status"] == "unavailable":
-                    raise PolicyError(503, "查询服务暂不可用。")
                 data = self.observer_get("/v1/usage?period=1h", keys[client["id"]])
                 totals = data["totals"]
                 counts.update(requests=totals.get("requests"), tokens=totals.get("total_tokens"))

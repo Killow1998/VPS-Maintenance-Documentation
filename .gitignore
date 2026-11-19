@@ -73,6 +73,8 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/cpa-observer/README.md
 !scripts/cpa/cpa-observer/cpa-observer.service
 !scripts/cpa/cpa-observer/observer.py
+!scripts/cpa/cpa-observer/quota_actions.py
+!scripts/cpa/cpa-observer/test_quota_actions.py
 !scripts/cpa/cpa-observer/prices.json
 !scripts/cpa/cpa-observer/query.py
 !scripts/cpa/cpa-observer/test_observer.py
@@ -103,6 +105,7 @@ scripts/cpa/cpa-admin/web/*
 !scripts/cpa/cpa-admin/backend.py
 !scripts/cpa/cpa-admin/server.py
 !scripts/cpa/cpa-admin/service.py
+!scripts/cpa/cpa-admin/session_routing.py
 !scripts/cpa/cpa-admin/cpa-admin.service
 !scripts/cpa/cpa-admin/deploy_remote.py
 !scripts/cpa/cpa-admin/verify_remote.py
@@ -111,6 +114,8 @@ scripts/cpa/cpa-admin/web/*
 !scripts/cpa/cpa-admin/test_deploy.py
 !scripts/cpa/cpa-admin/test_policy.py
 !scripts/cpa/cpa-admin/test_service.py
+!scripts/cpa/cpa-admin/test_session_routing.py
+!scripts/cpa/cpa-admin/test_web.js
 !scripts/cpa/cpa-admin/web/index.html
 !scripts/cpa/cpa-admin/web/style.css
 !scripts/cpa/cpa-admin/web/app.js

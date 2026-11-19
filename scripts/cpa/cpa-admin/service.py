@@ -6,9 +6,11 @@ import http.client
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 from urllib.parse import urlsplit
@@ -16,10 +18,117 @@ from urllib.parse import urlsplit
 from authentication import Authentication
 from backend import Backend
 from server import PolicyError
+from session_routing import SESSION_HEADERS, SessionRouter
 
 ROOT = Path(__file__).resolve().parent
 COOKIE = "__Secure-cpa_admin"
 MODEL_PATHS = {"/v1/messages", "/v1/messages/count_tokens", "/v1/chat/completions", "/v1/responses", "/v1/completions"}
+SESSION_HEADER_NAMES = frozenset(name.lower() for name in SESSION_HEADERS)
+SSE_BOUNDARY = re.compile(rb'(?:\r\n|\r(?!\n)|(?<!\r)\n){2}')
+SSE_BUFFER_LIMIT = 1024 * 1024
+STREAM_CHOICE_LIMIT = 4096
+
+
+def expected_stream_choices(path, body):
+    count = body.get('n', 1)
+    if type(count) is not int or count < 1:
+        return None
+    if count > STREAM_CHOICE_LIMIT:
+        return count
+    if path == '/v1/completions':
+        prompt = body.get('prompt')
+        if isinstance(prompt, str):
+            pass
+        elif isinstance(prompt, list) and prompt and all(type(token) is int for token in prompt):
+            pass
+        elif isinstance(prompt, list) and prompt and all(isinstance(p, str) or
+                isinstance(p, list) and all(type(token) is int for token in p) for p in prompt):
+            count *= len(prompt)
+        else:
+            return None
+    return count
+
+
+class SSECompletionGate:
+    """Hold terminal events until a complete backup response is bound."""
+    def __init__(self, expected_choices=1):
+        self.pending = bytearray()
+        self.held = None
+        self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= STREAM_CHOICE_LIMIT else None
+        self.finished_choices = set()
+        self.failed = False
+        self.completed = False
+
+    def terminal(self, event):
+        kind, data = '', []
+        for line in event.splitlines():
+            name, sep, value = line.partition(b':')
+            if not sep:
+                continue
+            value = value.removeprefix(b' ')
+            if name == b'event':
+                kind = value.decode('utf-8', errors='replace')
+            elif name == b'data':
+                data.append(value)
+        if kind in ('error', 'response.failed', 'response.incomplete'):
+            self.failed = True
+            return True
+        payload = b'\n'.join(data)
+        try:
+            value = json.loads(payload) if payload != b'[DONE]' else None
+        except (ValueError, UnicodeError):
+            value = None
+        if isinstance(value, dict) and (value.get('error') is not None or
+                value.get('type') in ('error', 'response.failed', 'response.incomplete')):
+            self.failed = True
+            return True
+        if payload == b'[DONE]':
+            self.completed = (self.expected_choices == 1 or
+                              self.expected_choices is not None and len(self.finished_choices) == self.expected_choices)
+            return True
+        if (kind in ('message_stop', 'response.completed') or
+                isinstance(value, dict) and value.get('type') in ('message_stop', 'response.completed')):
+            self.completed = True
+            return True
+        if not isinstance(value, dict):
+            return False
+        choices = value.get('choices')
+        if self.expected_choices and isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict) or choice.get('finish_reason') is None:
+                    continue
+                index = choice.get('index', 0 if self.expected_choices == 1 else None)
+                if type(index) is int and 0 <= index < self.expected_choices:
+                    self.finished_choices.add(index)
+            if len(self.finished_choices) == self.expected_choices:
+                self.completed = True
+                return True
+        return False
+
+    def feed(self, chunk, *, final=False):
+        self.pending.extend(chunk)
+        ready = []
+        while match := SSE_BOUNDARY.search(self.pending):
+            if not final and match.end() == len(self.pending) and self.pending[-1] == 13:
+                break
+            event = bytes(self.pending[:match.end()])
+            del self.pending[:match.end()]
+            if len(event) > SSE_BUFFER_LIMIT:
+                raise ValueError('SSE event exceeds buffer limit')
+            terminal = self.terminal(event)
+            if self.held is not None:
+                self.held.extend(event)
+            elif terminal:
+                self.held = bytearray(event)
+            else:
+                ready.append(event)
+        if len(self.pending) + (len(self.held) if self.held is not None else 0) > SSE_BUFFER_LIMIT:
+            raise ValueError('SSE buffer limit exceeded')
+        return ready
+
+    def finish(self):
+        ready = self.feed(b'', final=True)
+        return b''.join(ready) + bytes((self.held or b'') + self.pending)
 
 
 def unique_object(pairs):
@@ -37,7 +146,7 @@ class Server(ThreadingHTTPServer):
         self.backend = backend
         self.authentication = Authentication(backend.store)
         self.slots = threading.BoundedSemaphore(32)
-        self.sequence, self.sequence_lock = 0, threading.Lock()
+        self.router = SessionRouter(backend.store, backend.c["hmac_secret"])
         self.body_bytes, self.body_lock = 0, threading.Lock()
         super().__init__(address, Handler)
 
@@ -198,6 +307,8 @@ class Handler(BaseHTTPRequestHandler):
                             return self.answer(200, {"ok": True}, headers={"Set-Cookie": COOKIE + "=; Path=/admin/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
                         if path == "/admin/api/check":
                             return self.answer(200, self.backend.store.check(data.get("client_id"), data.get("account_id")))
+                        if path == "/admin/api/quota":
+                            return self.answer(200, self.backend.quota_action(data, actor))
                     elif path == "/admin/api/state":
                         return self.answer(200, self.backend.state())
                     elif path == "/admin/api/quota":
@@ -236,15 +347,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_.:\[\]()\-]{1,180}", model):
                 raise PolicyError(400, "使用不含账号前缀的模型名称。")
             base_model = re.sub(r"\([^()]*\)$", "", model)
+            expected_choices = expected_stream_choices(path, body)
+            if body.get('stream') and expected_choices is not None and expected_choices > STREAM_CHOICE_LIMIT:
+                raise PolicyError(400, '流式请求的结果数不能超过 4096。')
             with self.backend.lock:
                 candidates = [a for a in usable if base_model in self.backend.models.get(a["id"], {})]
             if not candidates:
                 raise PolicyError(400, "获准账号不支持这个模型。")
-            with self.server.sequence_lock:
-                offset = self.server.sequence % len(candidates)
-                self.server.sequence += 1
-            candidates = candidates[offset:] + candidates[:offset]
-            return self.forward_model(key, identity, body, model, candidates)
+            selection = self.server.router.select(identity, base_model, self.headers, body, candidates)
+            return self.forward_model(key, identity, body, model, selection)
         except PolicyError as error:
             self.close_connection = True
             self.answer(error.status, {"type": "error", "error": {"type": "permission_error" if error.status in (401, 403) else "api_error", "message": error.message}})
@@ -271,15 +382,20 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             con.close()
 
-    def forward_model(self, key, identity, body, model, candidates):
+    def forward_model(self, key, identity, body, model, selection):
+        candidates = selection.candidates
+        migrate = False
+        last_failure = None
         headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "Accept-Encoding": "identity"}
         for name, value in self.headers.items():
             lower = name.lower()
-            if lower in ("accept", "user-agent", "x-app") or lower.startswith(("anthropic-", "x-stainless-", "x-claude-", "x-client-")):
+            if lower in ("accept", "user-agent", "x-app") or lower in SESSION_HEADER_NAMES or lower.startswith(("anthropic-", "x-stainless-", "x-claude-", "x-client-")):
                 headers[name] = value
         for index, account in enumerate(candidates):
             # Every new attempt rechecks the committed policy. No fallback can widen its scope.
             if account["id"] not in {a["id"] for a in self.backend.allowed(identity) if a["enabled"] and a["route_ready"]}:
+                if account["id"] == selection.primary:
+                    migrate = True
                 continue
             connection = http.client.HTTPConnection(self.backend.host, self.backend.port, timeout=60)
             body["model"] = account["prefix"] + "/" + model
@@ -287,7 +403,22 @@ class Handler(BaseHTTPRequestHandler):
                 connection.request("POST", self.path, json.dumps(body, ensure_ascii=False).encode(), headers)
                 response = connection.getresponse()
                 if response.status in (401, 403, 429, 503) and index < len(candidates) - 1:
-                    response.read(1024 * 1024)
+                    migrate = migrate or (account["id"] == selection.primary and response.status in (401, 403, 429))
+                    failure_headers = {name: value for name, value in response.getheaders()
+                                       if name.lower() in ("retry-after", "request-id", "x-request-id")
+                                       or name.lower().startswith("anthropic-ratelimit-")}
+                    content_type = response.getheader("Content-Type", "application/json")
+                    try:
+                        failure_body = response.read(1024 * 1024 + 1)
+                        if len(failure_body) > 1024 * 1024:
+                            failure_body = b'{"error":{"message":"Upstream error response exceeded the safety limit"}}'
+                            content_type = "application/json"
+                        elif response.length is not None and response.length > 0:
+                            raise http.client.IncompleteRead(failure_body)
+                    except (http.client.HTTPException, OSError):
+                        failure_body = b'{"error":{"message":"Upstream error response unavailable"}}'
+                        content_type = "application/json"
+                    last_failure = (response.status, failure_body, content_type, failure_headers)
                     continue
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
@@ -302,18 +433,39 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if connection.sock:
                         connection.sock.settimeout(3600)
+                    migrating = selection.missing_bound or (account['id'] != selection.primary and migrate)
+                    sse = SSECompletionGate(expected_stream_choices(urlsplit(self.path).path, body)) if (migrating and 200 <= response.status < 300 and
+                        response.getheader('Content-Type', '').split(';', 1)[0].strip().lower() == 'text/event-stream') else None
+                    def send_chunk(data):
+                        self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")
+                        self.wfile.flush()
+                    has_body = False
                     while True:
                         chunk = response.read1(65536)
                         if not chunk:
                             break
-                        self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
-                        self.wfile.flush()
+                        has_body = True
+                        for data in sse.feed(chunk) if sse else (chunk,):
+                            send_chunk(data)
+                    if response.length is not None and response.length > 0:
+                        raise http.client.IncompleteRead(b"")
+                    last = sse.finish() if sse else b''
+                    if has_body and 200 <= response.status < 300 and (not sse or sse.completed and not sse.failed):
+                        try:
+                            self.server.router.succeeded(selection, account["id"], migrate=migrate)
+                        except sqlite3.Error as error:
+                            logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
+                    if last:
+                        send_chunk(last)
                     self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
                 except Exception:
                     self.close_connection = True
                 return
             finally:
                 connection.close()
+        if last_failure is not None:
+            return self.answer(*last_failure)
         raise PolicyError(403, "账号权限已变更，请重新请求。")
 
 
