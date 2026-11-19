@@ -57,9 +57,9 @@ def recoverable(entry, windows):
     cooling = entry.get("cooldowns") or []
     if not cooling or any(c.get("reason") not in ("quota", "credential_quota") for c in cooling):
         return False
-    if not any(c.get("scope") == "credential" for c in cooling):
-        return False  # A model-only limit may be absent from the account usage response.
-    # Every reported applicable limit must be known and available, including model windows.
+    if any(c.get("scope") != "credential" for c in cooling):
+        return False  # Model limits cannot be reliably mapped to account usage windows.
+    # Every reported applicable account window must be known and available.
     if not all(k in windows for k in ("five_hour", "seven_day")):
         return False
     return all(type(w.get("remaining_percent")) in (int, float)

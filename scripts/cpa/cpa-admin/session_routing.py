@@ -45,6 +45,7 @@ class Selection:
     primary: str
     candidates: list
     generation: str
+    missing_bound: bool
 
 
 class SessionRouter:
@@ -76,20 +77,31 @@ class SessionRouter:
             con.execute("DELETE FROM session_routes WHERE expires<=?", (at,))
             con.execute("DELETE FROM session_route_cursors WHERE expires<=?", (at,))
             row = con.execute("SELECT account_id, generation FROM session_routes WHERE client_id=? AND session_hash=? AND model=?", key).fetchone()
-            primary = row[0] if row and row[0] in by_id else None
-            generation = row[1] if primary else uuid.uuid4().hex
-            if primary is None:
+            missing_bound = bool(row and row[0] not in by_id)
+            generation = row[1] if row else uuid.uuid4().hex
+            if missing_bound:
+                # Keep the binding until a backup succeeds; concurrent requests choose the same backup.
+                seed = json.dumps([*key, ids], separators=(',', ':')).encode()
+                primary = ids[int.from_bytes(hashlib.sha256(seed).digest()[:8], 'big') % len(ids)]
+            elif row:
+                primary = row[0]
+            else:
                 cursor = con.execute("SELECT sequence FROM session_route_cursors WHERE pool_hash=?", (pool,)).fetchone()
                 sequence = cursor[0] if cursor else 0
                 primary = ids[sequence % len(ids)]
                 con.execute("INSERT OR REPLACE INTO session_route_cursors VALUES (?,?,?)", (pool, sequence + 1, at + self.ttl))
-            con.execute("INSERT OR REPLACE INTO session_routes VALUES (?,?,?,?,?,?)", (*key, primary, at + self.ttl, generation))
+            if row:
+                con.execute("UPDATE session_routes SET expires=? WHERE client_id=? AND session_hash=? AND model=?", (at + self.ttl, *key))
+            else:
+                con.execute("INSERT INTO session_routes VALUES (?,?,?,?,?,?)", (*key, primary, at + self.ttl, generation))
             con.execute("DELETE FROM session_routes WHERE rowid IN (SELECT rowid FROM session_routes ORDER BY expires DESC, rowid DESC LIMIT -1 OFFSET ?)", (self.limit,))
             con.execute("DELETE FROM session_route_cursors WHERE rowid IN (SELECT rowid FROM session_route_cursors ORDER BY expires DESC LIMIT -1 OFFSET ?)", (self.limit,))
-        return Selection(key, primary, [by_id[primary]] + [by_id[a] for a in ids if a != primary], generation)
+        return Selection(key, primary, [by_id[primary]] + [by_id[a] for a in ids if a != primary], generation, missing_bound)
 
     def succeeded(self, selection, account, *, migrate):
-        if account == selection.primary or not migrate:
+        if account == selection.primary and not selection.missing_bound:
+            return
+        if account != selection.primary and not migrate:
             return
         # A late response from an older concurrent attempt must not undo a migration.
         with self.store.db() as con:

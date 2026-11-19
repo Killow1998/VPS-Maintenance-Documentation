@@ -265,6 +265,22 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.session_model(None)[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 
+    def test_temporarily_missing_primary_migrates_only_after_success(self):
+        self.assertEqual(self.session_model()[0], 200)
+        del self.backend.models['account-a']['claude-test']
+        self.statuses['account-b'] = 503
+        self.assertEqual(self.session_model()[0], 503)
+        self.backend.models['account-a']['claude-test'] = {}
+        self.statuses.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+        del self.backend.models['account-a']['claude-test']
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+        self.backend.models['account-a']['claude-test'] = {}
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-b/claude-test')
+
     def test_claude_metadata_binds_same_session_without_headers(self):
         for _ in range(3):
             self.assertEqual(self.session_model(None, metadata={'user_id': json.dumps({'session_id': 'claude-session'})})[0], 200)

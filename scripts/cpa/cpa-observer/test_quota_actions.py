@@ -96,6 +96,20 @@ class ResetTests(unittest.TestCase):
         entry["cooldowns"].append({"scope": "model", "reason": "not_found"})
         self.assertFalse(recoverable(entry, windows))
 
+    def test_mixed_model_cooldown_is_not_cleared_without_model_proof(self):
+        entry = {"auth_index": "inference", "unavailable": True, "cooldowns": [
+            {"scope": "credential", "reason": "credential_quota"},
+            {"scope": "model", "reason": "quota", "model": "claude-opus"}]}
+        windows = {"five_hour": {"remaining_percent": 80}, "seven_day": {"remaining_percent": 70}}
+        self.assertFalse(recoverable(entry, windows))
+        self.assertFalse(recoverable(entry, dict(windows, seven_day_opus={"remaining_percent": 90})))
+        self.assertFalse(recoverable({"cooldowns": [{"reason": "quota"}]}, windows))
+        item = {"windows": windows}
+        self.obs.backend.request = Mock()
+        self.obs.actions.recover(entry, item)
+        self.obs.backend.request.assert_not_called()
+        self.assertEqual(item["routing"]["recovery"], "unchanged")
+
     def test_official_fable_window_prevents_premature_recovery(self):
         windows = quota_windows({"five_hour": {"utilization": 0}, "seven_day": {"utilization": 10},
                                  "iguana_necktie": {"utilization": 100}})

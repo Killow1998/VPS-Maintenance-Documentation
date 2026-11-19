@@ -1,5 +1,6 @@
 import copy
 import datetime as dt
+from email.utils import format_datetime
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +10,40 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from observer import Observer, QuotaError, Server, Store, now, period_bounds, quota_windows
+from observer import (Backend, Observer, QuotaError, Server, Store, now, period_bounds, quota_windows,
+                      retry_after_seconds, retry_at_after)
+
+
+class RetryAfterTests(unittest.TestCase):
+    def test_backend_parses_seconds_and_http_date_without_shortening(self):
+        backend = Backend('http://127.0.0.1:1', 'synthetic')
+        future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)
+        cases = [('172800', 172800, 172800),
+                 (format_datetime(future, usegmt=True), 259198, 259201),
+                 ('invalid', None, None),
+                 ('0', 1, 1)]
+        for header, minimum, maximum in cases:
+            with self.subTest(header=header), patch.object(backend, 'request', return_value={
+                    'status_code': 429, 'body': '{}', 'header': {'Retry-After': [header]}}):
+                with self.assertRaises(QuotaError) as error:
+                    backend.quota('synthetic')
+                actual = error.exception.retry_after
+                if minimum is None:
+                    self.assertIsNone(actual)
+                else:
+                    self.assertGreaterEqual(actual, minimum)
+                    self.assertLessEqual(actual, maximum)
+
+    def test_extreme_and_multiple_retry_after_values_remain_safe(self):
+        self.assertEqual(retry_after_seconds('000000000000000000000'), 1)
+        self.assertEqual(retry_after_seconds('9' * 5000), 10**18)
+        self.assertEqual(retry_at_after(10**18), dt.datetime.max.replace(tzinfo=dt.timezone.utc).isoformat())
+        backend = Backend('http://127.0.0.1:1', 'synthetic')
+        with patch.object(backend, 'request', return_value={'status_code': 429, 'body': '{}',
+                'header': {'Retry-After': ['120', '172800']}}):
+            with self.assertRaises(QuotaError) as error:
+                backend.quota('synthetic')
+        self.assertEqual(error.exception.retry_after, 172800)
 
 
 def event(key="test-key-a", execution="execution-a"):
@@ -426,6 +460,29 @@ class APITests(unittest.TestCase):
         self.observer.refresh_quota()
         self.assertEqual(len(backend.calls), before)
         self.assertIn("retry_at", self.observer.quota_response()["accounts"][0])
+
+    def test_retry_after_from_backend_persists_full_delay_and_survives_restart(self):
+        backend = self.paired_backend()
+        transport = Backend('http://127.0.0.1:1', 'synthetic')
+        def quota(index):
+            backend.calls.append(index)
+            return transport.quota(index)
+        backend.quota = quota
+        for header, minimum in [('172800', 172795), ('9' * 5000, 30000000000)]:
+            data = json.loads(self.observer.store.meta('quota_snapshot'))
+            data['accounts'][0].pop('retry_at', None)
+            self.observer.store.meta('quota_snapshot', json.dumps(data))
+            with self.subTest(header=header[:8]), patch.object(transport, 'request', return_value={
+                    'status_code': 429, 'body': '{}', 'header': {'Retry-After': [header]}}):
+                self.observer.refresh_quota()
+                item = self.observer.quota_response(admin=True)['accounts'][0]
+                delay = (dt.datetime.fromisoformat(item['retry_at']) - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                self.assertGreaterEqual(delay, minimum)
+                before = len(backend.calls)
+                restarted = Observer(self.observer.config)
+                restarted.backend = backend
+                restarted.refresh_quota()
+                self.assertEqual(len(backend.calls), before)
 
     def test_rate_limit_preserves_grants_and_persists_adaptive_backoff(self):
         backend = self.paired_backend()

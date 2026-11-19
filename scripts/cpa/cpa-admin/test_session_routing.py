@@ -56,6 +56,33 @@ class SessionRoutingTests(unittest.TestCase):
         self.assertEqual(set(accounts), {'a'})
         self.assertEqual(self.select('next').primary, 'b')
 
+    def test_missing_primary_preserves_binding_until_backup_succeeds(self):
+        self.assertEqual(self.select().primary, 'a')
+        temporary = self.select(candidates=[{'id': 'b'}])
+        self.assertEqual(temporary.primary, 'b')
+        self.assertEqual(self.select().primary, 'a')
+        self.router.succeeded(temporary, 'b', migrate=False)
+        self.assertEqual(self.select().primary, 'b')
+
+    def test_missing_primary_uses_stable_backup_and_cas(self):
+        self.assertEqual(self.select().primary, 'a')
+        backups = [{'id': 'b'}, {'id': 'c'}]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            selections = list(pool.map(lambda _: self.select(candidates=backups), range(24)))
+        self.assertEqual(len({selection.primary for selection in selections}), 1)
+        first, late = selections[:2]
+        self.router.succeeded(first, first.primary, migrate=False)
+        other = 'c' if first.primary == 'b' else 'b'
+        self.router.succeeded(late, other, migrate=True)
+        self.assertEqual(self.select(candidates=self.candidates + [{'id': 'c'}]).primary, first.primary)
+
+    def test_missing_primary_transient_backup_failure_does_not_migrate(self):
+        self.assertEqual(self.select().primary, 'a')
+        selection = self.select(candidates=[{'id': 'b'}, {'id': 'c'}])
+        other = next(account['id'] for account in selection.candidates if account['id'] != selection.primary)
+        self.router.succeeded(selection, other, migrate=False)
+        self.assertEqual(self.select().primary, 'a')
+
     def test_failure_migration_does_not_bounce_or_lose_concurrent_update(self):
         first = self.select()
         self.router.succeeded(first, 'b', migrate=False)

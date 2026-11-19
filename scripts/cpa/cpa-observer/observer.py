@@ -20,6 +20,7 @@ import signal
 import sqlite3
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
@@ -88,6 +89,30 @@ class QuotaError(ValueError):
         self.reason, self.status, self.retry_after = reason, status, retry_after
 
 
+def retry_after_seconds(value):
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    value = str(value).strip()
+    if re.fullmatch(r"[0-9]+", value):
+        digits = value.lstrip("0") or "0"
+        # Keep extreme valid delays beyond the largest representable deadline.
+        return max(1, int(digits) if len(digits) <= 18 else 10**18)
+    try:
+        target = parsedate_to_datetime(value)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        return max(1, math.ceil((target.astimezone(UTC) - dt.datetime.now(UTC)).total_seconds()))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def retry_at_after(delay):
+    try:
+        return (dt.datetime.now(UTC) + dt.timedelta(seconds=delay)).isoformat()
+    except OverflowError:
+        return dt.datetime.max.replace(tzinfo=UTC).isoformat()
+
+
 class Backend:
     def __init__(self, base, management_key):
         self.base = base.rstrip("/")
@@ -150,11 +175,10 @@ class Backend:
             if isinstance(headers, dict):
                 for key, value in headers.items():
                     if key.lower() == "retry-after":
-                        value = value[0] if isinstance(value, list) and value else value
-                        try:
-                            retry = max(1, min(86400, int(value)))
-                        except (ValueError, TypeError):
-                            pass
+                        for candidate in value if isinstance(value, list) else [value]:
+                            seconds = retry_after_seconds(candidate)
+                            if seconds is not None:
+                                retry = max(retry or 0, seconds)
             raise QuotaError(reason, status, retry)
         body = data.get("body")
         return json.loads(body) if isinstance(body, str) else body
@@ -626,9 +650,9 @@ class Observer:
                         interval = min(900, max(120, item.get("poll_interval_seconds", 60) * 2))
                         item["poll_interval_seconds"] = interval
                         delay = max(interval, error.retry_after or 0)
-                        item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=delay)).isoformat()
+                        item["retry_at"] = retry_at_after(delay)
                     elif isinstance(error, QuotaError) and error.retry_after:
-                        item["retry_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=error.retry_after)).isoformat()
+                        item["retry_at"] = retry_at_after(error.retry_after)
             accounts.append(item)
         self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
         enabled = [a for a in accounts if a["enabled"]]
