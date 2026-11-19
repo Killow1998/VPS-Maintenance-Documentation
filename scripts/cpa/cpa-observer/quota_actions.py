@@ -142,7 +142,7 @@ class QuotaActions:
             if at - float(self._get(con, attempt_key) or "0") < 30:
                 raise ValueError("reset_preflight_rate_limited")
             operation = {"id": operation_id, "grant_id": grant_id, "created": at, "actor": str(actor)[:120],
-                         "request_id": uuid.uuid4().hex, "result": "preflight"}
+                         "request_id": uuid.uuid4().hex, "result": "preflight", "ledger_version": 2}
             raw = json.dumps(operation)
             self._put(con, record_key, raw)
             self._put(con, latest_key, raw)
@@ -183,6 +183,26 @@ class QuotaActions:
                 raise ValueError('reset_preflight_expired')
             principal_operation = 'reset_principal_operation:' + identity + ':' + operation['id']
             saved = json.loads(self._get(con, principal_operation) or '{}')
+            if not saved:
+                matches = []
+                for (raw,) in con.execute("SELECT value FROM metadata WHERE key LIKE ? OR key LIKE 'reset_operation:%'",
+                                          ('reset_operation_id:%:' + operation['id'],)):
+                    prior = json.loads(raw)
+                    if prior.get('id') != operation['id'] or prior.get('request_id') == operation['request_id']:
+                        continue
+                    if prior.get('reset_principal') == identity:
+                        matches.append(prior)
+                    elif not prior.get('reset_principal'):
+                        if prior.get('ledger_version') == 2 and prior.get('result') == 'preflight':
+                            continue
+                        raise ValueError('reset_ambiguous_history')
+                if (any(not isinstance(item.get('request_id'), str) or not item['request_id'] for item in matches) or
+                        len({item.get('request_id') for item in matches}) > 1 or
+                        len({item.get('grant_id') for item in matches}) > 1):
+                    raise ValueError('reset_ambiguous_history')
+                if matches:
+                    saved = next((item for item in matches if item.get('result') == 'unknown'), matches[0])
+                    self._put(con, principal_operation, json.dumps(saved))
             if saved:
                 if saved.get('grant_id') != operation['grant_id']:
                     raise ValueError('reset_selection_changed')
@@ -200,12 +220,15 @@ class QuotaActions:
                 age = at - prior.get('created', 0)
                 if (key.removeprefix('reset_operation:') != account_id and not prior.get('reset_principal')
                         and (prior.get('result') == 'unknown' or
-                             prior.get('result') == 'preflight' and age < self.PREFLIGHT_LEASE_SECONDS)):
+                             prior.get('result') == 'preflight' and prior.get('ledger_version') != 2 and
+                             age < self.PREFLIGHT_LEASE_SECONDS)):
                     raise ValueError('reset_unresolved_legacy')
             candidates = [previous]
             candidates.extend(json.loads(self._get(con, 'reset_operation:' + alias) or '{}')
                               for alias in aliases if alias != account_id)
             for candidate in candidates:
+                if candidate.get('result') == 'preflight' and candidate.get('ledger_version') == 2 and not candidate.get('reset_principal'):
+                    continue
                 elapsed = at - candidate.get('created', 0)
                 if (candidate.get('result') == 'unknown' or
                         candidate.get('result') == 'preflight' and elapsed < self.PREFLIGHT_LEASE_SECONDS or

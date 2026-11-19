@@ -580,6 +580,34 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.session_model()[0], 200)
         self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
 
+    def test_sse_error_payload_and_late_error_do_not_migrate(self):
+        for event in (b'data: {"error":{"message":"synthetic"}}\n\ndata: [DONE]\n\n',
+                      b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+                      b'event: error\ndata: {"type":"error"}\n\n'):
+            with self.subTest(event=event):
+                session = str(len(self.calls))
+                self.assertEqual(self.session_model(session)[0], 200)
+                primary = self.calls[-1]['model'].split('/')[0]
+                backup = 'account-b' if primary == 'account-a' else 'account-a'
+                self.failures.add(primary)
+                self.stream_events[backup] = event
+                self.assertEqual(self.session_model(session, stream=True)[0], 200)
+                self.failures.clear()
+                self.assertEqual(self.session_model(session)[0], 200)
+                self.assertEqual(self.calls[-1]['model'].split('/')[0], primary)
+                self.stream_events.clear()
+
+    def test_incomplete_batch_stream_does_not_migrate(self):
+        self.assertEqual(self.session_model()[0], 200)
+        self.failures.add('account-a')
+        self.stream_events['account-b'] = b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+        status, _, _ = self.request('/v1/completions', {'model': 'claude-test', 'prompt': ['a', 'b'],
+            'n': 1, 'stream': True}, {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
+        self.assertEqual(status, 200)
+        self.failures.clear()
+        self.assertEqual(self.session_model()[0], 200)
+        self.assertEqual(self.calls[-1]['model'], 'account-a/claude-test')
+
     def test_gateway_uses_authorized_account_and_preserves_key_for_metering(self):
         self.assertEqual(self.model()[0], 200)
         self.assertEqual(self.calls, [{"model": "account-a/claude-test", "key": "Bearer test-client"}])

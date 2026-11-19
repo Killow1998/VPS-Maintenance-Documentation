@@ -54,6 +54,7 @@ class SSECompletionGate:
         self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= 128 else None
         self.finished_choices = set()
         self.failed = False
+        self.completed = False
 
     def terminal(self, event):
         kind, data = '', []
@@ -69,22 +70,21 @@ class SSECompletionGate:
         if kind in ('error', 'response.failed', 'response.incomplete'):
             self.failed = True
             return True
-        if kind in ('message_stop', 'response.completed'):
-            return True
         payload = b'\n'.join(data)
-        if payload == b'[DONE]':
-            return True
         try:
-            value = json.loads(payload)
+            value = json.loads(payload) if payload != b'[DONE]' else None
         except (ValueError, UnicodeError):
-            return False
-        if not isinstance(value, dict):
-            return False
-        if value.get('type') in ('error', 'response.failed', 'response.incomplete'):
+            value = None
+        if isinstance(value, dict) and (value.get('error') is not None or
+                value.get('type') in ('error', 'response.failed', 'response.incomplete')):
             self.failed = True
             return True
-        if value.get('type') in ('message_stop', 'response.completed'):
+        if (kind in ('message_stop', 'response.completed') or payload == b'[DONE]' or
+                isinstance(value, dict) and value.get('type') in ('message_stop', 'response.completed')):
+            self.completed = True
             return True
+        if not isinstance(value, dict):
+            return False
         choices = value.get('choices')
         if self.expected_choices and isinstance(choices, list):
             for choice in choices:
@@ -93,15 +93,12 @@ class SSECompletionGate:
                 index = choice.get('index', 0 if self.expected_choices == 1 else None)
                 if type(index) is int and 0 <= index < self.expected_choices:
                     self.finished_choices.add(index)
-            return len(self.finished_choices) == self.expected_choices
+            if len(self.finished_choices) == self.expected_choices:
+                self.completed = True
+                return True
         return False
 
     def feed(self, chunk):
-        if self.held is not None:
-            self.held.extend(chunk)
-            if len(self.held) > SSE_BUFFER_LIMIT:
-                raise ValueError('SSE completion exceeds buffer limit')
-            return []
         self.pending.extend(chunk)
         ready = []
         while match := SSE_BOUNDARY.search(self.pending):
@@ -111,18 +108,19 @@ class SSECompletionGate:
             del self.pending[:match.end()]
             if len(event) > SSE_BUFFER_LIMIT:
                 raise ValueError('SSE event exceeds buffer limit')
-            if self.terminal(event):
+            terminal = self.terminal(event)
+            if self.held is not None:
+                self.held.extend(event)
+            elif terminal:
                 self.held = bytearray(event)
-                self.held.extend(self.pending)
-                self.pending.clear()
-                break
-            ready.append(event)
-        if len(self.pending) > SSE_BUFFER_LIMIT or (self.held is not None and len(self.held) > SSE_BUFFER_LIMIT):
+            else:
+                ready.append(event)
+        if len(self.pending) + (len(self.held) if self.held is not None else 0) > SSE_BUFFER_LIMIT:
             raise ValueError('SSE buffer limit exceeded')
         return ready
 
     def finish(self):
-        return bytes(self.held if self.held is not None else self.pending)
+        return bytes((self.held or b'') + self.pending)
 
 
 def unique_object(pairs):
@@ -440,12 +438,13 @@ class Handler(BaseHTTPRequestHandler):
                             send_chunk(data)
                     if response.length is not None and response.length > 0:
                         raise http.client.IncompleteRead(b"")
-                    if has_body and 200 <= response.status < 300 and not (sse and sse.failed):
+                    last = sse.finish() if sse else b''
+                    if has_body and 200 <= response.status < 300 and (not sse or sse.completed and not sse.failed):
                         try:
                             self.server.router.succeeded(selection, account["id"], migrate=migrate)
                         except sqlite3.Error as error:
                             logging.getLogger(__name__).warning("session_binding_save_failed: %s", type(error).__name__)
-                    if sse and (last := sse.finish()):
+                    if last:
                         send_chunk(last)
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()

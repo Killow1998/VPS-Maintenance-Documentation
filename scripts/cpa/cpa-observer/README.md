@@ -128,6 +128,8 @@ unresolved record without its original principal blocks new resets globally unti
 reconciles it; present-day bindings cannot establish who owned that historical operation. Avoid
 rebinding or replacing credentials during a reset: the external CPA API does not provide an atomic
 identity check and redemption in one request.
+Completed old operations that lack a recorded principal also cannot be replayed through a different
+alias using the same operation ID; inspect those ambiguous records before taking further action.
 On the first upgrade, an old snapshot without a source identity conservatively retains its
 retry deadline even if the account or credential temporarily disappears, and carries it to
 the current bound source when it returns. Known legacy deadlines are migrated before querying

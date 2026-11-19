@@ -165,7 +165,7 @@ class ResetTests(unittest.TestCase):
     def test_logical_account_email_must_match_bound_identity(self):
         self.entries[0]['email'] = 'other@example.invalid'
         self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
-        with self.assertRaisesRegex(ValueError, 'reset_identity'):
+        with self.assertRaisesRegex(ValueError, 'identity_mismatch'):
             self.obs.actions.redeem(self.account, 'full-test', 'mismatched-account')
         self.assertFalse(self.spends)
 
@@ -181,6 +181,62 @@ class ResetTests(unittest.TestCase):
                 restarted.actions.redeem(other, 'different-grant', 'same-operation')
         self.assertEqual(first['request_id'], second['request_id'])
         self.assertEqual(len(self.spends), 1)
+
+    def test_old_principal_record_is_migrated_before_alias_replay(self):
+        other = self.shared_account()
+        with patch('quota_actions.time.time', return_value=10000) as clock:
+            first = self.obs.actions.redeem(self.account, 'full-test', 'old-operation')
+            key = 'reset_principal_operation:' + first['reset_principal'] + ':old-operation'
+            with self.obs.store.db() as con:
+                con.execute('DELETE FROM metadata WHERE key=?', (key,))
+            clock.return_value = 11000
+            replay = self.obs.actions.redeem(other, 'full-test', 'old-operation')
+        self.assertEqual(first['request_id'], replay['request_id'])
+        self.assertEqual(len(self.spends), 1)
+
+    def test_conflicting_old_principal_records_block_replay(self):
+        self.shared_account()
+        principal = self.obs.store.digest('reset-principal:a@example.invalid')
+        for index in (1, 2):
+            self.obs.store.meta('reset_operation_id:historical-' + str(index) + ':duplicate', json.dumps({
+                'id': 'duplicate', 'grant_id': 'full-test', 'request_id': str(index),
+                'reset_principal': principal, 'created': 1, 'result': 'reset'}))
+        with self.assertRaisesRegex(ValueError, 'reset_ambiguous_history'):
+            self.obs.actions.redeem(self.account, 'full-test', 'duplicate')
+        self.assertFalse(self.spends)
+
+    def test_completed_legacy_operation_without_principal_blocks_alias_replay(self):
+        other = self.shared_account()
+        self.obs.store.meta('reset_operation:' + self.account, json.dumps({'id': 'old-operation',
+            'grant_id': 'full-test', 'created': 1, 'request_id': 'previous', 'result': 'reset'}))
+        with self.assertRaisesRegex(ValueError, 'reset_ambiguous_history'):
+            self.obs.actions.redeem(other, 'full-test', 'old-operation')
+        self.assertFalse(self.spends)
+
+    def test_two_new_preflights_do_not_block_each_other_as_legacy(self):
+        other = self.shared_account()
+        with patch('quota_actions.time.time', return_value=10000):
+            first, _, _ = self.obs.actions._reserve(self.account, 'full-test', 'same-operation', 'admin')
+            second, _, _ = self.obs.actions._reserve(other, 'full-test', 'same-operation', 'admin')
+            aliases = [self.account, other]
+            self.assertIsNone(self.obs.actions._claim_principal(self.account, 'profile', 'a@example.invalid', first, aliases))
+            replay = self.obs.actions._claim_principal(other, 'profile', 'a@example.invalid', second, aliases)
+            self.assertEqual(first['request_id'], replay['request_id'])
+
+    def test_mismatched_logical_email_cannot_publish_other_accounts_quota(self):
+        self.entries[0]['email'] = 'other@example.invalid'
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [{
+            'id': self.account, 'enabled': True, 'status': 'ok', 'stale': False,
+            'windows': {'five_hour': {'remaining_percent': 63, 'resets_at': None}}}]}))
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota()
+        account = self.obs.quota_response()['accounts'][0]
+        self.assertTrue(account['stale'])
+        self.assertEqual(account['windows'], {})
+        self.assertEqual(account['reason'], 'quota_identity_mismatch')
+        self.obs.backend.quota.assert_not_called()
 
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()

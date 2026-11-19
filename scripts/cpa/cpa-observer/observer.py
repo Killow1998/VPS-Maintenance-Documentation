@@ -585,10 +585,17 @@ class Observer:
             return entry
         if not isinstance(binding, dict) or not binding.get("credential") or not binding.get("expected_email"):
             raise QuotaError("invalid_quota_binding")
+        expected = binding['expected_email']
+        if not isinstance(expected, str) or not expected.strip():
+            raise QuotaError('invalid_quota_binding')
+        logical_email = entry.get('email')
+        if logical_email is not None and (not isinstance(logical_email, str) or
+                logical_email.strip() and logical_email.strip().casefold() != expected.strip().casefold()):
+            raise QuotaError('quota_identity_mismatch')
         source = by_name.get(binding["credential"])
         if not source or source.get("provider") != "claude" or not source.get("disabled"):
             raise QuotaError("quota_source_must_be_disabled")
-        if str(source.get("email", "")).casefold() != binding["expected_email"].casefold():
+        if str(source.get("email", "")).strip().casefold() != expected.strip().casefold():
             raise QuotaError("quota_identity_mismatch")
         return source
 
@@ -792,7 +799,7 @@ class Observer:
                         item["resets"] = grants(quota)
                         self.actions.recover(entry, item)
                 except Exception as error:
-                    same_source = old.get("source_revision") == item.get("source_revision")
+                    same_source = bool(item.get('source_revision') and old.get('source_revision') == item['source_revision'])
                     item.update(windows=old.get("windows", {}) if same_source else {},
                                 as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
@@ -843,7 +850,7 @@ class Observer:
                 for (raw,) in con.execute("SELECT value FROM metadata WHERE key LIKE 'reset_operation:%'"):
                     prior = json.loads(raw)
                     if not prior.get('reset_principal') and (prior.get('result') == 'unknown' or
-                            prior.get('result') == 'preflight' and
+                            prior.get('result') == 'preflight' and prior.get('ledger_version') != 2 and
                             time.time() - prior.get('created', 0) < self.actions.PREFLIGHT_LEASE_SECONDS):
                         legacy_reset_pending = True
                         break
