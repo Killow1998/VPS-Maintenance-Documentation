@@ -845,6 +845,7 @@ class Observer:
         accounts = data.get("accounts", [])
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         backoff_active = False
+        unverified_active = False
         legacy_reset_pending = False
         if admin:
             with self.store.db() as con:
@@ -865,6 +866,7 @@ class Observer:
                 reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified
                           else 'quota_source_changed')
                 account.update(windows={}, stale=True, status="unavailable", reason=reason, as_of=None)
+                unverified_active = unverified_active or account.get('enabled', False)
                 if snapshot_source:
                     account.pop("retry_at", None)
                 account.pop("unknown_windows", None)
@@ -908,7 +910,7 @@ class Observer:
                              "max_remaining_percent": max(values) if values else None,
                              "resets_at": accounts[0]["windows"][name]["resets_at"] if len(accounts) == 1 else None}
         query_status = self.store.meta("quota_status") or "starting"
-        if backoff_active and query_status in ("ok", "partial", "unavailable", "starting"):
+        if (backoff_active or unverified_active) and query_status in ("ok", "partial", "unavailable", "starting"):
             enabled = [a for a in accounts if a["enabled"]]
             query_status = "unavailable" if all(a["stale"] for a in enabled) else "partial"
         return {"scope": "shared_pool", "provider": "claude", "checked_at": data.get("checked_at"),

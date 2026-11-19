@@ -259,6 +259,16 @@ class ResetTests(unittest.TestCase):
                     self.assertEqual(account['windows'], {})
                     self.assertEqual(account['retry_at'], deadline)
 
+    def test_hidden_legacy_quota_is_not_reported_as_ok(self):
+        self.obs.store.meta('quota_status', 'ok')
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [{
+            'id': self.account, 'enabled': True, 'status': 'ok', 'stale': False,
+            'as_of': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'windows': {'five_hour': {'remaining_percent': 63, 'resets_at': None}}}]}))
+        response = self.obs.quota_response()
+        self.assertEqual(response['query_status'], 'unavailable')
+        self.assertEqual(response['accounts'][0]['windows'], {})
+
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()
         self.answer = 'timeout'
