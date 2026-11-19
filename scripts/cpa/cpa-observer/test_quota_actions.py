@@ -168,6 +168,17 @@ class ResetTests(unittest.TestCase):
         self.obs.backend.request.assert_not_called()
         self.assertFalse(self.spends)
 
+    def test_legacy_backoff_survives_temporary_missing_account(self):
+        self.obs.store.meta('quota_snapshot', json.dumps({'accounts': [
+            {'id': self.account, 'retry_at': retry_at_after(3600), 'windows': {}, 'stale': True}]}))
+        self.obs.backend.accounts.return_value = []
+        self.obs.refresh_quota()
+        self.obs.backend.accounts.return_value = copy.deepcopy(self.entries)
+        with self.assertRaises(QuotaError):
+            self.obs.actions.redeem(self.account, 'full-test', 'after-account-returned')
+        self.obs.backend.request.assert_not_called()
+        self.assertFalse(self.spends)
+
     def test_reset_preflight_429_persists_retry_after_without_spending(self):
         original = self.obs.backend.request.side_effect
         def limited(path, data):

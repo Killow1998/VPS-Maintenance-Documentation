@@ -235,13 +235,13 @@ async function refreshQuota(manual = false) {
     for (const account of state.accounts) {
       const current = byId.get(account.id);
       if (!current) {
-        inventoryChanged ||= account.enabled || account.route_ready;
-        account.enabled = false; account.route_ready = false; account.stale = true;
+        inventoryChanged = true;
         continue;
       }
       inventoryChanged ||= ["enabled", "route_ready", "name", "plan"].some((field) => account[field] !== current[field]);
       Object.assign(account, current);
     }
+    state.accounts = state.accounts.filter((account) => byId.has(account.id));
     for (const account of snapshot.accounts) {
       if (!state.accounts.some((old) => old.id === account.id)) {
         state.accounts.push({...account});

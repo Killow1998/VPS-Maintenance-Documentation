@@ -70,7 +70,7 @@ vm.runInContext(`(async () => {
   const updated = [{...state.accounts[0]}, {...state.accounts[1], enabled:true, stale:false},
     {id:'c', name:'C', plan:'Claude', enabled:true, stale:false, windows:{}, resets:{}, routing:{}}];
   request = async (path) => path === '/api/state'
-    ? {accounts:updated, clients:[], revision:2, mode:'live', enforcement:'enforced', quota:{}, audit:[]}
+    ? {accounts:structuredClone(updated), clients:[], revision:2, mode:'live', enforcement:'enforced', quota:{}, audit:[]}
     : {accounts:updated, query_status:'partial'};
   renderMetrics = renderMatrix = renderSelects = render = () => {};
   await refreshQuota(false);
@@ -78,12 +78,19 @@ vm.runInContext(`(async () => {
   assert.equal(state.accounts.some((a) => a.id === 'c'), true);
   assert.equal(state.revision, 2);
   assert.equal(document.getElementById('quota-refresh').disabled, false);
+  state.accounts.push({id:'removed', name:'Removed', plan:'Claude', enabled:false, route_ready:false, windows:{}});
+  request = async (path) => path === '/api/state'
+    ? {accounts:structuredClone(updated), clients:[], revision:3, mode:'live', enforcement:'enforced', quota:{}, audit:[]}
+    : {accounts:updated, query_status:'partial'};
+  await refreshQuota(false);
+  assert.equal(state.accounts.some((a) => a.id === 'removed'), false);
+  assert.equal(state.revision, 3);
   state.clients = [{id:'k', enabled:true, account_ids:[]}];
   draft = [{id:'k', enabled:true, account_ids:['a']}];
   const another = [...updated, {id:'d', name:'D', plan:'Claude', enabled:true, windows:{}, resets:{}, routing:{}}];
   request = async () => ({accounts:another, query_status:'partial'});
   await refreshQuota(false);
-  assert.equal(state.revision, 2);
+  assert.equal(state.revision, 3);
   assert.equal(draft[0].account_ids[0], 'a');
   assert.equal(document.getElementById('save').disabled, true);
 })()`, context, {filename: file, timeout: 5000}).then(() => {

@@ -253,6 +253,12 @@ class Store:
 
     def quota_backoff(self, source, proposed=None):
         key = "quota_backoff:" + self.digest("quota-source:" + str(source))
+        return self._latest_deadline(key, proposed)
+
+    def legacy_quota_backoff(self, account, proposed=None):
+        return self._latest_deadline("quota_legacy_backoff:" + account, proposed)
+
+    def _latest_deadline(self, key, proposed=None):
         if proposed is None:
             current = self.meta(key)
             return stamp(current) if current else None
@@ -547,6 +553,11 @@ class Observer:
             old = next((a for a in snapshot.get("accounts", []) if a.get("id") == account_id), {})
             identity = self.store.digest("quota-source:" + str(source_index))
             self.store.meta("quota_account_source:" + account_id, identity)
+            if old.get("retry_at") and not old.get("source_identity"):
+                self.store.legacy_quota_backoff(account_id, old["retry_at"])
+            legacy = self.store.legacy_quota_backoff(account_id)
+            if legacy and dt.datetime.fromisoformat(legacy) > dt.datetime.now(UTC):
+                retry_at = self.store.quota_backoff(source_index, legacy)
             if old.get("retry_at") and old.get("source_identity") in (None, identity):
                 retry_at = self.store.quota_backoff(source_index, old["retry_at"])
         return retry_at
@@ -650,6 +661,9 @@ class Observer:
         self.quota_last_attempt = time.monotonic()
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
+        for identity, old in known.items():
+            if old.get("retry_at") and not old.get("source_identity"):
+                self.store.legacy_quota_backoff(identity, old["retry_at"])
         accounts = []
         entries = self.backend.accounts()
         by_name = {entry.get("name"): entry for entry in entries if entry.get("name")}

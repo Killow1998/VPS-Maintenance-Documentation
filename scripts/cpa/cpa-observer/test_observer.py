@@ -616,8 +616,10 @@ class APITests(unittest.TestCase):
                     raise QuotaError('upstream_http_429', 429, 3600)
                 backend.quota = limited
                 key = 'quota_backoff:' + self.observer.store.digest('quota-source:quota-index')
+                account = 'account-' + self.observer.store.digest('account:model-index')[:12]
+                legacy_key = 'quota_legacy_backoff:' + account
                 with self.observer.store.db() as con:
-                    con.execute('DELETE FROM metadata WHERE key=?', (key,))
+                    con.execute('DELETE FROM metadata WHERE key IN (?,?)', (key, legacy_key))
                 self.observer.store.meta('quota_snapshot', '{}')
                 self.observer.refresh_quota()
                 self.assertEqual(len(backend.calls), 1)

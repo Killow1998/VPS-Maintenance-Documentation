@@ -119,13 +119,14 @@ unconditional and cannot guard against concurrent model-state changes, so this o
 clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
 diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
 credential metadata changes and account disable/enable cycles.
-On the first upgrade, an old snapshot without a source identity conservatively carries its
-retry deadline to the current bound source, even if its revision changed. Later source changes
+On the first upgrade, an old snapshot without a source identity conservatively retains its
+retry deadline even if the account or credential temporarily disappears, and carries it to
+the current bound source when it returns. Later source changes
 do not transfer a new-format deadline to a different credential. Usage, profile and reset
 responses all preserve upstream retry deadlines; active backoff marks cached quota stale.
 After rollback, old code will not enforce the new source-level backoff, including during its
 scheduled polling. Before restoring old code, stop the observer and check the latest deadline
-in its snapshot and `quota_backoff:*` metadata without publishing account identifiers. Keep
+in its snapshot and `quota_backoff:*` / `quota_legacy_backoff:*` metadata without publishing account identifiers. Keep
 the old observer stopped until every active deadline has passed; if the deadline cannot be
 determined, keep it stopped or retain the corrected observer instead of claiming a completed
 rollback. Pause reset operations throughout. Check whether admin quota views require the
@@ -165,7 +166,7 @@ The local `--report` command is for administrators and can summarize all client 
 
 For an existing installation, back up the current source and a consistent SQLite snapshot, replace the reviewed `observer.py` atomically and restart only the existing observer unit. Preserve its HMAC secret, database and reverse-proxy routes. Account/recent and rolling-overview additions reuse existing columns and require no schema migration. Do not reinstall CPA, restart the forwarding node, reset usage or recreate client Keys. Never run a second usage-queue consumer for testing.
 
-After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, atomically restore the prior source and restart only observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
+After the restart, verify `/healthz` locally, then authenticate as an existing client and request `period=overview`, a legacy day query, a rolling detail query, and `/v1/quota`. The overview must contain exactly four ordered windows and no other client's records. Check collection resumes and retained history remains; a new observation may arrive during verification, so an unchanged row count is not required. On failure, restore the prior source and follow the backoff procedure above before starting the old observer. Keep the database in place to preserve observations collected after the source backup; database recovery is a separate decision, not part of routine source rollback. A repository update alone does not upgrade a running VPS. Old observers may return 400 for overview; clients must report this rather than substitute calendar-month data.
 
 <a id="repair-prompt"></a>
 
@@ -214,7 +215,7 @@ R 刷新只查询两个既有只读接口。不得以客户端更新代替服务
 没有已采集记录时应返回零记录并说明历史覆盖；零记录不证明实际没有调用。
 不得补造采集前的数据，也不得用共享号池或其他 Key 的数据代替。
 
-失败时恢复原源码，只重启 observer；保留当前数据库，不用旧快照覆盖新增用量。
+失败时恢复原源码；启动旧 observer 前先按上方退避步骤确认截止时间。保留当前数据库，不用旧快照覆盖新增用量。
 数据库恢复须另行说明并获得批准。最后报告实际版本、变更文件、测试证据、
 备份位置、回滚命令和历史覆盖缺口。报告与备份留在私有位置，不上传凭据。
 ```
