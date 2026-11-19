@@ -1,5 +1,7 @@
 import os
 import datetime as dt
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import sqlite3
@@ -33,6 +35,34 @@ class QuotaSnapshotTests(unittest.TestCase):
                 result = admin.pool_snapshot()
             self.assertEqual(result['quota']['accounts'][0]['retry_at'], deadline)
             self.assertTrue(result['quota']['accounts'][0]['stale'])
+
+    def test_verified_snapshot_is_visible_with_current_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / 'usage.sqlite'
+            secret = 'fixture'
+            binding = {'credential': 'helper', 'expected_email': 'a@example.invalid'}
+            def digest(value):
+                return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
+            value = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+            account = {'id': 'account-one', 'enabled': True, 'status': 'ok', 'stale': False,
+                'as_of': dt.datetime.now(dt.timezone.utc).isoformat(), 'source_identity': 'source-one',
+                'source_verified': True, 'binding_name': digest('quota-binding-name:main'),
+                'binding_revision': digest('quota-binding-value:' + value),
+                'windows': {'five_hour': {'remaining_percent': 80, 'resets_at': None}}}
+            with sqlite3.connect(db) as con:
+                con.execute('CREATE TABLE metadata (key TEXT PRIMARY KEY,value TEXT)')
+                con.executemany('INSERT INTO metadata VALUES (?,?)', [
+                    ('quota_snapshot', json.dumps({'accounts': [account]})), ('quota_status', 'ok')])
+            con.close()
+            observer = Path(__file__).resolve().parent.parent / 'cpa-observer' / 'observer.py'
+            admin = Admin.__new__(Admin)
+            admin.c = {'database': str(db), 'hmac_secret': secret, 'quota_bindings': {'main': binding}}
+            admin.j = {'observer_script': str(observer)}
+            with patch.object(admin, 'files', return_value=[]), patch.object(sys, 'path', [str(observer.parent), *sys.path]):
+                result = admin.pool_snapshot()['quota']['accounts'][0]
+            self.assertEqual(result['windows']['five_hour']['remaining_percent'], 80)
+            self.assertNotIn('binding_name', result)
+            self.assertNotIn('binding_revision', result)
 
 
 @unittest.skipUnless(os.name == 'posix', 'Administrator runtime is Linux/WSL/macOS')

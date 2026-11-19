@@ -58,6 +58,14 @@ class SSECompletionGateTest(unittest.TestCase):
         self.assertEqual(expected_stream_choices('/v1/completions', {'prompt': [[1], [2]], 'n': 1}), 2)
         self.assertIsNone(expected_stream_choices('/v1/completions', {'prompt': [], 'n': 1}))
 
+    def test_more_than_128_choices_are_tracked(self):
+        self.assertEqual(expected_stream_choices('/v1/completions', {'prompt': ['a'] * 129}), 129)
+        gate = SSECompletionGate(expected_choices=129)
+        for index in range(129):
+            gate.feed(('data: {"choices":[{"index":%d,"finish_reason":"stop"}]}\n\n' % index).encode())
+        gate.feed(b'data: [DONE]\n\n')
+        self.assertTrue(gate.completed)
+
 
 class AuthenticationTest(unittest.TestCase):
     def setUp(self):
@@ -570,6 +578,11 @@ class GatewayTest(unittest.TestCase):
                 'n': 1, 'stream': True}, {'Authorization': 'Bearer test-other', 'X-Session-ID': 'one'})
         self.assertEqual(status, 200)
         gate.assert_called_once_with(2)
+
+    def test_excessive_stream_choice_count_is_rejected_before_upstream(self):
+        status, _, _ = self.session_model(stream=True, n=4097)
+        self.assertEqual(status, 400)
+        self.assertEqual(self.calls, [])
 
     def test_sse_error_does_not_commit_backup_binding(self):
         self.assertEqual(self.session_model()[0], 200)

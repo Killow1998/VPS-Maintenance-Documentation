@@ -263,7 +263,7 @@ class FakeBackend:
         return key in self.keys
 
     def accounts(self):
-        return [{"auth_index": "private-index", "provider": "claude", "disabled": False}]
+        return [{"name": "synthetic.json", "auth_index": "private-index", "provider": "claude", "disabled": False}]
 
     def quota(self, _):
         if self.fail_quota:

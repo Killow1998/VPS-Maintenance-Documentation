@@ -269,6 +269,31 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(response['query_status'], 'unavailable')
         self.assertEqual(response['accounts'][0]['windows'], {})
 
+    def test_changed_binding_hides_old_quota_before_inventory_recovers(self):
+        self.obs.backend.quota.side_effect = None
+        self.obs.backend.quota.return_value = {'five_hour': {'utilization': 37}}
+        self.obs.refresh_quota()
+        self.assertEqual(self.obs.quota_response()['accounts'][0]['windows']['five_hour']['remaining_percent'], 63)
+        original = copy.deepcopy(self.config['quota_bindings'])
+        unrelated = {**original, 'other': {'credential': 'another', 'expected_email': 'b@example.invalid'}}
+        self.config['quota_bindings'] = unrelated
+        self.assertEqual(self.obs.quota_response()['accounts'][0]['windows']['five_hour']['remaining_percent'], 63)
+        for replacement in ({'credential': 'new-helper', 'expected_email': 'a@example.invalid'},
+                            {'credential': 'helper', 'expected_email': 'new@example.invalid'}, None):
+            with self.subTest(replacement=replacement):
+                self.config['quota_bindings'] = {'main': replacement} if replacement else {}
+                restarted = Observer(self.config)
+                restarted.backend = Mock()
+                restarted.backend.accounts.side_effect = RuntimeError('synthetic failure')
+                with self.assertRaises(RuntimeError):
+                    restarted.refresh_quota()
+                for admin in (False, True):
+                    result = restarted.quota_response(admin=admin)
+                    account = result['accounts'][0]
+                    self.assertEqual(account['windows'], {})
+                    self.assertTrue(account['stale'])
+                    self.assertEqual(result['accounts_with_fresh_quota'], 0)
+
     def test_unknown_shared_principal_is_visible_for_all_aliases(self):
         other = self.shared_account()
         self.answer = 'timeout'
@@ -651,6 +676,7 @@ print(json.dumps({"fresh": fresh, "request_id": operation["request_id"]}))
         self.assertEqual(item['routing']['recovery'], 'manual')
         item['source_identity'] = self.obs.store.digest('quota-source:profile')
         item['source_verified'] = True
+        item['binding_name'], item['binding_revision'] = self.obs.binding_fingerprints('main')
         self.obs.store.meta("quota_snapshot", json.dumps({"accounts": [item]}))
         self.assertNotIn("resets", self.obs.quota_response()["accounts"][0])
         self.assertIn("resets", self.obs.quota_response(admin=True)["accounts"][0])

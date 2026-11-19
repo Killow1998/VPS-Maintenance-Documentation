@@ -149,10 +149,12 @@ snapshot, as described in [the rollback procedure](../cpa-admin/README.md#既有
 Stored windows retain numeric-only compatibility with older readers;
 unknown windows live separately in the snapshot and are combined in new API responses. An
 older reader after rollback may omit those unknown windows, but must not treat them as zero.
-An older quota snapshot without the new source-verification marker is hidden until a successful
-inventory check verifies its source; any applicable retry deadline remains in force. If inventory
-is unavailable after upgrade, the interface reports quota unavailable rather than publishing an
-unverified balance.
+An older quota snapshot without the new source and binding verification markers is hidden until
+an inventory check verifies its source. The binding fingerprint is compared with the current
+configuration, so a changed binding also hides the old balance until reverified; any applicable
+retry deadline remains in force. If inventory is unavailable after upgrade, the interface reports
+quota unavailable rather than publishing an unverified balance. Binding markers use HMACs and are
+not included in public quota responses.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

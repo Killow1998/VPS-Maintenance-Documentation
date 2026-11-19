@@ -313,7 +313,8 @@ class Admin:
         reader = module.Observer.__new__(module.Observer)
         reader.config = self.c
         reader.store = SimpleNamespace(meta=lambda key: metadata.get(key),
-            legacy_quota_backoff=lambda account: metadata.get('quota_legacy_backoff:' + account))
+            legacy_quota_backoff=lambda account: metadata.get('quota_legacy_backoff:' + account),
+            digest=lambda value: hmac.new(self.c['hmac_secret'].encode(), value.encode(), hashlib.sha256).hexdigest())
         quota = reader.quota_response()
         identities = {}
         for credential in self.files():

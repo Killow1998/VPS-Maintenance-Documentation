@@ -599,6 +599,13 @@ class Observer:
             raise QuotaError("quota_identity_mismatch")
         return source
 
+    def binding_fingerprints(self, name):
+        bindings = self.config.get('quota_bindings', {})
+        if not isinstance(bindings, dict) or not isinstance(name, str) or not name:
+            raise ValueError('invalid_quota_binding')
+        value = json.dumps(bindings.get(name), sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        return self.store.digest('quota-binding-name:' + name), self.store.digest('quota-binding-value:' + value)
+
     def source_backoff(self, source_index, account_id=None):
         if not account_id:
             return self.store.quota_backoff(source_index)
@@ -769,6 +776,7 @@ class Observer:
                     item["source_revision"] = revision
                     item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
                     item['source_verified'] = True
+                    item['binding_name'], item['binding_revision'] = self.binding_fingerprints(entry.get('name'))
                     same_source = old.get("source_revision") == revision
                     retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
@@ -846,6 +854,10 @@ class Observer:
         max_age = self.config.get("quota_poll_seconds", 60) * 2 + 30
         backoff_active = False
         unverified_active = False
+        bindings = self.config.get('quota_bindings', {})
+        current_bindings = {self.binding_fingerprints(name)[0]: self.binding_fingerprints(name)[1]
+                            for name in bindings} if isinstance(bindings, dict) else {}
+        default_binding = self.store.digest('quota-binding-value:null') if isinstance(bindings, dict) else None
         legacy_reset_pending = False
         if admin:
             with self.store.db() as con:
@@ -860,10 +872,14 @@ class Observer:
             account.pop("source_revision", None)
             snapshot_source = account.pop("source_identity", None)
             source_verified = account.pop('source_verified', False) is True
+            binding_name = account.pop('binding_name', None)
+            binding_revision = account.pop('binding_revision', None)
+            binding_verified = bool(binding_name and binding_revision and
+                                    current_bindings.get(binding_name, default_binding) == binding_revision)
             source_identity = self.store.meta("quota_account_source:" + account["id"]) or snapshot_source
             retry_at = account.get("retry_at") if not snapshot_source or snapshot_source == source_identity else None
-            if not snapshot_source or not source_verified or source_identity and snapshot_source != source_identity:
-                reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified
+            if not snapshot_source or not source_verified or not binding_verified or source_identity and snapshot_source != source_identity:
+                reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified or not binding_verified
                           else 'quota_source_changed')
                 account.update(windows={}, stale=True, status="unavailable", reason=reason, as_of=None)
                 unverified_active = unverified_active or account.get('enabled', False)

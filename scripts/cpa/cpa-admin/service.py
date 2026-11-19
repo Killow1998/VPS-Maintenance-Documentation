@@ -26,6 +26,7 @@ MODEL_PATHS = {"/v1/messages", "/v1/messages/count_tokens", "/v1/chat/completion
 SESSION_HEADER_NAMES = frozenset(name.lower() for name in SESSION_HEADERS)
 SSE_BOUNDARY = re.compile(rb'(?:\r\n|\r(?!\n)|(?<!\r)\n){2}')
 SSE_BUFFER_LIMIT = 1024 * 1024
+STREAM_CHOICE_LIMIT = 4096
 
 
 def expected_stream_choices(path, body):
@@ -43,7 +44,7 @@ def expected_stream_choices(path, body):
             count *= len(prompt)
         else:
             return None
-    return count if count <= 128 else None
+    return count
 
 
 class SSECompletionGate:
@@ -51,7 +52,7 @@ class SSECompletionGate:
     def __init__(self, expected_choices=1):
         self.pending = bytearray()
         self.held = None
-        self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= 128 else None
+        self.expected_choices = expected_choices if type(expected_choices) is int and 1 <= expected_choices <= STREAM_CHOICE_LIMIT else None
         self.finished_choices = set()
         self.failed = False
         self.completed = False
@@ -344,6 +345,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_.:\[\]()\-]{1,180}", model):
                 raise PolicyError(400, "使用不含账号前缀的模型名称。")
             base_model = re.sub(r"\([^()]*\)$", "", model)
+            expected_choices = expected_stream_choices(path, body)
+            if body.get('stream') and expected_choices is not None and expected_choices > STREAM_CHOICE_LIMIT:
+                raise PolicyError(400, '流式请求的结果数不能超过 4096。')
             with self.backend.lock:
                 candidates = [a for a in usable if base_model in self.backend.models.get(a["id"], {})]
             if not candidates:
