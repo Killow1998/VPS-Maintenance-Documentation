@@ -580,6 +580,26 @@ def beijing(value, seconds=False):
     return target.astimezone(BEIJING).strftime("%m-%d %H:%M:%S" if seconds else "%m-%d %H:%M") if target else "未知"
 
 
+def quota_wait_label(account):
+    if account.get("enabled") is not True or account.get("stale") is not True:
+        return None
+    retry = timestamp(account.get("retry_at"))
+    now = dt.datetime.now(dt.timezone.utc)
+    reason = account.get("reason")
+    if retry and retry > now:
+        title = "上游限流" if reason == "upstream_http_429" else "等待重试"
+        return f"{title} · {retry.astimezone(BEIJING):%m-%d %H:%M} 后重试（北京）"
+    elif reason == "quota_awaiting_sample":
+        next_poll = timestamp(account.get("next_poll_at"))
+        if next_poll and next_poll > now:
+            return f"等待采集 · {next_poll.astimezone(BEIJING):%m-%d %H:%M}（北京）"
+        return "等待采集"
+    elif reason in ("upstream_http_429", "quota_backoff"):
+        return "等待下一次采集"
+    else:
+        return None
+
+
 def render_usage(data):
     period = {"1h": "近 1 小时", "7d": "近 7 天", "30d": "近 30 天",
               "day": "今日", "month": "本月", "all": "全部"}.get(data.get("period"), "选定期间")
@@ -661,8 +681,13 @@ def render_quota(data):
         windows = account.get("windows")
         windows = windows if isinstance(windows, dict) else {}
         rows = [(n, w) for n, w in windows.items() if WINDOW.fullmatch(n) and isinstance(w, dict)]
-        if not rows:
+        wait = quota_wait_label(account)
+        if wait:
+            print(f"  {wait}")
+        elif not rows:
             print("  暂无额度窗口")
+        if stale and rows and timestamp(account.get("as_of")):
+            print(f"  上次采集 {beijing(account['as_of'])}（北京）")
         for name, window in rows:
             value = window.get("remaining_percent")
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
@@ -725,8 +750,13 @@ def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", wi
                 account_windows = account.get("windows")
                 rows = [(name, row) for name, row in (account_windows if isinstance(account_windows, dict) else {}).items()
                         if WINDOW.fullmatch(name) and isinstance(row, dict)]
-                if not rows:
+                wait = quota_wait_label(account)
+                if wait:
+                    quota_lines.append(tint(f"A{index:02d}  {wait}", 93))
+                elif not rows:
                     quota_lines.append(tint(f"A{index:02d}  暂无额度窗口", 90))
+                if panel == "quota" and stale and rows and timestamp(account.get("as_of")):
+                    quota_lines.append(tint(f"     上次采集 {beijing(account['as_of'])}（北京）", 90))
                 for name, row in rows:
                     value = row.get("remaining_percent")
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:

@@ -603,7 +603,7 @@ bash scripts/cpa/quota.sh
 ```bash
 read -r -p '本机 HTTP/mixed 代理端口: ' port
 proxy="http://127.0.0.1:$port"
-script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/87571c98f4e533d2d28caef4fdfc7b74f12408a2/scripts/cpa/quota.sh)" &&
+script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60 https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8a431517b46deb593471eb44f7f7dfa90a474336/scripts/cpa/quota.sh)" &&
   printf '%s\n' "$script" | CPA_PROXY="$proxy" bash -s --
 ```
 
@@ -615,7 +615,7 @@ script="$(curl -fsS --proxy "$proxy" --noproxy '' --proto '=https' --max-time 60
     $port = Read-Host '本机 HTTP/mixed 代理端口'
     if ($port -cnotmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { throw '端口需为 1–65535' }
     $proxy = "http://127.0.0.1:$port"
-    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/87571c98f4e533d2d28caef4fdfc7b74f12408a2/scripts/cpa/quota.ps1'
+    $source = Invoke-RestMethod -UseBasicParsing -Proxy $proxy -MaximumRedirection 0 -TimeoutSec 60 -Uri 'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/8a431517b46deb593471eb44f7f7dfa90a474336/scripts/cpa/quota.ps1'
     & ([scriptblock]::Create($source.TrimStart([char]0xFEFF))) -ProxyUrl $proxy
 }
 ```
@@ -650,10 +650,14 @@ Bash 加 `--once`，PowerShell 加 `-Once`，查询一次后退出。默认输�
 | 401 | 核对 API Key 是否有效 |
 | “查询参数不受支持”或缺少模型明细 | 管理员按 [observer 更新说明](../scripts/cpa/cpa-observer/README.md#repair-prompt)检查运行版本 |
 | HTTP 200 但提示“数据范围错误，请检查 observer 路由” | 检查 JSON 的 `scope`：额度必须为 `shared_pool`，个人用量为 `own_key`。若网关按 Key 筛选账号，仍保留 `shared_pool` 并增加 `visibility: authorized_accounts`，不能把公网入口改回未筛选的 observer 来消除报错 |
-| 数据为零、未知或过时 | 检查采集开始时间、最后采集时间与采集状态 |
+| 显示“上游限流” | 看板会显示下次可重试时间；如果还能确认旧额度属于同一份凭据，也会显示上次采集时间 |
+| 显示“等待采集” | 等待页面标出的下一次采集。凭据更新或换绑后，旧额度会隐藏，直到新采集成功 |
+| 个别额度窗口显示“未知” | 上游未返回这些窗口的数字，不能视为用完 |
 | 代理连接失败 | 核对 Clash 端口，并检查 CPA 域名所用节点 |
 
 旧 observer 可先用 `--period day` / `-Period day` 查询今日数据。服务更新保留原数据库、HMAC、Key 和路由，仅替换并重启必要的 observer 服务。
+
+额度采集节奏的修复需要更新 observer。若同时使用 CPA 管理网页，按 [observer 升级与回滚说明](../scripts/cpa/cpa-observer/README.md)一起更新管理面板。终端看板通过新版启动器更新，CPA 转发服务无需重启。
 
 完整工具包中的旧 `api_keys.py quota` 入口按原网络设置运行。需要强制代理查询时，使用本节的 `quota.sh` 或 `quota.ps1`。API 字段与管理员邮箱查询方式见 [observer 文档](../scripts/cpa/cpa-observer/README.md)和[管理员工具手册](../scripts/cpa/cpa-tools/README.md)。
 

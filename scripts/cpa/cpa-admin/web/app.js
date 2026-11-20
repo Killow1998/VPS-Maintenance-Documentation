@@ -195,10 +195,12 @@ function renderAccounts() {
       const kind = a.stale ? "stale" : percent <= 15 ? "critical" : percent <= 40 ? "low" : "";
       return `<div class="quota-row"><div class="quota-line"><span>${esc(windowName)}剩余额度${a.stale ? " · 旧值" : ""}</span><strong class="${kind}">${esc(percent)}%</strong></div><progress class="${kind}" max="100" value="${esc(percent)}" aria-label="${esc(a.name + windowName)}剩余额度 ${esc(percent)}%"></progress><div class="reset">${value.resets_at ? `重置 ${esc(timestamp(value.resets_at))}（${esc(duration(value.resets_at))}）` : "重置时间未知"}</div></div>`;
     }).join("") : `<div class="account-unknown">${esc(!a.enabled ? "账号已停用" : a.quota_reason === "observer_unavailable" ? "额度查询服务暂不可用" : "尚无额度数据")}</div>`;
-    const reasons = {observer_unavailable: "额度查询服务暂不可用", missing_scope: "额度授权缺少 profile 权限", upstream_http_429: "额度查询被限流", quota_backoff: "额度查询等待重试", upstream_http_401: "额度授权已失效", upstream_http_403: "额度查询被拒绝", quota_lookup_failed: "额度采集失败", credential_refresh_failed: "额度凭据刷新失败", quota_identity_mismatch: "额度授权账号不匹配", quota_source_missing: "缺少额度授权"};
+    const reasons = {observer_unavailable: "额度查询服务暂不可用", missing_scope: "额度授权缺少 profile 权限", upstream_http_429: "额度查询被限流", quota_backoff: "额度查询等待重试", quota_awaiting_sample: "等待下一次额度采集", upstream_http_401: "额度授权已失效", upstream_http_403: "额度查询被拒绝", quota_lookup_failed: "额度采集失败", credential_refresh_failed: "额度凭据刷新失败", quota_identity_mismatch: "额度授权账号不匹配", quota_source_missing: "缺少额度授权"};
     const notice = a.stale && windows.length ? `${reasons[a.quota_reason] || "等待更新"} · 保留上次额度` : a.quota_status === "unavailable" ? reasons[a.quota_reason] || "额度采集失败" : "";
     const updated = a.as_of ? `更新 ${timestamp(a.as_of)}` : "";
-    const retry = a.retry_at ? ` · 重试 ${timestamp(a.retry_at)}（${duration(a.retry_at)}）` : "";
+    const waitingForSample = a.quota_reason === "quota_awaiting_sample";
+    const nextCheck = waitingForSample ? a.next_poll_at : a.retry_at;
+    const retry = Date.parse(nextCheck) > Date.now() ? ` · ${waitingForSample ? "下次采集" : "重试"} ${timestamp(nextCheck)}（${duration(nextCheck)}）` : "";
     const routing = a.routing || {};
     const unknownQuota = !windows.length || windows.some(([, w]) => !Number.isFinite(w.remaining_percent));
     const availability = !a.enabled ? "账号已停用" : a.stale ? "等待额度更新" : routing.blocked ? "调用暂不可用" : Object.values(a.windows || {}).some((w) => w.remaining_percent === 0) ? "部分额度已用完" : unknownQuota ? "部分额度未知" : "可调用";
