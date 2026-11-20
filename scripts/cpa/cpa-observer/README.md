@@ -157,6 +157,10 @@ quota unavailable rather than publishing an unverified balance. Binding markers 
 not included in public quota responses. If a legacy snapshot has no account-name marker and the
 inventory is unavailable, an account later assigned as a helper cannot yet be identified in the
 pool counts; those counts are provisional until a successful inventory refresh.
+For the same verified source and unchanged binding, a credential revision change
+keeps the adaptive polling interval and any pending retry. It does not carry over
+the previous quota windows or reset grants. While waiting for the next scheduled
+sample, clients can use `next_poll_at`; during provider backoff, use `retry_at`.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

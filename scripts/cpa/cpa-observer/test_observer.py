@@ -565,6 +565,71 @@ class APITests(unittest.TestCase):
         restarted.refresh_quota(scheduled=True)
         self.assertEqual(len(backend.calls), before)
 
+    def test_revised_source_keeps_adaptive_poll_schedule_without_reusing_old_quota(self):
+        backend = self.paired_backend()
+        original_accounts, original_quota = backend.accounts, backend.quota
+        revision = "first"
+
+        def accounts():
+            entries = original_accounts()
+            entries[1]["updated_at"] = revision
+            return entries
+
+        def limited(index):
+            backend.calls.append(index)
+            raise QuotaError("upstream_http_429", 429, 1)
+
+        def expire_backoff(observer):
+            data = json.loads(observer.store.meta("quota_snapshot"))
+            expired = "2000-01-01T00:00:00+00:00"
+            data["accounts"][0]["retry_at"] = expired
+            observer.store.meta("quota_snapshot", json.dumps(data))
+            key = 'quota_backoff:' + observer.store.digest('quota-source:quota-index')
+            observer.store.meta(key, expired)
+
+        backend.accounts = accounts
+        self.observer.refresh_quota()
+        backend.quota = limited
+        self.observer.refresh_quota()
+        limited_before = self.observer.quota_response(admin=True)["accounts"][0]
+        revision = "second"
+        restarted = Observer(self.observer.config)
+        restarted.backend = backend
+        before = len(backend.calls)
+        restarted.refresh_quota(scheduled=True)
+        waiting = restarted.quota_response(admin=True)["accounts"][0]
+        self.assertEqual(len(backend.calls), before)
+        self.assertEqual(waiting["poll_interval_seconds"], 120)
+        self.assertEqual(waiting["retry_at"], limited_before["retry_at"])
+        self.assertEqual(waiting["reason"], "upstream_http_429")
+        self.assertEqual(waiting["windows"], {})
+        self.assertNotIn("resets", waiting)
+
+        expire_backoff(restarted)
+        revision = "third"
+        restarted.refresh_quota(scheduled=True)
+        self.assertEqual(restarted.quota_response()["accounts"][0]["poll_interval_seconds"], 240)
+
+        expire_backoff(restarted)
+        backend.quota = original_quota
+        restarted.refresh_quota(scheduled=True)
+        fresh = restarted.quota_response()["accounts"][0]
+        self.assertFalse(fresh["stale"])
+        self.assertEqual(fresh["poll_interval_seconds"], 240)
+        revision = "fourth"
+        before = len(backend.calls)
+        restarted.refresh_quota(scheduled=True)
+        waiting = restarted.quota_response(admin=True)["accounts"][0]
+        self.assertEqual(len(backend.calls), before)
+        self.assertEqual(waiting["next_poll_at"], fresh["next_poll_at"])
+        self.assertEqual(waiting["reason"], "quota_awaiting_sample")
+        self.assertEqual(waiting["windows"], {})
+        self.assertNotIn("resets", waiting)
+        restarted.config["quota_bindings"]["main.json"]["credential"] = "replacement.json"
+        rebound = restarted.quota_response()["accounts"][0]
+        self.assertNotIn("next_poll_at", rebound)
+        self.assertEqual(rebound["windows"], {})
+
     def test_backoff_survives_source_metadata_change_and_disable_reenable(self):
         backend = self.paired_backend()
         original_accounts = backend.accounts

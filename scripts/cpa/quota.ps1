@@ -338,6 +338,24 @@ function Get-QuotaTime($Value) {
     return $null
 }
 
+function Get-QuotaWaitLabel($Account) {
+    if ($Account.enabled -ne $true -or $Account.stale -ne $true) { return }
+    $retry = Get-QuotaTime $Account.retry_at
+    $now = [DateTimeOffset]::UtcNow
+    if ($null -ne $retry -and $retry -gt $now) {
+        $label = if ($Account.reason -eq 'upstream_http_429') { '上游限流' } else { '等待重试' }
+        return "$label · " + $retry.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + ' 后重试（北京）'
+    } elseif ($Account.reason -eq 'quota_awaiting_sample') {
+        $nextPoll = Get-QuotaTime $Account.next_poll_at
+        if ($null -ne $nextPoll -and $nextPoll -gt $now) {
+            return '等待采集 · ' + $nextPoll.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + '（北京）'
+        }
+        return '等待采集'
+    } elseif ($Account.reason -in @('upstream_http_429', 'quota_backoff')) {
+        return '等待下一次采集'
+    }
+}
+
 function Get-ResetLabel($Value) {
     $target = Get-QuotaTime $Value
     if ($null -eq $target) { return '未知' }
@@ -549,7 +567,13 @@ function Show-Quota($Data) {
         $state = if ($account.enabled -ne $true) { '已禁用' } elseif ($stale) { '旧值 / 未知' } else { '正常' }
         Write-Host "`n$identity · $state"
         $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
-        if ($rows.Count -eq 0) { Write-Host '  暂无额度窗口' }
+        $wait = Get-QuotaWaitLabel $account
+        if ($wait) { Write-Host ('  ' + $wait) }
+        elseif ($rows.Count -eq 0) { Write-Host '  暂无额度窗口' }
+        $asOf = Get-QuotaTime $account.as_of
+        if ($stale -and $rows.Count -and $null -ne $asOf) {
+            Write-Host ('  上次采集 ' + $asOf.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + '（北京）')
+        }
         foreach ($row in $rows) {
             $value = Get-Remaining $row.Value.remaining_percent
             $filled = if ($null -ne $value) { [int][Math]::Floor($barSize * $value / 100 + 0.5) } else { 0 }
@@ -698,7 +722,15 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
                     $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}  {2}" -f $index, $identity, $state) 37))
                 }
                 $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
-                if (-not $rows.Count) { $quotaLines.Add((Get-CpaTint ("A{0:00}  暂无额度窗口" -f $index) 90)) }
+                $wait = Get-QuotaWaitLabel $account
+                if ($wait) { $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}" -f $index, $wait) 93)) }
+                elseif (-not $rows.Count) { $quotaLines.Add((Get-CpaTint ("A{0:00}  暂无额度窗口" -f $index) 90)) }
+                if ($Panel -eq 'quota' -and $stale -and $rows.Count) {
+                    $asOf = Get-QuotaTime $account.as_of
+                    if ($null -ne $asOf) {
+                        $quotaLines.Add((Get-CpaTint ('     上次采集 ' + $asOf.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + '（北京）') 90))
+                    }
+                }
                 foreach ($row in $rows) {
                     $value = Get-Remaining $row.Value.remaining_percent
                     $color = if ($stale -or $null -eq $value) { 90 } elseif ($value -gt 50) { 92 } elseif ($value -gt 20) { 93 } else { 91 }

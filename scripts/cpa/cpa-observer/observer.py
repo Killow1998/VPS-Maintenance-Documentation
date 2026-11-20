@@ -740,6 +740,7 @@ class Observer:
 
     def _refresh_quota(self, *, scheduled=False):
         self.quota_last_attempt = time.monotonic()
+        base_interval = self.config.get("quota_poll_seconds", 60)
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
         accounts = []
@@ -780,19 +781,33 @@ class Observer:
                     item["source_identity"] = self.store.digest("quota-source:" + str(source_index))
                     item['source_verified'] = True
                     item['binding_name'], item['binding_revision'] = self.binding_fingerprints(entry.get('name'))
-                    same_source = (old.get("source_revision") == revision and old.get('source_verified') is True and
-                                   old.get('binding_name') == item['binding_name'] and
-                                   old.get('binding_revision') == item['binding_revision'])
+                    same_binding = (old.get('source_verified') is True and
+                                    old.get('source_identity') == item['source_identity'] and
+                                    old.get('binding_name') == item['binding_name'] and
+                                    old.get('binding_revision') == item['binding_revision'])
+                    same_source = same_binding and old.get("source_revision") == revision
+                    interval = max(base_interval, old.get("poll_interval_seconds", base_interval)) if same_binding else base_interval
+                    item["poll_interval_seconds"] = interval
                     retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
-                    if retry_at and dt.datetime.fromisoformat(retry_at) > dt.datetime.now(UTC):
+                    current_time = dt.datetime.now(UTC)
+                    wait_for_poll = (same_binding and (same_source or interval > base_interval) and
+                                     next_poll and dt.datetime.fromisoformat(next_poll) > current_time)
+                    cached_fields = ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale")
+                    if retry_at and dt.datetime.fromisoformat(retry_at) > current_time:
                         if same_source:
-                            item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                            item.update({k: old[k] for k in cached_fields if k in old})
                         item.update(status="unavailable", stale=True,
-                                    reason=old.get("reason") if same_source and old.get("reason") == "upstream_http_429" else "quota_backoff")
+                                    reason="upstream_http_429" if same_binding and old.get("reason") == "upstream_http_429" else "quota_backoff")
                         item["retry_at"] = retry_at
-                    elif same_source and next_poll and dt.datetime.fromisoformat(next_poll) > dt.datetime.now(UTC):
-                        item.update({k: old[k] for k in ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale", "poll_interval_seconds", "next_poll_at") if k in old})
+                        if same_binding and old.get("next_poll_at"):
+                            item["next_poll_at"] = old["next_poll_at"]
+                    elif wait_for_poll:
+                        if same_source:
+                            item.update({k: old[k] for k in cached_fields if k in old})
+                        if item["as_of"] is None and item.get("reason") in (None, "quota_awaiting_sample"):
+                            item.update(status="unavailable", reason="quota_awaiting_sample")
+                        item["next_poll_at"] = next_poll
                     else:
                         try:
                             quota = self.query_quota(source_index, identity)
@@ -807,8 +822,6 @@ class Observer:
                                     status="ok", as_of=now(), stale=False)
                         if not item["windows"]:
                             item.update(status="unavailable", reason="quota_windows_unknown", stale=True)
-                        interval = old.get("poll_interval_seconds", self.config.get("quota_poll_seconds", 60)) if same_source else self.config.get("quota_poll_seconds", 60)
-                        item["poll_interval_seconds"] = interval
                         item["next_poll_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=interval)).isoformat()
                         item["resets"] = grants(quota)
                         self.actions.recover(entry, item)
@@ -822,9 +835,9 @@ class Observer:
                         if not source_index:
                             item.update({k: old[k] for k in ("source_revision", "source_identity") if k in old})
                     if same_source:
-                        item.update({k: old[k] for k in ("unknown_windows", "resets", "routing", "poll_interval_seconds") if k in old})
+                        item.update({k: old[k] for k in ("unknown_windows", "resets", "routing") if k in old})
                     if isinstance(error, QuotaError) and error.status == 429:
-                        interval = min(900, max(120, item.get("poll_interval_seconds", 60) * 2))
+                        interval = max(base_interval, min(900, max(120, item.get("poll_interval_seconds", base_interval) * 2)))
                         item["poll_interval_seconds"] = interval
                         delay = max(interval, error.retry_after or 0)
                         item["retry_at"] = retry_at_after(delay)
@@ -893,10 +906,13 @@ class Observer:
             if not snapshot_source or not source_verified or not binding_verified or source_identity and snapshot_source != source_identity:
                 reason = ((account.get('reason') or 'quota_source_unverified') if not snapshot_source or not source_verified or not binding_verified
                           else 'quota_source_changed')
+                if reason == "quota_awaiting_sample":
+                    reason = "quota_source_unverified"
                 account.update(windows={}, stale=True, status="unavailable", reason=reason, as_of=None)
                 unverified_active = unverified_active or account.get('enabled', False)
                 if snapshot_source:
                     account.pop("retry_at", None)
+                account.pop("next_poll_at", None)
                 account.pop("unknown_windows", None)
                 account.pop("resets", None)
                 account.pop("routing", None)

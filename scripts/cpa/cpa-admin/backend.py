@@ -169,7 +169,8 @@ class Backend:
             account.update(windows=item.get("windows", {}), stale=item.get("stale", True),
                            as_of=item.get("as_of"), quota_status=item.get("status", "unknown"),
                            quota_reason=item.get("reason") or ("observer_unavailable" if snapshot.get("query_status") == "unavailable" else None),
-                           retry_at=item.get("retry_at"), resets=item.get("resets", {"status": "unknown", "grants": []}),
+                           retry_at=item.get("retry_at"), next_poll_at=item.get("next_poll_at"),
+                           resets=item.get("resets", {"status": "unknown", "grants": []}),
                            routing=item.get("routing", {}), reset_pending=item.get("reset_pending", False))
         return {"accounts": accounts, "checked_at": snapshot.get("checked_at"),
                 "query_status": snapshot.get("query_status", "unknown"), "stale": snapshot.get("stale", True),
