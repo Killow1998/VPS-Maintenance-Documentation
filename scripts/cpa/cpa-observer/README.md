@@ -158,9 +158,13 @@ not included in public quota responses. If a legacy snapshot has no account-name
 inventory is unavailable, an account later assigned as a helper cannot yet be identified in the
 pool counts; those counts are provisional until a successful inventory refresh.
 For the same verified source and unchanged binding, a credential revision change
-keeps the adaptive polling interval and any pending retry. It does not carry over
-the previous quota windows or reset grants. While waiting for the next scheduled
-sample, clients can use `next_poll_at`; during provider backoff, use `retry_at`.
+keeps the adaptive polling interval and any pending retry. If the inventory still
+matches the account identity associated with the last successful sample, retain
+its numbers and original `as_of` as stale. Those numbers do not count toward
+fresh pool aggregates and do not carry over reset grants or routing state to a
+new credential revision. A different or unverified identity cannot reuse the
+previous revision's sample. The next scheduled sample is reported in
+`next_poll_at`; provider backoff uses `retry_at`.
 
 For an existing installation, back up both source files, config and owner-created consistent
 SQLite snapshots. Update admin and observer together in an idle window; restart only these

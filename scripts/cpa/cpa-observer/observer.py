@@ -743,6 +743,9 @@ class Observer:
         base_interval = self.config.get("quota_poll_seconds", 60)
         previous = json.loads(self.store.meta("quota_snapshot") or "{}")
         known = {a["id"]: a for a in previous.get("accounts", [])}
+        previous_principals = previous.get("display_principals", {})
+        display_principals = {}
+        display_fields = ("windows", "unknown_windows", "as_of")
         accounts = []
         entries = self.backend.accounts()
         self.migrate_known_backoffs(entries, previous)
@@ -769,6 +772,8 @@ class Observer:
             if active:
                 source_index = None
                 same_source = False
+                cached_display = {}
+                cached_principal = None
                 try:
                     source = self.quota_source(entry, by_name)
                     source_index = source.get("auth_index")
@@ -785,7 +790,16 @@ class Observer:
                                     old.get('source_identity') == item['source_identity'] and
                                     old.get('binding_name') == item['binding_name'] and
                                     old.get('binding_revision') == item['binding_revision'])
-                    same_source = same_binding and old.get("source_revision") == revision
+                    email = source.get("email")
+                    principal = (self.store.digest("quota-display-principal:" + email.strip().casefold())
+                                 if isinstance(email, str) and email.strip() else None)
+                    previous_principal = previous_principals.get(identity)
+                    same_principal = principal is not None and principal == previous_principal
+                    same_source = (same_binding and old.get("source_revision") == revision
+                                   and (previous_principal is None or same_principal))
+                    if same_source or (same_binding and same_principal):
+                        cached_display = {k: old[k] for k in display_fields if k in old}
+                        cached_principal = previous_principal
                     interval = max(base_interval, old.get("poll_interval_seconds", base_interval)) if same_binding else base_interval
                     item["poll_interval_seconds"] = interval
                     retry_at = self.source_backoff(source_index, identity)
@@ -793,8 +807,9 @@ class Observer:
                     current_time = dt.datetime.now(UTC)
                     wait_for_poll = (same_binding and (same_source or interval > base_interval) and
                                      next_poll and dt.datetime.fromisoformat(next_poll) > current_time)
-                    cached_fields = ("windows", "unknown_windows", "as_of", "status", "reason", "resets", "routing", "stale")
+                    cached_fields = ("status", "reason", "resets", "routing", "stale")
                     if retry_at and dt.datetime.fromisoformat(retry_at) > current_time:
+                        item.update(cached_display)
                         if same_source:
                             item.update({k: old[k] for k in cached_fields if k in old})
                         item.update(status="unavailable", stale=True,
@@ -803,10 +818,11 @@ class Observer:
                         if same_binding and old.get("next_poll_at"):
                             item["next_poll_at"] = old["next_poll_at"]
                     elif wait_for_poll:
+                        item.update(cached_display)
                         if same_source:
                             item.update({k: old[k] for k in cached_fields if k in old})
-                        if item["as_of"] is None and item.get("reason") in (None, "quota_awaiting_sample"):
-                            item.update(status="unavailable", reason="quota_awaiting_sample")
+                        if not same_source or (item["as_of"] is None and item.get("reason") is None):
+                            item.update(status="unavailable", reason="quota_awaiting_sample", stale=True)
                         item["next_poll_at"] = next_poll
                     else:
                         try:
@@ -825,17 +841,21 @@ class Observer:
                         item["next_poll_at"] = (dt.datetime.now(UTC) + dt.timedelta(seconds=interval)).isoformat()
                         item["resets"] = grants(quota)
                         self.actions.recover(entry, item)
+                        if not item["windows"] and cached_display.get("windows"):
+                            item.update(cached_display)
+                        elif item["windows"]:
+                            cached_principal = principal
                 except Exception as error:
-                    item.update(windows=old.get("windows", {}) if same_source else {},
-                                as_of=old.get("as_of") if same_source else None, status="unavailable", stale=True,
+                    item.update(windows={}, unknown_windows={}, as_of=None, status="unavailable", stale=True,
                                 reason=error.reason if isinstance(error, QuotaError) else "quota_lookup_failed")
+                    item.update(cached_display)
                     if old.get("retry_at") and (not source_index or not old.get("source_identity")
                                                 or old.get("source_identity") == item.get("source_identity")):
                         item["retry_at"] = old["retry_at"]
                         if not source_index:
                             item.update({k: old[k] for k in ("source_revision", "source_identity") if k in old})
                     if same_source:
-                        item.update({k: old[k] for k in ("unknown_windows", "resets", "routing") if k in old})
+                        item.update({k: old[k] for k in ("resets", "routing") if k in old})
                     if isinstance(error, QuotaError) and error.status == 429:
                         interval = max(base_interval, min(900, max(120, item.get("poll_interval_seconds", base_interval) * 2)))
                         item["poll_interval_seconds"] = interval
@@ -847,13 +867,16 @@ class Observer:
                         item["retry_at"] = retry_at_after(error.retry_after)
                         if source_index:
                             item["retry_at"] = self.store.quota_backoff(source_index, item["retry_at"])
+                if cached_principal and item["as_of"] and item["windows"]:
+                    display_principals[identity] = cached_principal
             # Keep stored windows numeric for older readers during a rollback.
             unknown = item.setdefault("unknown_windows", {})
             for name, window in list(item["windows"].items()):
                 if window.get("remaining_percent") is None:
                     unknown[name] = item["windows"].pop(name)
             accounts.append(item)
-        self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts}))
+        self.store.meta("quota_snapshot", json.dumps({"checked_at": now(), "accounts": accounts,
+                                                      "display_principals": display_principals}))
         enabled = [a for a in accounts if a["enabled"]]
         self.store.meta("quota_status", "unavailable" if enabled and all(a["stale"] for a in enabled) else "partial" if any(a["stale"] for a in enabled) else "ok")
 
