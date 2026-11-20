@@ -387,7 +387,8 @@ class APITests(unittest.TestCase):
         self.assertNotIn('seven_day_opus', stored['windows'])
         self.assertIn('seven_day_opus', stored['unknown_windows'])
 
-    def test_all_reported_unknown_and_huge_window_remain_visible(self):
+    def test_unknown_and_huge_windows_remain_unknown_without_a_prior_sample(self):
+        self.observer.store.meta("quota_snapshot", "{}")
         self.observer.backend.quota = lambda _: {'seven_day': None}
         self.observer.refresh_quota()
         body = self.observer.quota_response()
@@ -437,7 +438,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["accounts_total"], 1)
         self.assertEqual(body["accounts_enabled"], 1)
         self.assertEqual(body["accounts_with_fresh_quota"], 1)
-        for private in ("main.json", "quota.json", "owner@example.invalid", "quota-index", "source_revision"):
+        for private in ("main.json", "quota.json", "owner@example.invalid", "quota-index", "source_revision",
+                        "display_principals"):
             self.assertNotIn(private, json.dumps(body))
 
     def test_wrong_quota_identity_never_queries_or_reuses_other_account_data(self):
@@ -565,7 +567,7 @@ class APITests(unittest.TestCase):
         restarted.refresh_quota(scheduled=True)
         self.assertEqual(len(backend.calls), before)
 
-    def test_revised_source_keeps_adaptive_poll_schedule_without_reusing_old_quota(self):
+    def test_revised_source_keeps_schedule_and_displays_same_principal_quota_as_stale(self):
         backend = self.paired_backend()
         original_accounts, original_quota = backend.accounts, backend.quota
         revision = "first"
@@ -589,6 +591,7 @@ class APITests(unittest.TestCase):
 
         backend.accounts = accounts
         self.observer.refresh_quota()
+        first = self.observer.quota_response()["accounts"][0]
         backend.quota = limited
         self.observer.refresh_quota()
         limited_before = self.observer.quota_response(admin=True)["accounts"][0]
@@ -602,8 +605,11 @@ class APITests(unittest.TestCase):
         self.assertEqual(waiting["poll_interval_seconds"], 120)
         self.assertEqual(waiting["retry_at"], limited_before["retry_at"])
         self.assertEqual(waiting["reason"], "upstream_http_429")
-        self.assertEqual(waiting["windows"], {})
+        self.assertEqual(waiting["windows"], first["windows"])
+        self.assertEqual(waiting["as_of"], first["as_of"])
+        self.assertTrue(waiting["stale"])
         self.assertNotIn("resets", waiting)
+        self.assertNotIn("routing", waiting)
 
         expire_backoff(restarted)
         revision = "third"
@@ -623,12 +629,64 @@ class APITests(unittest.TestCase):
         self.assertEqual(len(backend.calls), before)
         self.assertEqual(waiting["next_poll_at"], fresh["next_poll_at"])
         self.assertEqual(waiting["reason"], "quota_awaiting_sample")
-        self.assertEqual(waiting["windows"], {})
+        self.assertEqual(waiting["windows"], fresh["windows"])
+        self.assertEqual(waiting["as_of"], fresh["as_of"])
+        self.assertTrue(waiting["stale"])
         self.assertNotIn("resets", waiting)
+        self.assertNotIn("routing", waiting)
+        self.assertEqual(restarted.quota_response()["windows"]["five_hour"]["known_accounts"], 0)
+        code, public = self.get("/v1/quota", "test-key-a")
+        self.assertEqual(code, 200)
+        self.assertEqual(public["accounts"][0]["windows"], fresh["windows"])
+        self.assertTrue(public["accounts"][0]["stale"])
+        restarted.refresh_quota(scheduled=True)
+        self.assertEqual(len(backend.calls), before)
+        self.assertEqual(restarted.quota_response()["accounts"][0]["as_of"], fresh["as_of"])
+
+        old_snapshot = json.loads(restarted.store.meta("quota_snapshot"))
+        old_snapshot["accounts"][0]["next_poll_at"] = "2000-01-01T00:00:00+00:00"
+        restarted.store.meta("quota_snapshot", json.dumps(old_snapshot))
+        backend.quota = lambda index: {"five_hour": {"utilization": 60}, "seven_day": {"utilization": 40}}
+        restarted.refresh_quota(scheduled=True)
+        recovered = restarted.quota_response()["accounts"][0]
+        self.assertFalse(recovered["stale"])
+        self.assertEqual(recovered["windows"]["five_hour"]["remaining_percent"], 40)
+        self.assertNotEqual(recovered["as_of"], fresh["as_of"])
+
         restarted.config["quota_bindings"]["main.json"]["credential"] = "replacement.json"
         rebound = restarted.quota_response()["accounts"][0]
         self.assertNotIn("next_poll_at", rebound)
         self.assertEqual(rebound["windows"], {})
+
+    def test_old_numbers_stay_visible_when_new_sample_has_no_numbers(self):
+        backend = self.paired_backend()
+        self.observer.refresh_quota()
+        first = self.observer.quota_response()["accounts"][0]
+        backend.quota = lambda index: {"five_hour": None, "seven_day": None}
+        self.observer.refresh_quota()
+        account = self.observer.quota_response()["accounts"][0]
+        self.assertEqual(account["reason"], "quota_windows_unknown")
+        self.assertTrue(account["stale"])
+        self.assertEqual(account["windows"], first["windows"])
+        self.assertEqual(account["as_of"], first["as_of"])
+
+    def test_reused_credential_slot_never_shows_a_different_or_unverified_principal(self):
+        for initial, replacement in ((None, "owner@example.invalid"),
+                                     ("owner@example.invalid", None),
+                                     ("owner@example.invalid", "other@example.invalid")):
+            with self.subTest(initial=initial, replacement=replacement):
+                backend = FakeBackend()
+                original_accounts = backend.accounts
+                backend.accounts = lambda: [dict(original_accounts()[0], email=initial, updated_at="first")]
+                self.observer.backend = backend
+                self.observer.refresh_quota()
+                self.assertTrue(self.observer.quota_response()["accounts"][0]["windows"])
+                backend.accounts = lambda: [dict(original_accounts()[0], email=replacement, updated_at="second")]
+                backend.fail_quota = True
+                self.observer.refresh_quota()
+                account = self.observer.quota_response()["accounts"][0]
+                self.assertEqual(account["windows"], {})
+                self.assertIsNone(account["as_of"])
 
     def test_backoff_survives_source_metadata_change_and_disable_reenable(self):
         backend = self.paired_backend()
