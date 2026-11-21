@@ -1,0 +1,19 @@
+# Include once in nginx's main context, after loading the stream module.
+# Replace the reserved hostname before staging. The TLS backend is subscription-only.
+stream {
+    map $ssl_preread_server_name $xboard_backend {
+        subscription.example.invalid 127.0.0.1:9443;
+        default                      127.0.0.1:1443;
+    }
+    server {
+        listen 443;
+        ssl_preread on;
+        preread_timeout 10s;
+        proxy_bind $remote_addr transparent;
+        proxy_pass $xboard_backend;
+        proxy_connect_timeout 10s;
+        proxy_timeout 1h;
+        proxy_socket_keepalive on;
+        access_log off;
+    }
+}

@@ -20,6 +20,8 @@ docs/*
 templates/*
 !templates/scholar-nat64.json
 !templates/xboard-subscribe.nginx.conf
+!templates/xboard-shared443.stream.conf.example
+!templates/xboard-subscription-tls.conf.example
 !templates/xboard.compose.yaml
 !templates/php-upload-progress-hardening.ini
 !templates/clash-dns-policy.yaml
