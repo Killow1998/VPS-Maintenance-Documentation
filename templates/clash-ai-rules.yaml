@@ -10,9 +10,11 @@ rules:
   - DOMAIN-SUFFIX,claude.ai,节点选择
   - DOMAIN-SUFFIX,google.com,节点选择
   - DOMAIN-SUFFIX,googleapis.com,节点选择
+  - DOMAIN,services.googleapis.cn,节点选择
   - DOMAIN-SUFFIX,gstatic.com,节点选择
   - DOMAIN-SUFFIX,googleusercontent.com,节点选择
   - DOMAIN-SUFFIX,ai.google.dev,节点选择
+  - DOMAIN-SUFFIX,gemini.google.com,节点选择
   - DOMAIN-SUFFIX,deepmind.google,节点选择
   - DOMAIN-SUFFIX,grok.com,节点选择
   - DOMAIN-SUFFIX,x.ai,节点选择

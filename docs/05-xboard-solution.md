@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 面板 | XBoard 容器，SQLite、Redis、Octane/Swoole、Horizon；具体组件以选定版本为准 | 本机面板和后台任务正常，持久化目录正确 |
 | 转发 | 独立的 xboard-node / sing-box，VLESS + TCP + REALITY + Vision | 真实外部 HTTPS 请求成功，不只看 TCP 端口或 healthz |
-| 订阅 | 每用户一条链接，包含节点、DNS、策略组和规则 | 代理关闭时也能下载，Clash Verge Rev / FlClash 可使用 |
+| 订阅 | 每用户一条 HTTPS 443 链接，包含节点、DNS、策略组和规则 | 关闭代理能首次导入，选中该配置后能再次同步 |
 | 管理 | 面板绑定 `127.0.0.1:7001`，管理员通过 SSH 隧道访问 | 公网面板不可达，普通订阅用户不需要 SSH |
 | 计量 | 本机控制通道推送在线状态及用量，用户额度和节点总池分开管理 | 真实请求后计数增长，月重置日/时区明确 |
 | 客户端规则 | 国内及局域网直连，AI/海外代理，独立节点 bootstrap DNS | 国内网页、AI 静态端点、TUN 开关及冷启动分别测试 |
@@ -42,12 +42,9 @@ Administration:
 
 ### HTTPS 与代理同时使用 443
 
-按部署复杂度选一种，不同时套用：
+**新机按共享公网 443 部署**：Nginx 按 TLS SNI 把订阅域名送到本机 HTTPS 服务，其余流量送到 REALITY 后端。面板保持回环访问。已有节点若在独立端口并正常运行，不为统一订阅地址强改节点端口。
 
-1. **简单入口**：节点独占 443，HTTPS 订阅使用另一个已告知用户的端口或独立 IP，配置有效证书。不要为此直接公开完整后台。
-2. **共用 443 的进阶入口**：nginx stream 按 TLS SNI 将订阅域名转到本机 HTTPS 服务，其余流量转给 REALITY 后端。若采用透明源地址转发，还需要配套回包策略路由和内部端口保护，见[故障机制及持久化验收](04-operations.md#31-透明反代服务正常但外部全部-timeout)。
-
-同机不同子域名并不会自动解决端口冲突。不要开启未经验证的 PROXY protocol，也不要只检查监听就宣称共用入口成功。既有透明转发方案测试了 networkd 重启后的规则持久化；未据此证明所有系统或完整重启都适用。
+透明源地址转发需要[回包策略路由、内部端口保护和持久化验收](04-operations.md#31-透明反代服务正常但外部全部-timeout)。新机不开放公网 8443；已有实例先查清订阅、应用与 API 依赖，再[退役公网 8443](04-operations.md#54-退役公网-8443-订阅入口)。只开放必要入口，独立验证首次导入、启用后同步和真实转发。
 
 域名示例一律使用 `sub.example.com`、`node.example.com`，实际值私下填写。需要 A/AAAA、证书、续期和客户端 bootstrap 的独立验证；不提供当前服务器的域名、IP 或证书私钥。
 
@@ -59,7 +56,7 @@ Administration:
 | [php-upload-progress-hardening.ini](../templates/php-upload-progress-hardening.ini) | 复制到私有应用目录，通过只读单文件挂载关闭不用的 PHP 原生上传进度 | 替代 PHP 修复版本，或覆盖整个扩展 INI 目录 |
 | [clash-dns-policy.yaml](../templates/clash-dns-policy.yaml) | XBoard 的完整 Clash/Mihomo 订阅模板中合并 DNS 字段 | 当完整客户端配置导入，或清空其他 DNS 配置 |
 | [clash-ai-rules.yaml](../templates/clash-ai-rules.yaml) | 同一订阅模板；插入到宽泛直连/国内/兜底规则之前 | 替代用户节点、策略组或完整规则集 |
-| [xboard-subscribe.nginx.conf](../templates/xboard-subscribe.nginx.conf) | nginx `http` 配置；仅订阅路径的基线反代 | 当作 HTTPS 或 stream 共用 443 配置直接使用 |
+| [共享 443 四层入口](../templates/xboard-shared443.stream.conf.example) + [内部 HTTPS 订阅站点](../templates/xboard-subscription-tls.conf.example) | Nginx 公网统一入口；订阅和节点共用 443 | 缺少证书、透明回程或端口保护时直接上线 |
 | [scholar-nat64.json](../templates/scholar-nat64.json) | 符合条件的节点原生配置；见 [Scholar 文档](03-google-scholar.md) | 未经同意替换全部出站或承诺绕过 Google 限制 |
 
 最终仍交付订阅链接，而不是要求用户导入这几个文件。公开片段没有用户 UUID、REALITY 密钥或 token，必须由该部署的 XBoard 根据用户授权动态生成节点。
