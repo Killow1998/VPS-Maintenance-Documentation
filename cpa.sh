@@ -298,13 +298,13 @@ main() {
   proxy="${selection#*$'\n'}"
   source=$(curl -q -fsS --proxy "$proxy" --noproxy '' --proto '=https' \
     --location --max-redirs 0 --connect-timeout 10 --max-time 60 \
-    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/0e3ef16663ccf4398bc67a1e3f9998af57d47982/scripts/cpa/quota.sh') || {
+    'https://raw.githubusercontent.com/Killow1998/VPS-Maintenance-Documentation/e9cd8b1630a78ac90f09695b49fbf3e73185e824/scripts/cpa/quota.sh') || {
     printf '%s\n' 'Client download failed; no direct fallback.' >&2
     return 1
   }
   # Command substitution strips trailing LF bytes; hash that exact representation.
   digest=$(printf '%s' "$source" | "$python" -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-  if [[ "$digest" != '5d456315dfe83a8c0998e338d441c8012d492d11b64820a9e8ed90a06c7014b6' ]]; then
+  if [[ "$digest" != '33a4e6486182a64fa888b37f04df5adc612b3349b45f6eb71505c032cd1eb8c1' ]]; then
     printf '%s\n' 'Client SHA256 mismatch; nothing was executed.' >&2
     return 1
   fi
