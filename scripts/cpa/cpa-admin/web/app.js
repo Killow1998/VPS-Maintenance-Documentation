@@ -118,7 +118,7 @@ function resetUnavailableReason(a) {
   if (!live) return "演示模式不能兑换 reset";
   if (!a.enabled) return "账号已停用";
   if (Date.parse(a.retry_at) > Date.now()) return "额度查询等待重试，倒计时结束后再试";
-  if (a.stale) return quotaBackoff(a) ? "额度查询等待重试，倒计时结束后再试" : "当前为旧快照，请刷新额度后再试";
+  if (a.stale) return quotaBackoff(a) ? "额度查询等待重试，倒计时结束后再试" : "重置前需要重新确认额度";
   if (a.reset_pending) return "上次重置结果未确认，请核对官方状态，勿重复兑换";
   if (a.resets?.status !== "ok") return "官方 reset 信息未取得，请刷新额度";
   if (!a.resets.eligible) return "官方未确认该账号符合 reset 使用条件";
@@ -192,19 +192,19 @@ function renderAccounts() {
       const percent = value.remaining_percent;
       const windowName = ({five_hour: "5 小时", seven_day: "7 天", seven_day_sonnet: "Sonnet 7 天", seven_day_opus: "Opus 7 天", seven_day_fable: "Fable 7 天"})[key] || key;
       if (percent === null || !Number.isFinite(percent)) return `<div class="account-unknown">${esc(windowName)}额度未知</div>`;
-      const kind = a.stale ? "stale" : percent <= 15 ? "critical" : percent <= 40 ? "low" : "";
-      return `<div class="quota-row"><div class="quota-line"><span>${esc(windowName)}剩余额度${a.stale ? " · 旧值" : ""}</span><strong class="${kind}">${esc(percent)}%</strong></div><progress class="${kind}" max="100" value="${esc(percent)}" aria-label="${esc(a.name + windowName)}剩余额度 ${esc(percent)}%"></progress><div class="reset">${value.resets_at ? `重置 ${esc(timestamp(value.resets_at))}（${esc(duration(value.resets_at))}）` : "重置时间未知"}</div></div>`;
+      const kind = !a.enabled ? "stale" : percent <= 15 ? "critical" : percent <= 40 ? "low" : "";
+      return `<div class="quota-row"><div class="quota-line"><span>${esc(windowName)}剩余额度</span><strong class="${kind}">${esc(percent)}%</strong></div><progress class="${kind}" max="100" value="${esc(percent)}" aria-label="${esc(a.name + windowName)}剩余额度 ${esc(percent)}%"></progress><div class="reset">${value.resets_at ? `重置 ${esc(timestamp(value.resets_at))}（${esc(duration(value.resets_at))}）` : "重置时间未知"}</div></div>`;
     }).join("") : `<div class="account-unknown">${esc(!a.enabled ? "账号已停用" : a.quota_reason === "observer_unavailable" ? "额度查询服务暂不可用" : "尚无额度数据")}</div>`;
     const reasons = {observer_unavailable: "额度查询服务暂不可用", missing_scope: "额度授权缺少 profile 权限", upstream_http_429: "额度查询被限流", quota_backoff: "额度查询等待重试", quota_awaiting_sample: "等待下一次额度采集", upstream_http_401: "额度授权已失效", upstream_http_403: "额度查询被拒绝", quota_lookup_failed: "额度采集失败", credential_refresh_failed: "额度凭据刷新失败", quota_identity_mismatch: "额度授权账号不匹配", quota_source_missing: "缺少额度授权"};
-    const notice = a.stale && windows.length ? `${reasons[a.quota_reason] || "等待更新"} · 保留上次额度` : a.quota_status === "unavailable" ? reasons[a.quota_reason] || "额度采集失败" : "";
-    const updated = a.as_of ? `更新 ${timestamp(a.as_of)}` : "";
+    const notice = reasons[a.quota_reason] || (a.quota_status === "unavailable" ? "额度采集失败" : "");
+    const updated = a.as_of ? `上次采集 ${timestamp(a.as_of)}` : "";
     const waitingForSample = a.quota_reason === "quota_awaiting_sample";
     const nextCheck = waitingForSample ? a.next_poll_at : a.retry_at;
     const retry = Date.parse(nextCheck) > Date.now() ? ` · ${waitingForSample ? "下次采集" : "重试"} ${timestamp(nextCheck)}（${duration(nextCheck)}）` : "";
     const routing = a.routing || {};
     const unknownQuota = !windows.length || windows.some(([, w]) => !Number.isFinite(w.remaining_percent));
-    const availability = !a.enabled ? "账号已停用" : a.stale ? "等待额度更新" : routing.blocked ? "调用暂不可用" : Object.values(a.windows || {}).some((w) => w.remaining_percent === 0) ? "部分额度已用完" : unknownQuota ? "部分额度未知" : "可调用";
-    const resetRows = (a.resets?.grants || []).map((g) => `<div class="grant-row"><span>${esc(grantName(g))} · ${g.resets_left}/${g.resets_total} 次${a.stale ? " · 旧值" : ""}</span><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></div>`).join("");
+    const availability = !a.enabled ? "账号已停用" : a.stale ? (windows.length ? "额度见采集时间" : "尚无读数") : routing.blocked ? "调用暂不可用" : Object.values(a.windows || {}).some((w) => w.remaining_percent === 0) ? "部分额度已用完" : unknownQuota ? "部分额度未知" : "可调用";
+    const resetRows = (a.resets?.grants || []).map((g) => `<div class="grant-row"><span>${esc(grantName(g))} · ${g.resets_left}/${g.resets_total} 次</span><small>${g.ends_at ? `到期 ${esc(timestamp(g.ends_at))}（${esc(duration(g.ends_at))}）` : "无到期时间"}</small></div>`).join("");
     const resetReason = resetUnavailableReason(a);
     const resets = `<div class="reset-grants">${a.resets?.status === "ok" ? resetRows || "暂无官方 reset" : "官方 reset 信息未取得"}<button class="button subtle" data-reset-account="${esc(a.id)}" ${resetReason ? `disabled aria-describedby="reset-status-${esc(a.id)}"` : ""}>重置 Claude 额度</button>${resetReason ? `<p class="reset" id="reset-status-${esc(a.id)}">${esc(resetReason)}</p>` : ""}</div>`;
     return `<article class="account-card"><div class="account-title"><div><div class="account-name">${esc(a.name)}</div><div class="account-plan">${esc(a.plan)}${a.route_ready === false ? " · 路由待配置" : ""} · ${esc(availability)}</div></div><span class="status ${a.enabled ? "" : "offline"}"><i></i>${a.enabled ? "启用" : "停用"}</span></div>${quota}${resets}<div class="account-updated ${notice ? "quota-warning" : ""}">${esc([notice, updated].filter(Boolean).join(" · ") + retry)}</div></article>`;
@@ -261,9 +261,7 @@ async function refreshQuota(manual = false) {
     const {accounts, ...meta} = snapshot;
     state.quota = meta;
     const limited = snapshot.accounts.some((a) => a.enabled && quotaBackoff(a));
-    const stale = snapshot.accounts.some((a) => a.enabled && a.stale);
     quotaError = limited ? "部分账号额度查询等待重试；其他账号可继续刷新。"
-      : stale ? "本次未取得全部最新额度，保留旧值；请查看账号卡片中的原因。"
       : manual && answer.status === "busy" ? "后台正在采集，本次未发起新查询。"
       : manual && answer.status === "throttled" ? "查询间隔未到，本次未发起新查询；请等待按钮倒计时。" : "";
   } catch (_) {

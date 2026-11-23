@@ -554,24 +554,23 @@ function Show-Usage($Data, [string]$Selected = '1h', [int]$Page = 0, [bool]$Page
 function Show-Quota($Data) {
     $accounts = @($data.accounts)
     $enabled = @($accounts | Where-Object { $_.enabled -eq $true }).Count
-    $fresh = @($accounts | Where-Object { $_.enabled -eq $true -and $_.stale -eq $false }).Count
     $checked = Get-QuotaTime $data.checked_at
     $checkedText = if ($null -ne $checked) { $checked.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') } else { '未知' }
-    Write-Host "匿名号池 · 剩余额度`n$($accounts.Count) 个账号 · $enabled 启用 · $fresh 新鲜 · 更新 ${checkedText}（北京）"
+    Write-Host "匿名号池 · 剩余额度`n$($accounts.Count) 个账号 · $enabled 启用 · 更新 ${checkedText}（北京）"
     if ($accounts.Count -eq 0) { Write-Host '暂无账号额度，请检查 observer 和上游授权。' }
     $barSize = 20; $index = 0
     foreach ($account in $accounts) {
         $index++
         $identity = if ($account.id -cmatch '^account-[0-9a-f]{12}$') { $account.id } else { 'account-{0:00}' -f $index }
-        $stale = $account.enabled -ne $true -or $account.stale -ne $false
-        $state = if ($account.enabled -ne $true) { '已禁用' } elseif ($stale) { '旧值 / 未知' } else { '正常' }
-        Write-Host "`n$identity · $state"
+        $disabled = $account.enabled -ne $true
+        $state = if ($disabled) { ' · 已禁用' } else { '' }
+        Write-Host "`n$identity$state"
         $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
         $wait = Get-QuotaWaitLabel $account
         if ($wait) { Write-Host ('  ' + $wait) }
         elseif ($rows.Count -eq 0) { Write-Host '  暂无额度窗口' }
         $asOf = Get-QuotaTime $account.as_of
-        if ($stale -and $rows.Count -and $null -ne $asOf) {
+        if ($rows.Count -and $null -ne $asOf) {
             Write-Host ('  上次采集 ' + $asOf.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + '（北京）')
         }
         foreach ($row in $rows) {
@@ -579,7 +578,7 @@ function Show-Quota($Data) {
             $filled = if ($null -ne $value) { [int][Math]::Floor($barSize * $value / 100 + 0.5) } else { 0 }
             $bar = '[' + ('█' * $filled) + ('░' * ($barSize - $filled)) + ']'
             $percent = if ($null -ne $value) { $value.ToString('0.0', [Globalization.CultureInfo]::InvariantCulture).PadLeft(5) + '%' } else { '  未知' }
-            $color = if ($stale -or $null -eq $value) { 'DarkGray' } elseif ($value -gt 50) { 'Green' } elseif ($value -gt 20) { 'Yellow' } else { 'Red' }
+            $color = if ($disabled -or $null -eq $value) { 'DarkGray' } elseif ($value -gt 50) { 'Green' } elseif ($value -gt 20) { 'Yellow' } else { 'Red' }
             Write-Host ('  ' + (Get-WindowLabel $row.Name) + ' ') -NoNewline
             if (-not [bool]$env:NO_COLOR) {
                 Write-Host "$bar $percent" -ForegroundColor $color -NoNewline
@@ -587,7 +586,7 @@ function Show-Quota($Data) {
             Write-Host ('  重置 ' + (Get-ResetLabel $row.Value.resets_at))
         }
     }
-    Write-Host "`n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加"
+    Write-Host "`n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=禁用或未知 · 各账号百分比不可相加"
 }
 
 function Get-CpaData($Base, $Headers, $Path, $Scope, $Proxy) {
@@ -715,8 +714,8 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
             $quotaLines = [Collections.Generic.List[string]]::new(); $index = 0
             foreach ($account in $accounts) {
                 $index++
-                $stale = $account.enabled -ne $true -or $account.stale -ne $false
-                $state = if ($account.enabled -ne $true) { '禁用' } elseif ($stale) { '旧值' } else { '' }
+                $disabled = $account.enabled -ne $true
+                $state = if ($disabled) { '禁用' } else { '' }
                 if ($Panel -eq 'quota') {
                     $identity = if ($account.id -cmatch '^account-[0-9a-f]{12}$') { $account.id } else { 'account-{0:00}' -f $index }
                     $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}  {2}" -f $index, $identity, $state) 37))
@@ -725,7 +724,7 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
                 $wait = Get-QuotaWaitLabel $account
                 if ($wait) { $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}" -f $index, $wait) 93)) }
                 elseif (-not $rows.Count) { $quotaLines.Add((Get-CpaTint ("A{0:00}  暂无额度窗口" -f $index) 90)) }
-                if ($Panel -eq 'quota' -and $stale -and $rows.Count) {
+                if ($rows.Count -and ($Panel -eq 'quota' -or $account.stale)) {
                     $asOf = Get-QuotaTime $account.as_of
                     if ($null -ne $asOf) {
                         $quotaLines.Add((Get-CpaTint ('     上次采集 ' + $asOf.ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + '（北京）') 90))
@@ -733,7 +732,7 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
                 }
                 foreach ($row in $rows) {
                     $value = Get-Remaining $row.Value.remaining_percent
-                    $color = if ($stale -or $null -eq $value) { 90 } elseif ($value -gt 50) { 92 } elseif ($value -gt 20) { 93 } else { 91 }
+                    $color = if ($disabled -or $null -eq $value) { 90 } elseif ($value -gt 50) { 92 } elseif ($value -gt 20) { 93 } else { 91 }
                     $size = if ($Width -ge 100) { 24 } else { 16 }
                     $filled = if ($null -eq $value) { 0 } else { [int][Math]::Floor($size * $value / 100 + .5) }
                     $bar = (Get-CpaTint ('█' * $filled) $color) + (Get-CpaTint ('░' * ($size - $filled)) 90)

@@ -78,9 +78,8 @@ def quota_bar(value, size=24):
 
 
 def quota_lines(data, size=100):
-    fresh = data.get("accounts_with_fresh_quota", 0)
-    result = [f"号池 {data.get('accounts_total', 0)} 个账号 · {data.get('accounts_enabled', 0)} 启用 · {fresh} 有新鲜额度",
-              "更新 " + beijing(data.get("checked_at")) + (" · 部分数据过时/未知" if data.get("stale", True) else " · 数据新鲜"), ""]
+    result = [f"号池 {data.get('accounts_total', 0)} 个账号 · {data.get('accounts_enabled', 0)} 启用",
+              "更新 " + beijing(data.get("checked_at")), ""]
     for name, window in data.get("windows", {}).items():
         lo, hi = window.get("min_remaining_percent"), window.get("max_remaining_percent")
         label = quota_label(name)
@@ -91,17 +90,16 @@ def quota_lines(data, size=100):
     if not data.get("accounts"):
         result.append("尚未取得账号额度，请检查 observer 与上游授权。")
     for account in data.get("accounts", []):
-        state = "已禁用" if not account.get("enabled") else "新鲜" if not account.get("stale", True) else "过时/未知"
+        state = "已禁用" if not account.get("enabled") else "上次采集 " + beijing(account["as_of"]) if account.get("as_of") else "尚无采样时间"
         result.append(str(account.get("email") or account.get("id", "身份未知")) + " · " + state)
         if not account.get("windows"):
             result.append("  暂无额度窗口 · " + str(account.get("reason") or account.get("status") or "未知"))
         for name, window in account.get("windows", {}).items():
             label = cell(quota_label(name), 16)
-            suffix = " 旧值" if account.get("stale", True) else ""
             remaining = remaining_value(window.get("remaining_percent"))
             value = "未知" if remaining is None else f"{remaining:.1f}%"
             bar_size = max(8, min(24, size - 66))
-            result.append(f"  {label} {quota_bar(remaining, bar_size)} {cell(value, 7)} 重置 {reset_label(window.get('resets_at'))}{suffix}")
+            result.append(f"  {label} {quota_bar(remaining, bar_size)} {cell(value, 7)} 重置 {reset_label(window.get('resets_at'))}")
         result.append("")
     result.append("█ 剩余  ░ 已用 · 时间为北京时间 · 各账号百分比不可相加")
     return result
