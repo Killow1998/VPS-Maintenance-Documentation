@@ -336,8 +336,8 @@ def cell(text, size=16):
     return result + " " * (size - used)
 
 
-def tone(text, value, stale):
-    code = 90 if stale or value is None else 32 if value > 50 else 33 if value > 20 else 31
+def tone(text, value, disabled):
+    code = 90 if disabled or value is None else 32 if value > 50 else 33 if value > 20 else 31
     return f"\033[{code}m{text}\033[0m" if COLOR else text
 
 
@@ -663,10 +663,9 @@ def render_overview(data, selected="1h", page=0, paged=False):
 def render_quota(data):
     accounts = [a for a in data["accounts"] if isinstance(a, dict)]
     enabled = sum(a.get("enabled") is True for a in accounts)
-    fresh = sum(a.get("enabled") is True and a.get("stale") is False for a in accounts)
     checked = timestamp(data.get("checked_at"))
     checked_text = checked.astimezone(BEIJING).strftime("%m-%d %H:%M") if checked else "未知"
-    print(f"匿名号池 · 剩余额度\n{len(accounts)} 个账号 · {enabled} 启用 · {fresh} 新鲜 · 更新 {checked_text}（北京）")
+    print(f"匿名号池 · 剩余额度\n{len(accounts)} 个账号 · {enabled} 启用 · 更新 {checked_text}（北京）")
     bar_size = max(8, min(24, shutil.get_terminal_size((100, 24)).columns - 66))
     if not accounts:
         print("暂无账号额度，请检查 observer 和上游授权。")
@@ -675,9 +674,7 @@ def render_quota(data):
         if not isinstance(identity, str) or not re.fullmatch(r"account-[0-9a-f]{12}", identity):
             identity = f"account-{index:02d}"
         active = account.get("enabled") is True
-        stale = not active or account.get("stale") is not False
-        state = "已禁用" if not active else "旧值 / 未知" if stale else "正常"
-        print(f"\n{identity} · {state}")
+        print(f"\n{identity}" + ("" if active else " · 已禁用"))
         windows = account.get("windows")
         windows = windows if isinstance(windows, dict) else {}
         rows = [(n, w) for n, w in windows.items() if WINDOW.fullmatch(n) and isinstance(w, dict)]
@@ -686,7 +683,7 @@ def render_quota(data):
             print(f"  {wait}")
         elif not rows:
             print("  暂无额度窗口")
-        if stale and rows and timestamp(account.get("as_of")):
+        if rows and timestamp(account.get("as_of")):
             print(f"  上次采集 {beijing(account['as_of'])}（北京）")
         for name, window in rows:
             value = window.get("remaining_percent")
@@ -695,9 +692,9 @@ def render_quota(data):
             filled = int(bar_size * value / 100 + .5) if value is not None else 0
             bar = "[" + "█" * filled + "░" * (bar_size - filled) + "]"
             percent = f"{value:5.1f}%" if value is not None else "  未知"
-            meter = tone(bar + " " + percent, value, stale)
+            meter = tone(bar + " " + percent, value, not active)
             print(f"  {cell(label(name))} {meter}  重置 {reset_label(window.get('resets_at'))}")
-    print("\n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=旧值/未知 · 各账号百分比不可相加")
+    print("\n█ 剩余  ░ 已用 · 时间为北京时间 · 灰色=禁用或未知 · 各账号百分比不可相加")
 
 
 def tint(text, color=97):
@@ -740,8 +737,8 @@ def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", wi
         else:
             quota_lines = []
             for index, account in enumerate(accounts, 1):
-                stale = account.get("enabled") is not True or account.get("stale") is not False
-                state = "禁用" if account.get("enabled") is not True else "旧值" if stale else ""
+                disabled = account.get("enabled") is not True
+                state = "禁用" if disabled else ""
                 if panel == "quota":
                     identity = account.get("id", "")
                     if not isinstance(identity, str) or not re.fullmatch(r"account-[0-9a-f]{12}", identity):
@@ -755,13 +752,13 @@ def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", wi
                     quota_lines.append(tint(f"A{index:02d}  {wait}", 93))
                 elif not rows:
                     quota_lines.append(tint(f"A{index:02d}  暂无额度窗口", 90))
-                if panel == "quota" and stale and rows and timestamp(account.get("as_of")):
+                if rows and timestamp(account.get("as_of")) and (panel == "quota" or account.get("stale")):
                     quota_lines.append(tint(f"     上次采集 {beijing(account['as_of'])}（北京）", 90))
                 for name, row in rows:
                     value = row.get("remaining_percent")
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
                         value = None
-                    color = 90 if stale or value is None else 92 if value > 50 else 93 if value > 20 else 91
+                    color = 90 if disabled or value is None else 92 if value > 50 else 93 if value > 20 else 91
                     size = 24 if width >= 100 else 16
                     filled = int(size * value / 100 + .5) if value is not None else 0
                     bar = tint("█" * filled, color) + tint("░" * (size - filled), 90)

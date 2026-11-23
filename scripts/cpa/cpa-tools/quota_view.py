@@ -23,8 +23,8 @@ class QuotaView:
             except curses.error:
                 pass
 
-    def tone(self, value, stale=False):
-        if stale or value is None:
+    def tone(self, value, disabled=False):
+        if disabled or value is None:
             return curses.A_DIM
         return self.colors.get("good" if value > 50 else "warning" if value > 20 else "low", curses.A_BOLD)
 
@@ -51,7 +51,7 @@ class QuotaView:
         self.put(0, 2, "剩余额度", curses.A_BOLD)
         self.put(0, 17, "管理员 · 账号号池" if private else "匿名号池", curses.A_DIM)
         self.put(1, 2, f"{self.data.get('accounts_total', 0)} 个账号  ·  {self.data.get('accounts_enabled', 0)} 启用  ·  "
-                 f"{self.data.get('accounts_with_fresh_quota', 0)} 新鲜  ·  更新 {beijing(self.data.get('checked_at'))}", curses.A_DIM)
+                 f"更新 {beijing(self.data.get('checked_at'))}", curses.A_DIM)
         bar_x = 22
         bar_size = max(8, min(36, width - 65))
         percent_x = bar_x + bar_size + 3
@@ -65,13 +65,13 @@ class QuotaView:
         for y, (kind, item) in enumerate(rows[self.offset:self.offset + visible], 5):
             if kind == "account":
                 identity = item.get("email") or item.get("id") or "身份未知"
-                state = "已禁用" if not item.get("enabled") else "旧值 / 过时" if item.get("stale", True) else "正常"
-                self.put(y, 2, cell(identity, width - 22), curses.A_BOLD)
-                self.put(y, width - 18, state, curses.A_DIM if state != "正常" else self.colors.get("good", 0))
+                state = "已禁用" if not item.get("enabled") else "上次采集 " + beijing(item["as_of"]) if item.get("as_of") else "尚无采样时间"
+                self.put(y, 2, cell(identity, width - 33), curses.A_BOLD)
+                self.put(y, width - 29, state, curses.A_NORMAL)
             elif kind == "window":
                 account, name, window = item
                 value = remaining_value(window.get("remaining_percent"))
-                stale = account.get("stale", True) or not account.get("enabled")
+                disabled = not account.get("enabled")
                 self.put(y, 3, cell(quota_label(name), 17))
                 self.put(y, bar_x - 1, "[", curses.A_DIM)
                 self.put(y, bar_x + bar_size, "]", curses.A_DIM)
@@ -80,8 +80,8 @@ class QuotaView:
                     self.put(y, bar_x + max(0, (bar_size - 4) // 2), "未知", curses.A_DIM)
                 else:
                     filled = int(bar_size * value / 100 + .5)
-                    self.put(y, bar_x, "█" * filled, self.tone(value, stale))
-                self.put(y, percent_x, "未知" if value is None else f"{value:5.1f}%", self.tone(value, stale))
+                    self.put(y, bar_x, "█" * filled, self.tone(value, disabled))
+                self.put(y, percent_x, "未知" if value is None else f"{value:5.1f}%", self.tone(value, disabled))
                 self.put(y, reset_x, reset_label(window.get("resets_at")), curses.A_DIM)
             elif kind == "empty":
                 text = "已禁用，暂无窗口" if item and not item.get("enabled") else "暂无额度数据"
@@ -89,7 +89,7 @@ class QuotaView:
                     text += " · " + str(item["reason"])
                 self.put(y, 3, text, curses.A_DIM)
         self.put(height - 3, 2, self.error or ("更新快照…" if self.loading else
-                 "█ 剩余  ░ 已用   绿 >50%   黄 >20%   红 ≤20%   灰=旧值/未知"), curses.A_DIM)
+                 "█ 剩余  ░ 已用   绿 >50%   黄 >20%   红 ≤20%   灰=禁用或未知"), curses.A_DIM)
         self.put(height - 2, 2, "↑↓ / PgUp / PgDn 滚动   r 更新   Enter / Esc 返回", curses.A_DIM)
         if len(rows) > visible:
             self.put(0, width - 15, f"{self.offset + 1}–{min(self.offset + visible, len(rows))}/{len(rows)}", curses.A_DIM)
