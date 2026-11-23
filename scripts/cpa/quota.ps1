@@ -551,6 +551,15 @@ function Show-Usage($Data, [string]$Selected = '1h', [int]$Page = 0, [bool]$Page
     Write-Host '输入已含缓存，输出已含 reasoning；API 标价估算不代表订阅扣款；重试按多次上游执行记录。'
 }
 
+function Get-QuotaRows($Account) {
+    foreach ($row in $Account.windows.PSObject.Properties) {
+        if ($row.Name -cnotmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$') { continue }
+        if ($row.Name -in 'five_hour', 'seven_day' -or
+            $null -ne (Get-Remaining $row.Value.remaining_percent) -or
+            $null -ne (Get-QuotaTime $row.Value.resets_at)) { $row }
+    }
+}
+
 function Show-Quota($Data) {
     $accounts = @($data.accounts)
     $enabled = @($accounts | Where-Object { $_.enabled -eq $true }).Count
@@ -565,7 +574,7 @@ function Show-Quota($Data) {
         $disabled = $account.enabled -ne $true
         $state = if ($disabled) { ' · 已禁用' } else { '' }
         Write-Host "`n$identity$state"
-        $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
+        $rows = @(Get-QuotaRows $account)
         $wait = Get-QuotaWaitLabel $account
         if ($wait) { Write-Host ('  ' + $wait) }
         elseif ($rows.Count -eq 0) { Write-Host '  暂无额度窗口' }
@@ -720,7 +729,7 @@ function Get-CpaDashboardLines($Results, $Failures, $Views, [string]$Selected, [
                     $identity = if ($account.id -cmatch '^account-[0-9a-f]{12}$') { $account.id } else { 'account-{0:00}' -f $index }
                     $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}  {2}" -f $index, $identity, $state) 37))
                 }
-                $rows = @($account.windows.PSObject.Properties | Where-Object { $_.Name -cmatch '^(five_hour|seven_day)(_[a-z0-9_]+)?$' })
+                $rows = @(Get-QuotaRows $account)
                 $wait = Get-QuotaWaitLabel $account
                 if ($wait) { $quotaLines.Add((Get-CpaTint ("A{0:00}  {1}" -f $index, $wait) 93)) }
                 elseif (-not $rows.Count) { $quotaLines.Add((Get-CpaTint ("A{0:00}  暂无额度窗口" -f $index) 90)) }

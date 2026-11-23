@@ -660,6 +660,20 @@ def render_overview(data, selected="1h", page=0, paged=False):
     print("滚动窗口相互重叠，不可相加；总历史仅含已采集并保留的数据，可能存在采集缺口。")
 
 
+def quota_rows(account):
+    windows = account.get("windows")
+    rows = []
+    for name, window in (windows if isinstance(windows, dict) else {}).items():
+        if not WINDOW.fullmatch(name) or not isinstance(window, dict):
+            continue
+        value = window.get("remaining_percent")
+        if type(value) not in (int, float) or not 0 <= value <= 100:
+            value = None
+        if name in ("five_hour", "seven_day") or value is not None or timestamp(window.get("resets_at")):
+            rows.append((name, window, value))
+    return rows
+
+
 def render_quota(data):
     accounts = [a for a in data["accounts"] if isinstance(a, dict)]
     enabled = sum(a.get("enabled") is True for a in accounts)
@@ -675,9 +689,7 @@ def render_quota(data):
             identity = f"account-{index:02d}"
         active = account.get("enabled") is True
         print(f"\n{identity}" + ("" if active else " · 已禁用"))
-        windows = account.get("windows")
-        windows = windows if isinstance(windows, dict) else {}
-        rows = [(n, w) for n, w in windows.items() if WINDOW.fullmatch(n) and isinstance(w, dict)]
+        rows = quota_rows(account)
         wait = quota_wait_label(account)
         if wait:
             print(f"  {wait}")
@@ -685,10 +697,7 @@ def render_quota(data):
             print("  暂无额度窗口")
         if rows and timestamp(account.get("as_of")):
             print(f"  上次采集 {beijing(account['as_of'])}（北京）")
-        for name, window in rows:
-            value = window.get("remaining_percent")
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
-                value = None
+        for name, window, value in rows:
             filled = int(bar_size * value / 100 + .5) if value is not None else 0
             bar = "[" + "█" * filled + "░" * (bar_size - filled) + "]"
             percent = f"{value:5.1f}%" if value is not None else "  未知"
@@ -744,9 +753,7 @@ def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", wi
                     if not isinstance(identity, str) or not re.fullmatch(r"account-[0-9a-f]{12}", identity):
                         identity = f"account-{index:02d}"
                     quota_lines.append(tint(f"A{index:02d}  {identity}  {state}", 37))
-                account_windows = account.get("windows")
-                rows = [(name, row) for name, row in (account_windows if isinstance(account_windows, dict) else {}).items()
-                        if WINDOW.fullmatch(name) and isinstance(row, dict)]
+                rows = quota_rows(account)
                 wait = quota_wait_label(account)
                 if wait:
                     quota_lines.append(tint(f"A{index:02d}  {wait}", 93))
@@ -754,10 +761,7 @@ def dashboard_lines(results, errors, selected="1h", page=0, panel="overview", wi
                     quota_lines.append(tint(f"A{index:02d}  暂无额度窗口", 90))
                 if rows and timestamp(account.get("as_of")) and (panel == "quota" or account.get("stale")):
                     quota_lines.append(tint(f"     上次采集 {beijing(account['as_of'])}（北京）", 90))
-                for name, row in rows:
-                    value = row.get("remaining_percent")
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
-                        value = None
+                for name, row, value in rows:
                     color = 90 if disabled or value is None else 92 if value > 50 else 93 if value > 20 else 91
                     size = 24 if width >= 100 else 16
                     filled = int(size * value / 100 + .5) if value is not None else 0
