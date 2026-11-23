@@ -805,7 +805,9 @@ class Observer:
                     retry_at = self.source_backoff(source_index, identity)
                     next_poll = old.get("next_poll_at") if scheduled else None
                     current_time = dt.datetime.now(UTC)
-                    wait_for_poll = (same_binding and (same_source or interval > base_interval) and
+                    shared_sample = (source_index == index and same_binding and same_principal and
+                                     bool(cached_display.get("windows") and cached_display.get("as_of")))
+                    wait_for_poll = (same_binding and (same_source or shared_sample or interval > base_interval) and
                                      next_poll and dt.datetime.fromisoformat(next_poll) > current_time)
                     cached_fields = ("status", "reason", "resets", "routing", "stale")
                     if retry_at and dt.datetime.fromisoformat(retry_at) > current_time:
@@ -821,7 +823,10 @@ class Observer:
                         item.update(cached_display)
                         if same_source:
                             item.update({k: old[k] for k in cached_fields if k in old})
-                        if not same_source or (item["as_of"] is None and item.get("reason") is None):
+                        elif shared_sample:
+                            # Forwarding activity can update this shared credential between quota polls.
+                            item.update({k: old[k] for k in ("status", "reason", "stale") if k in old})
+                        if item["status"] == "unknown" or (item["as_of"] is None and item.get("reason") is None):
                             item.update(status="unavailable", reason="quota_awaiting_sample", stale=True)
                         item["next_poll_at"] = next_poll
                     else:

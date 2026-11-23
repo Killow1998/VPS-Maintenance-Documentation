@@ -158,11 +158,14 @@ not included in public quota responses. If a legacy snapshot has no account-name
 inventory is unavailable, an account later assigned as a helper cannot yet be identified in the
 pool counts; those counts are provisional until a successful inventory refresh.
 For the same verified source and unchanged binding, a credential revision change
-keeps the adaptive polling interval and any pending retry. If the inventory still
-matches the account identity associated with the last successful sample, retain
-its numbers and original `as_of` as stale. Those numbers do not count toward
-fresh pool aggregates and do not carry over reset grants or routing state to a
-new credential revision. A different or unverified identity cannot reuse the
+keeps the adaptive polling interval and any pending retry. When forwarding and quota
+use the same credential, forwarding can change its update timestamp between polls.
+If the account still matches, keep the sample's original status, numbers and
+`as_of` until the scheduled poll. An active upstream backoff still marks it stale.
+When a separate quota credential changes revision, any retained numbers for the
+same account remain stale until sampled again. Stale numbers do not count toward
+fresh pool aggregates. Neither case carries reset grants or routing state across
+revisions. A different or unverified identity cannot reuse the
 previous revision's sample. The next scheduled sample is reported in
 `next_poll_at`; provider backoff uses `retry_at`.
 
