@@ -114,11 +114,20 @@ last operation, so older IDs cannot be reconstructed: drain in-flight operations
 and do not replay old requests. A rollback to the old version loses per-operation protection;
 pause reset retries and inspect results. Production tests must not spend real reset grants.
 
-The bound profile credential performs official queries/redemption. CPA's cooldown reset is
-unconditional and cannot guard against concurrent model-state changes, so this observer never
-clears local cooldowns automatically. Let CPA's cooldown expire or have an administrator
-diagnose it. Unknown reported windows stay unknown; retry deadlines persist independently of
-credential metadata changes and account disable/enable cycles.
+The bound profile credential performs official queries and redemption. When a general quota
+grant returns `reset`, the observer records that result before attempting to resume routing.
+It reads the upstream quota again and requires room in both the five-hour and seven-day
+windows, with no reported exhausted model window. It can then ask CPA to clear the same
+credential-wide quota cooldown seen before redemption, including model cooldowns from that
+limit. CPA checks the credential state under lock; a new cooldown, an independent model
+error, or a changed credential leaves routing alone.
+
+This requires the [conditional cooldown patch](patches/cpa-v8.0.42-conditional-quota-reset.patch)
+for CPA v8.0.42. It can be applied alongside the cache TTL patch. Check both patches against
+the upstream source and run the existing auth and management package tests before building.
+On unpatched CPA, the observer leaves routing unchanged; it never falls back to the
+unconditional manual reset API. A routing failure does not undo or repeat a redeemed grant.
+Unknown reported windows stay unknown; observer retry deadlines are not cleared by redemption.
 Before a reset POST, the live profile email and any email on the selected logical account must
 match the configured expected identity. A missing or mismatched identity stops the operation.
 Reservations and operation IDs are shared by the HMAC of that identity, so logical accounts and

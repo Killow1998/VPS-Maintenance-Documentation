@@ -4,6 +4,7 @@ import json
 import re
 import time
 import uuid
+from urllib.error import HTTPError
 
 UTC = dt.timezone.utc
 ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -96,6 +97,40 @@ class QuotaActions:
         if not item.get("unknown_windows") and recoverable(entry, item["windows"]):
             # CPA's reset is unconditional; a snapshot cannot rule out a new model cooldown.
             item["routing"]["recovery"] = "manual"
+
+    def recover_after_redemption(self, entry, source, account_id):
+        cooldowns = entry.get("cooldowns") or []
+        updated_at = entry.get("updated_at")
+        if (not isinstance(updated_at, str) or not updated_at
+                or not any(c.get("scope") == "credential" and c.get("reason") == "credential_quota"
+                           for c in cooldowns)):
+            return "unchanged"
+        try:
+            quota = self.observer.query_quota(source["auth_index"], account_id)
+            if not isinstance(quota, dict):
+                return "quota_unverified"
+            for key in ("five_hour", "seven_day"):
+                window = quota.get(key)
+                percent = window.get("utilization") if isinstance(window, dict) else None
+                if type(percent) not in (float, int) or not 0 <= percent < 100:
+                    return "quota_unverified"
+            if any(type(value.get("utilization")) in (float, int) and value["utilization"] >= 100
+                   for key, value in quota.items() if key.startswith(("five_hour_", "seven_day_"))
+                   and isinstance(value, dict)):
+                return "quota_unverified"
+            result = self.observer.backend.request("/v8/management/routing/cooldown/reset-after-redemption",
+                                                   {"auth_index": entry["auth_index"],
+                                                    "expected_updated_at": updated_at})
+            if result.get("status") == "ok" and result.get("auth_index") == entry["auth_index"]:
+                return "recovered"
+        except HTTPError as error:
+            if error.code == 404:
+                return "unsupported"
+            if error.code == 409:
+                return "cooldown_changed"
+        except Exception:
+            return "unverified"
+        return "unverified"
 
     @staticmethod
     def _get(con, key):
@@ -365,4 +400,8 @@ class QuotaActions:
         except Exception:
             pass
         self._finish(account_id, operation)
+        if (operation["result"] == "reset" and grant["kind"] != "fable"
+                and {"five_hour", "seven_day"}.intersection(grant["clears"])):
+            operation["routing_recovery"] = self.recover_after_redemption(entry, source, account_id)
+            self._finish(account_id, operation)
         return (operation, True) if include_fresh else operation

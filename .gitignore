@@ -84,6 +84,7 @@ scripts/cpa/cpa-observer/*
 !scripts/cpa/cpa-observer/patches/
 scripts/cpa/cpa-observer/patches/*
 !scripts/cpa/cpa-observer/patches/cpa-v8.0.42-cache-ttl.patch
+!scripts/cpa/cpa-observer/patches/cpa-v8.0.42-conditional-quota-reset.patch
 !scripts/cpa/cpa-tools/README.md
 !scripts/cpa/cpa-tools/api_keys.py
 !scripts/cpa/cpa-tools/claude_auth.py
